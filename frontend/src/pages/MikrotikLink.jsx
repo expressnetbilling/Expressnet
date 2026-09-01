@@ -287,6 +287,16 @@ export default function MikrotikSettings() {
                 Copy
               </button>
             </div>
+            <div className="grid gap-3 border-t border-slate-700 bg-slate-900 px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold leading-5 text-slate-50">Before provisioning, confirm the router has internet from the WAN port</p>
+                <pre className="mt-2 overflow-auto whitespace-pre-wrap break-all rounded-md bg-slate-950/70 px-3 py-2 text-xs leading-5 text-slate-100">/ip dhcp-client add interface=ether1 disabled=no add-default-route=yes use-peer-dns=yes; /ping 8.8.8.8 count=4</pre>
+              </div>
+              <button type="button" className="btn-secondary justify-center border-slate-700 bg-slate-950 text-white hover:bg-slate-700 sm:w-auto" onClick={() => copy('/ip dhcp-client add interface=ether1 disabled=no add-default-route=yes use-peer-dns=yes; /ping 8.8.8.8 count=4', 'WAN preflight command')}>
+                <Clipboard size={15} />
+                Copy
+              </button>
+            </div>
             <div className="grid gap-3 px-4 pt-4 sm:grid-cols-[1fr_auto] sm:items-center">
               <span className="text-xs font-bold uppercase tracking-wide text-slate-300">{provision?.mode === 'migration' ? 'Migration export command' : 'Router terminal'}</span>
               <button type="button" className="btn-secondary justify-center border-slate-700 bg-slate-800 text-white hover:bg-slate-700 sm:w-auto" onClick={() => copy(provision?.command, 'Command')} disabled={!provision?.command}>
