@@ -277,26 +277,6 @@ export default function MikrotikSettings() {
             </span>
           </label>
           <div className="mt-4 overflow-hidden rounded-lg border border-slate-800 bg-slate-950 text-white shadow-sm">
-            <div className="grid gap-3 bg-slate-800 px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
-              <div className="min-w-0">
-                <p className="text-sm font-semibold leading-5 text-slate-50">Run the command below in the MikroTik terminal if the device mode is not set to advanced mode</p>
-                <pre className="mt-2 overflow-auto whitespace-pre-wrap break-all rounded-md bg-slate-900/70 px-3 py-2 text-xs leading-5 text-slate-100">/system/device-mode/update mode=advanced</pre>
-              </div>
-              <button type="button" className="btn-secondary justify-center border-slate-700 bg-slate-900 text-white hover:bg-slate-700 sm:w-auto" onClick={() => copy('/system/device-mode/update mode=advanced', 'Advanced mode command')}>
-                <Clipboard size={15} />
-                Copy
-              </button>
-            </div>
-            <div className="grid gap-3 border-t border-slate-700 bg-slate-900 px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
-              <div className="min-w-0">
-                <p className="text-sm font-semibold leading-5 text-slate-50">Before provisioning, confirm the router has internet from the WAN port</p>
-                <pre className="mt-2 overflow-auto whitespace-pre-wrap break-all rounded-md bg-slate-950/70 px-3 py-2 text-xs leading-5 text-slate-100">/ip dhcp-client add interface=ether1 disabled=no add-default-route=yes use-peer-dns=yes; /ping 8.8.8.8 count=4</pre>
-              </div>
-              <button type="button" className="btn-secondary justify-center border-slate-700 bg-slate-950 text-white hover:bg-slate-700 sm:w-auto" onClick={() => copy('/ip dhcp-client add interface=ether1 disabled=no add-default-route=yes use-peer-dns=yes; /ping 8.8.8.8 count=4', 'WAN preflight command')}>
-                <Clipboard size={15} />
-                Copy
-              </button>
-            </div>
             <div className="grid gap-3 px-4 pt-4 sm:grid-cols-[1fr_auto] sm:items-center">
               <span className="text-xs font-bold uppercase tracking-wide text-slate-300">{provision?.mode === 'migration' ? 'Migration export command' : 'Router terminal'}</span>
               <button type="button" className="btn-secondary justify-center border-slate-700 bg-slate-800 text-white hover:bg-slate-700 sm:w-auto" onClick={() => copy(provision?.command, 'Command')} disabled={!provision?.command}>
@@ -314,6 +294,16 @@ export default function MikrotikSettings() {
             {provision?.mode === 'migration' && (
               <p className="px-4 pb-4 text-xs font-semibold text-amber-200">This command only saves the current router data into Expressnet. Turn migration off afterward to generate the normal provisioning command.</p>
             )}
+            <div className="grid gap-3 border-t border-slate-700 bg-slate-800 px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold leading-5 text-slate-50">Run the command below in the MikroTik terminal if the device mode is not set to advanced mode</p>
+                <pre className="mt-2 overflow-auto whitespace-pre-wrap break-all rounded-md bg-slate-900/70 px-3 py-2 text-xs leading-5 text-slate-100">/system/device-mode/update mode=advanced</pre>
+              </div>
+              <button type="button" className="btn-secondary justify-center border-slate-700 bg-slate-900 text-white hover:bg-slate-700 sm:w-auto" onClick={() => copy('/system/device-mode/update mode=advanced', 'Advanced mode command')}>
+                <Clipboard size={15} />
+                Copy
+              </button>
+            </div>
           </div>
           {provisioningState?.status === 'completed' && (
             <div className="mt-3 grid gap-3 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-800 sm:grid-cols-2 lg:grid-cols-4">
