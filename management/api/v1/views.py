@@ -902,11 +902,17 @@ def customers(request, customer_id=None):
     tenant = request.tenant
     if method(request, "GET") and not customer_id:
         ensure_expired_customer_invoices(tenant)
-        return as_collection_response(request, list_children(f"tenants/{tenant['id']}/customers"))
+        customers_data = list_children(f"tenants/{tenant['id']}/customers")
+        for item in customers_data:
+            if not item.get("password") and item.get("radius_secret"):
+                item["password"] = item["radius_secret"]
+        return as_collection_response(request, customers_data)
     if method(request, "GET") and customer_id:
         customer = ref(f"tenants/{tenant['id']}/customers/{customer_id}").get()
         if not customer:
             return ok({"message": "Customer not found"}, 404)
+        if not customer.get("password") and customer.get("radius_secret"):
+            customer["password"] = customer["radius_secret"]
         return ok({"id": customer_id, **customer})
     if method(request, "PATCH") and customer_id:
         customer = ref(f"tenants/{tenant['id']}/customers/{customer_id}").get()

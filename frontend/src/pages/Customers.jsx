@@ -729,7 +729,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                         className="form-input pr-10"
                         value={form.password}
                         onChange={update}
-                        placeholder="Leave blank to keep current password"
+                        placeholder={form.password ? '' : 'Current password unavailable'}
                       />
                       <button
                         type="button"
@@ -740,6 +740,9 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                         {showEditPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                       </button>
                     </div>
+                    <p className="mt-1 text-xs text-slate-600">
+                      Current PPPoE password: <span className="font-mono font-semibold text-slate-900">{form.password || 'Unavailable'}</span>
+                    </p>
                     {errors.password && <p className="form-error">{errors.password}</p>}
                   </div>
                 </>
