@@ -457,9 +457,9 @@ def public_base_url(request):
     candidates = [
         os.getenv("PUBLIC_APP_URL"),
         getattr(settings, "PUBLIC_APP_URL", ""),
-        ]
+    ]
     if request_url and "localhost" not in request_url and "127.0.0.1" not in request_url:
-        candidates.insert(0, request_url)
+        candidates.append(request_url)
     if not settings.DEBUG:
         candidates = [item for item in candidates if item and "localhost" not in item and "127.0.0.1" not in item]
     configured = next((item for item in candidates if item), "")

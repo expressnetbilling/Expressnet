@@ -928,7 +928,6 @@ def customers(request, customer_id=None):
             "technician",
             "router_serial_number",
             "mikrotik_router_id",
-            "support",
             "grace_period_enabled",
             "grace_period_value",
             "grace_period_unit",
@@ -1063,8 +1062,6 @@ def customer_add(request):
         return ok({"message": "Static customers can be saved here, but MikroTik auto-provisioning is only available for PPPoE and Hotspot customers"}, 400)
     linked_routers = request.tenant.get("linked_routers") or {}
     mikrotik_router_id = str(data.get("mikrotik_router_id") or "").strip()
-    if service_type in {"pppoe", "static"} and not str(data.get("technician") or "").strip():
-        return ok({"message": "Select the technician assigned to this customer"}, 400)
     if service_type in {"pppoe", "static"} and linked_routers:
         if not mikrotik_router_id:
             return ok({"message": "Select the MikroTik for this customer"}, 400)
@@ -1124,7 +1121,6 @@ def customer_add(request):
             "technician": data.get("technician") or "",
             "router_serial_number": data.get("router_serial_number") or "",
             "mikrotik_router_id": mikrotik_router_id,
-            "support": data.get("support") or "",
             "package": data["package_name"],
             "amount_payable": amount_payable,
             "service_type": service_type,

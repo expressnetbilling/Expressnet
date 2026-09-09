@@ -16,7 +16,6 @@ const initialForm = {
   technician: '',
   router_serial_number: '',
   mikrotik_router_id: '',
-  support: '',
   package_name: '',
   service_type: 'pppoe',
   provision_mikrotik: true,
@@ -71,6 +70,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
   const [form, setForm] = useState(initialForm);
   const [errors, setErrors] = useState({});
   const [editingId, setEditingId] = useState(null);
+  const [editingOriginalPassword, setEditingOriginalPassword] = useState('');
   const [openActionsId, setOpenActionsId] = useState(null);
   const [visiblePasswords, setVisiblePasswords] = useState({});
   const [showEditPassword, setShowEditPassword] = useState(false);
@@ -283,7 +283,6 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
     if (['pppoe', 'static'].includes(selectedService)) {
       const amount = Number(form.amount_payable);
       if (!Number.isFinite(amount) || amount < 0) nextErrors.amount_payable = 'Enter a valid payable amount';
-      if (!form.technician) nextErrors.technician = 'Select the technician assigned to this customer';
       if (mikrotikRouters.length > 0 && !form.mikrotik_router_id) nextErrors.mikrotik_router_id = 'Select the MikroTik for this customer';
     }
     if (selectedService === 'pppoe' && form.grace_period_enabled) {
@@ -302,6 +301,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
   const closeModal = () => {
     setModalOpen(false);
     setEditingId(null);
+    setEditingOriginalPassword('');
     setShowEditPassword(false);
     setForm({ ...initialForm, service_type: serviceLocked || initialForm.service_type });
     setErrors({});
@@ -333,9 +333,9 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
       payload.location = form.location;
       payload.technician = form.technician;
       payload.router_serial_number = form.router_serial_number;
-      payload.support = form.support;
     }
-    if (form.password.trim()) payload.password = form.password;
+    if (!editingId && form.password.trim()) payload.password = form.password;
+    if (editingId && form.password.trim() && form.password !== editingOriginalPassword) payload.password = form.password;
     return payload;
   };
 
@@ -375,7 +375,8 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
   const editCustomer = (customer) => {
     closeActionsMenu();
     setEditingId(customer.id);
-    setShowEditPassword(false);
+    setEditingOriginalPassword(customer.password || '');
+    setShowEditPassword(true);
     setForm({
       name: customer.name || '',
       phone: customer.phone || '',
@@ -386,7 +387,6 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
       technician: customer.technician || '',
       router_serial_number: customer.router_serial_number || '',
       mikrotik_router_id: customer.mikrotik_router_id || '',
-      support: customer.support || '',
       package_name: customer.package || '',
       provision_mikrotik: serviceTypeOf(customer) !== 'static',
       service_type: serviceTypeOf(customer),
@@ -422,7 +422,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
   const exportCsv = () => {
     const headers = isHotspotOnlyPage
       ? ['name', 'phone', 'username', 'password', 'package', 'service_type', 'mikrotik_router_id', 'status', 'expiry_date']
-      : ['name', 'phone', 'location', 'username', 'password', 'amount_payable', 'package', 'service_type', 'technician', 'router_serial_number', 'mikrotik_router_id', 'support', 'status', 'expiry_date'];
+      : ['name', 'phone', 'location', 'username', 'password', 'amount_payable', 'package', 'service_type', 'technician', 'router_serial_number', 'mikrotik_router_id', 'status', 'expiry_date'];
     const csv = [headers.join(','), ...filteredCustomers.map((item) => headers.map((key) => JSON.stringify(item[key] ?? '')).join(','))].join('\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     const link = document.createElement('a');
@@ -749,14 +749,13 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                   <div>
                     <label className="form-label" htmlFor="technician">Technician who attended</label>
                     <select id="technician" name="technician" className="form-input" value={form.technician} onChange={update}>
-                      <option value="">Select technician</option>
+                      <option value="">No technician assigned</option>
                       {staff.map((member) => (
                         <option key={member.id || member.email || member.phone} value={member.id || member.name || member.phone}>
                           {member.name || member.email || member.phone}{member.phone ? ` - ${member.phone}` : ''}
                         </option>
                       ))}
                     </select>
-                    {errors.technician && <p className="form-error">{errors.technician}</p>}
                   </div>
                   <div>
                     <label className="form-label" htmlFor="router_serial_number">Router serial number</label>
@@ -776,12 +775,6 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                 </select>
                 {errors.mikrotik_router_id && <p className="form-error">{errors.mikrotik_router_id}</p>}
               </div>
-              {!isHotspotOnlyPage && (
-                <div>
-                  <label className="form-label" htmlFor="support">Support</label>
-                  <input id="support" name="support" className="form-input" value={form.support} onChange={update} />
-                </div>
-              )}
               {!serviceLocked && (
                 <div className="sm:col-span-2">
                   <label className="form-label" htmlFor="service_type">Service type</label>
