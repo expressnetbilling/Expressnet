@@ -43,6 +43,11 @@ function formatDate(value) {
   return date && !Number.isNaN(date.valueOf()) ? date.toLocaleDateString() : '-';
 }
 
+function formatLocalDateTime(value) {
+  const date = toDate(value);
+  return date && !Number.isNaN(date.valueOf()) ? date.toLocaleString() : '-';
+}
+
 function serviceTypeOf(customer) {
   return String(customer?.service_type || 'pppoe').toLowerCase();
 }
@@ -337,8 +342,10 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
       payload.technician = form.technician;
       payload.router_serial_number = form.router_serial_number;
     }
-    if (!editingId && form.password.trim()) payload.password = form.password;
-    if (editingId && form.password.trim() && form.password !== editingOriginalPassword) payload.password = form.password;
+    if (serviceType !== 'static') {
+      if (!editingId && form.password.trim()) payload.password = form.password;
+      if (editingId && form.password.trim() && form.password !== editingOriginalPassword) payload.password = form.password;
+    }
     return payload;
   };
 
@@ -710,11 +717,17 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
         <Modal title="Customer Details" onClose={() => setViewingCustomer(null)}>
           <div className="grid gap-3 sm:grid-cols-2">
             {Object.entries(viewingCustomer)
-              .filter(([key]) => key !== 'password' && key !== 'extra')
+              .filter(([key]) => ![
+                'username', 'password', 'radius_secret', 'customer_created_notification_at',
+                'customer_created_notification_result', 'customer_created_notification_status',
+                'mikrotik_router_id', 'provisioning_message', 'provisioning_status', 'extra',
+              ].includes(key))
               .map(([key, value]) => (
                 <div key={key} className="rounded-md border border-slate-200 bg-slate-50 p-3">
                   <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{key.replaceAll('_', ' ')}</p>
-                  <p className="mt-1 break-words text-sm text-slate-900">{typeof value === 'object' ? JSON.stringify(value) : String(value ?? '-')}</p>
+                  <p className="mt-1 break-words text-sm text-slate-900">
+                    {['created_at', 'updated_at'].includes(key) ? formatLocalDateTime(value) : typeof value === 'object' ? JSON.stringify(value) : String(value ?? '-')}
+                  </p>
                 </div>
               ))}
           </div>
@@ -741,7 +754,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                   <input id="location" name="location" className="form-input" value={form.location} onChange={update} />
                 </div>
               )}
-              {editingId && (
+              {editingId && activeFormService !== 'static' && (
                 <>
                   <div>
                     <label className="form-label" htmlFor="username">Username</label>

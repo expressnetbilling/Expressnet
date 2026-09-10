@@ -1050,13 +1050,17 @@ def customer_add(request):
     required = ["name", "phone", "package_name"]
     if any(not data.get(field) for field in required):
         return ok({"message": "Name, phone, and package are required"}, 400)
-    data["username"] = str(data.get("username") or "").strip() or _generate_customer_username(request.tenant["id"], data.get("name"), data.get("phone"))
-    data["password"] = str(data.get("password") or "").strip() or _generate_customer_password()
-    if any(str(c.get("username", "")).lower() == str(data["username"]).lower() for c in list_children(f"tenants/{request.tenant['id']}/customers")):
-        return ok({"message": "A customer with this username already exists"}, 409)
     service_type = str(data.get("service_type") or "hotspot").strip().lower()
     if service_type not in {"pppoe", "hotspot", "static"}:
         return ok({"message": "Customer service type must be PPPoE, Hotspot, or Static"}, 400)
+    if service_type == "static":
+        data["username"] = ""
+        data["password"] = ""
+    else:
+        data["username"] = str(data.get("username") or "").strip() or _generate_customer_username(request.tenant["id"], data.get("name"), data.get("phone"))
+        data["password"] = str(data.get("password") or "").strip() or _generate_customer_password()
+        if any(str(c.get("username", "")).lower() == str(data["username"]).lower() for c in list_children(f"tenants/{request.tenant['id']}/customers")):
+            return ok({"message": "A customer with this username already exists"}, 409)
     customer_status = str(data.get("status") or "active").strip().lower()
     if customer_status not in {"active", "inactive", "paused", "suspended"}:
         return ok({"message": "Customer status must be active, inactive, paused, or suspended"}, 400)
@@ -1077,6 +1081,7 @@ def customer_add(request):
         else:
             requested_ip = next(str(address) for address in ipaddress.ip_network("172.30.0.0/16").hosts() if str(address) not in used_ips)
         data["ip_address"] = requested_ip
+        data["username"] = f"static-{requested_ip}"
         provision = True
     linked_routers = request.tenant.get("linked_routers") or {}
     mikrotik_router_id = str(data.get("mikrotik_router_id") or "").strip()
@@ -1107,9 +1112,9 @@ def customer_add(request):
             return ok({"message": "Link a MikroTik router before provisioning customers"}, 400)
         if has_mikrotik_credentials(request.tenant):
             try:
-                if service_type in {"pppoe", "static"}:
+                if service_type == "pppoe":
                     create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
-                else:
+                elif service_type == "hotspot":
                     create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
                 upsert_customer_access(request.tenant, {**data, "service_type": service_type, "status": customer_status}, disabled=router_disabled)
                 provisioning_status = "provisioned"
@@ -1143,6 +1148,7 @@ def customer_add(request):
             "amount_payable": amount_payable,
             "service_type": service_type,
             "ip_address": data.get("ip_address") or "",
+            "ip_pool": "Expressnet-static-pool" if service_type == "static" else "",
             "provisioning_status": provisioning_status,
             "provisioning_message": provisioning_message,
             "status": customer_status,
@@ -1153,7 +1159,7 @@ def customer_add(request):
         }
     new_ref = ref(f"tenants/{request.tenant['id']}/customers").push(customer_payload)
     notification_result = None
-    if service_type in {"pppoe", "static"}:
+    if service_type == "pppoe":
         try:
             notification_result = notify_customer_created(request.tenant, customer_payload)
             ref(f"tenants/{request.tenant['id']}/customers/{new_ref.key}").update({

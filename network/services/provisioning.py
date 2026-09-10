@@ -1391,6 +1391,7 @@ def upsert_customer_access(tenant, customer, disabled=False):
                     binding_path.update(**{".id": binding[".id"], **binding_fields})
                 else:
                     binding_path.add(**binding_fields)
+            return True
         path = ("ppp", "secret") if service_type in {"pppoe", "static"} else ("ip", "hotspot", "user")
         router_path = api.path(*path)
         existing = find_router_item(api, path, customer.get("username"))
