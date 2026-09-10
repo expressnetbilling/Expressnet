@@ -94,6 +94,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
   const isHotspotOnlyPage = serviceLocked === 'hotspot';
   const hideManualAccessActions = serviceLocked === 'pppoe' || serviceLocked === 'hotspot';
   const activeFormService = serviceLocked || form.service_type || 'pppoe';
+  const isStaticView = serviceLocked === 'static' || statusFilter === 'static';
 
   const packageMap = useMemo(() => {
     return packages.reduce((map, item) => {
@@ -577,8 +578,8 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
               <th className="px-3 py-2">Name</th>
               <th className="px-3 py-2">Phone</th>
               {!isHotspotOnlyPage && <th className="px-3 py-2">Location</th>}
-              {serviceLocked !== 'static' && <th className="px-3 py-2">Username</th>}
-              {serviceLocked !== 'static' && <th className="px-3 py-2">Password</th>}
+              {!isStaticView && <th className="px-3 py-2">Username</th>}
+              {!isStaticView && <th className="px-3 py-2">Password</th>}
               {!isHotspotOnlyPage && <th className="px-3 py-2">Payable</th>}
               <th className="px-3 py-2">Package</th>
               {serviceLocked === 'static' && <th className="px-3 py-2">IP Address</th>}
@@ -600,8 +601,8 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                 <td className="table-cell px-3 font-medium text-slate-900">{customer.name}</td>
                 <td className="table-cell px-3">{customer.phone}</td>
                 {!isHotspotOnlyPage && <td className="table-cell px-3">{customer.location || '-'}</td>}
-                {serviceLocked !== 'static' && <td className="table-cell px-3">{customer.username}</td>}
-                {serviceLocked !== 'static' && <td className="table-cell px-3">
+                {!isStaticView && <td className="table-cell px-3">{customer.username}</td>}
+                {!isStaticView && <td className="table-cell px-3">
                   <span className="inline-flex items-center gap-2">
                     <span className="min-w-[80px] font-mono text-[11px]">{visiblePasswords[customer.id] ? (customer.password || '-') : customer.password ? '••••••••' : '-'}</span>
                     {customer.password && (
