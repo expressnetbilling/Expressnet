@@ -333,8 +333,8 @@ def package_expiry_date(start, package):
 
 def normalized_package_payload(data, default_service_type="hotspot", include_service_type=True):
     service_type = package_service_type(data or {})
-    if service_type not in {"hotspot", "pppoe", "static"}:
-        service_type = default_service_type if default_service_type in {"hotspot", "pppoe", "static"} else "hotspot"
+    if service_type not in {"hotspot", "pppoe"}:
+        service_type = default_service_type if default_service_type in {"hotspot", "pppoe"} else "hotspot"
     raw_unit = str((data or {}).get("duration_unit") or "").lower()
     if raw_unit.startswith("hour"):
         duration_unit = "hours"

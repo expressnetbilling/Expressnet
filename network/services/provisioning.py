@@ -1378,6 +1378,19 @@ def upsert_customer_access(tenant, customer, disabled=False):
                 pool_path.update(**{".id": static_pool[".id"], **pool_fields})
             else:
                 pool_path.add(**pool_fields)
+            if customer.get("ip_address"):
+                binding_path = api.path("ip", "hotspot", "ip-binding")
+                binding = find_router_item_by_fields(api, ("ip", "hotspot", "ip-binding"), {"address": customer["ip_address"]})
+                binding_fields = {
+                    "address": customer["ip_address"],
+                    "type": "bypassed",
+                    "comment": f"Expressnet-static-pool: {customer.get('username') or ''}".strip(),
+                    "disabled": "yes" if disabled else "no",
+                }
+                if binding and binding.get(".id"):
+                    binding_path.update(**{".id": binding[".id"], **binding_fields})
+                else:
+                    binding_path.add(**binding_fields)
         path = ("ppp", "secret") if service_type in {"pppoe", "static"} else ("ip", "hotspot", "user")
         router_path = api.path(*path)
         existing = find_router_item(api, path, customer.get("username"))

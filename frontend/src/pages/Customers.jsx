@@ -74,6 +74,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
   const [openActionsId, setOpenActionsId] = useState(null);
   const [visiblePasswords, setVisiblePasswords] = useState({});
   const [showEditPassword, setShowEditPassword] = useState(false);
+  const [viewingCustomer, setViewingCustomer] = useState(null);
   const [actionsPosition, setActionsPosition] = useState(null);
   const actionsMenuRef = useRef(null);
   const actionsButtonRefs = useRef({});
@@ -106,7 +107,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
 
   const formPackageOptions = useMemo(() => {
     const selectedService = serviceLocked || form.service_type || 'pppoe';
-    if (selectedService === 'static') return packages;
+    if (selectedService === 'static') return packages.filter((pkg) => (pkg.service_type || 'hotspot') === 'pppoe');
     return packages.filter((pkg) => (pkg.service_type || 'hotspot') === selectedService);
   }, [form.service_type, packages, serviceLocked]);
 
@@ -280,7 +281,8 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
     if (!form.package_name) nextErrors.package_name = 'Package is required';
     const selectedPackage = packages.find((pkg) => pkg.name === form.package_name);
     const selectedService = serviceLocked || form.service_type || 'pppoe';
-    if (selectedPackage && (selectedPackage.service_type || 'hotspot') !== selectedService) nextErrors.package_name = `Select a ${selectedService.toUpperCase()} package`;
+    const packageService = selectedPackage?.service_type || 'hotspot';
+    if (selectedPackage && !((selectedService === 'static' && packageService === 'pppoe') || packageService === selectedService)) nextErrors.package_name = `Select a ${selectedService === 'static' ? 'PPPoE' : selectedService.toUpperCase()} package`;
     if (['pppoe', 'static'].includes(selectedService)) {
       const amount = Number(form.amount_payable);
       if (!Number.isFinite(amount) || amount < 0) nextErrors.amount_payable = 'Enter a valid payable amount';
@@ -638,6 +640,15 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
           }}
           role="menu"
         >
+          <button
+            type="button"
+            role="menuitem"
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
+            onClick={() => { setViewingCustomer(openCustomer); closeActionsMenu(); }}
+          >
+            <Eye size={15} />
+            View
+          </button>
           {!hideManualAccessActions && (
             <button
               type="button"
@@ -693,6 +704,21 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
           </button>
         </div>,
         document.body
+      )}
+
+      {viewingCustomer && (
+        <Modal title="Customer Details" onClose={() => setViewingCustomer(null)}>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {Object.entries(viewingCustomer)
+              .filter(([key]) => key !== 'password' && key !== 'extra')
+              .map(([key, value]) => (
+                <div key={key} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{key.replaceAll('_', ' ')}</p>
+                  <p className="mt-1 break-words text-sm text-slate-900">{typeof value === 'object' ? JSON.stringify(value) : String(value ?? '-')}</p>
+                </div>
+              ))}
+          </div>
+        </Modal>
       )}
 
       {modalOpen && (

@@ -1882,7 +1882,9 @@ def customer_hotspot_portal(request):
 def packages(request, package_id=None):
     tenant_id = request.tenant["id"]
     if method(request, "GET") and not package_id:
-        return as_collection_response(request, list_children(f"tenants/{tenant_id}/packages"))
+        packages = list_children(f"tenants/{tenant_id}/packages")
+        packages = [package for package in packages if str(package.get("service_type") or "").lower() != "static"]
+        return as_collection_response(request, packages)
     if method(request, "PATCH") and package_id:
         data = body(request)
         existing = ref(f"tenants/{tenant_id}/packages/{package_id}").get()
@@ -1893,8 +1895,8 @@ def packages(request, package_id=None):
             return ok({"message": "No package fields provided"}, 400)
         if "service_type" in updates:
             requested_service_type = str(updates["service_type"] or "").strip().lower()
-            if requested_service_type not in {"hotspot", "pppoe", "static"}:
-                return ok({"message": "Package type must be Hotspot, PPPoE, or Static"}, 400)
+            if requested_service_type not in {"hotspot", "pppoe"}:
+                return ok({"message": "Package type must be Hotspot or PPPoE"}, 400)
             updates["service_type"] = requested_service_type
         if "price" in updates:
             updates["price"] = float(updates["price"])
