@@ -59,6 +59,14 @@ function serviceLabel(serviceType) {
   return 'User';
 }
 
+function CustomerDetailCard({ icon: Icon, title, children, tone = 'var(--app-accent-muted)' }) {
+  return <section className="overflow-hidden rounded-md border" style={{ borderColor: 'var(--app-border)', background: 'var(--app-panel)' }}><div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--app-border)', background: tone }}><Icon size={14} style={{ color: 'var(--app-accent)' }} /><h3 className="text-[11px] font-semibold" style={{ color: 'var(--app-text)' }}>{title}</h3></div><div className="grid gap-x-5 gap-y-2 p-3 sm:grid-cols-2">{children}</div></section>;
+}
+
+function CustomerDetailField({ label, value }) {
+  return <div className="min-w-0"><p className="text-[10px]" style={{ color: 'var(--app-muted)' }}>{label}</p><p className="truncate text-xs font-medium" style={{ color: 'var(--app-text)' }}>{value || '-'}</p></div>;
+}
+
 export default function Customers({ initialFilter = 'all', serviceLocked = null, title = 'Users' }) {
   const [customers, setCustomers] = useState([]);
   const [packages, setPackages] = useState([]);
@@ -714,23 +722,43 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
       )}
 
       {viewingCustomer && (
-        <Modal title="Customer Details" onClose={() => setViewingCustomer(null)}>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {Object.entries(viewingCustomer)
-              .filter(([key]) => ![
-                'username', 'password', 'radius_secret', 'customer_created_notification_at',
-                'customer_created_notification_result', 'customer_created_notification_status',
-                'mikrotik_router_id', 'provisioning_message', 'provisioning_status', 'extra',
-              ].includes(key))
-              .map(([key, value]) => (
-                <div key={key} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{key.replaceAll('_', ' ')}</p>
-                  <p className="mt-1 break-words text-sm text-slate-900">
-                    {['created_at', 'updated_at'].includes(key) ? formatLocalDateTime(value) : typeof value === 'object' ? JSON.stringify(value) : String(value ?? '-')}
-                  </p>
-                </div>
-              ))}
+        <Modal title="Customer Information" onClose={() => setViewingCustomer(null)}>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <CustomerDetailCard icon={Users} title="Customer Information">
+              <CustomerDetailField label="Name" value={viewingCustomer.name} />
+              <CustomerDetailField label="Phone" value={viewingCustomer.phone} />
+              <CustomerDetailField label="Service Type" value={serviceLabel(serviceTypeOf(viewingCustomer))} />
+              <CustomerDetailField label="Status" value={viewingCustomer.status} />
+            </CustomerDetailCard>
+            <CustomerDetailCard icon={PlugZap} title="Connection Details" tone="var(--app-focus-ring)">
+              <CustomerDetailField label="Connection Type" value={serviceLabel(serviceTypeOf(viewingCustomer))} />
+              <CustomerDetailField label="Static IP Address" value={viewingCustomer.ip_address} />
+              <CustomerDetailField label="IP Pool" value={viewingCustomer.ip_pool} />
+            </CustomerDetailCard>
+            <CustomerDetailCard icon={Database} title="Package Information">
+              <CustomerDetailField label="Package" value={viewingCustomer.package} />
+              <CustomerDetailField label="Amount Payable" value={viewingCustomer.amount_payable ? `Ksh ${Number(viewingCustomer.amount_payable).toLocaleString('en-KE')}` : '-'} />
+              <CustomerDetailField label="Expiry Date" value={formatLocalDateTime(viewingCustomer.expiry_date)} />
+              <CustomerDetailField label="Auto Reconnect" value={viewingCustomer.auto_reconnect ? 'Enabled' : 'Disabled'} />
+            </CustomerDetailCard>
+            <CustomerDetailCard icon={CreditCard} title="Subscription" tone="var(--app-tint-bg)">
+              <CustomerDetailField label="Created At" value={formatLocalDateTime(viewingCustomer.created_at)} />
+              <CustomerDetailField label="Updated At" value={formatLocalDateTime(viewingCustomer.updated_at)} />
+              <CustomerDetailField label="Grace Period" value={viewingCustomer.grace_period_enabled ? 'Enabled' : '-'} />
+              <CustomerDetailField label="Grace Period Value" value={viewingCustomer.grace_period_value ? `${viewingCustomer.grace_period_value} ${viewingCustomer.grace_period_unit || ''}` : '-'} />
+            </CustomerDetailCard>
+            <CustomerDetailCard icon={Database} title="Location & Address" tone="var(--app-focus-ring)">
+              <CustomerDetailField label="Location" value={viewingCustomer.location} />
+              <CustomerDetailField label="IP Address" value={viewingCustomer.ip_address} />
+              <CustomerDetailField label="Technician" value={viewingCustomer.technician} />
+              <CustomerDetailField label="Router Serial Number" value={viewingCustomer.router_serial_number} />
+            </CustomerDetailCard>
+            <CustomerDetailCard icon={Router} title="MikroTik Information">
+              <CustomerDetailField label="IP Pool" value={viewingCustomer.ip_pool} />
+              <CustomerDetailField label="Provisioned At" value={formatLocalDateTime(viewingCustomer.provisioned_at)} />
+            </CustomerDetailCard>
           </div>
+          <div className="mt-3 flex justify-end"><button type="button" className="btn-secondary" onClick={() => setViewingCustomer(null)}>Close</button></div>
         </Modal>
       )}
 
