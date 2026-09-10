@@ -207,7 +207,11 @@ class Customer(ExtraFieldsModel):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["tenant", "username"], name="unique_customer_username_per_tenant"),
+            models.UniqueConstraint(
+                fields=["tenant", "username"],
+                condition=~models.Q(service_type="static"),
+                name="unique_customer_username_per_tenant",
+            ),
         ]
 
     def as_dict(self, include_id=True, exclude=None):

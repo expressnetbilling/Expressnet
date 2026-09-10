@@ -1081,7 +1081,6 @@ def customer_add(request):
         else:
             requested_ip = next(str(address) for address in ipaddress.ip_network("172.30.0.0/16").hosts() if str(address) not in used_ips)
         data["ip_address"] = requested_ip
-        data["username"] = f"static-{requested_ip}"
         provision = True
     linked_routers = request.tenant.get("linked_routers") or {}
     mikrotik_router_id = str(data.get("mikrotik_router_id") or "").strip()
