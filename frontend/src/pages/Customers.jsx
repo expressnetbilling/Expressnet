@@ -152,6 +152,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
         isHotspotOnlyPage ? '' : customer.location,
         customer.username,
         customer.package,
+        customer.ip_address,
         isHotspotOnlyPage ? '' : customer.technician,
       ].join(' ').toLowerCase();
       return haystack.includes(search.toLowerCase());
@@ -563,6 +564,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
               <th className="px-3 py-2">Password</th>
               {!isHotspotOnlyPage && <th className="px-3 py-2">Payable</th>}
               <th className="px-3 py-2">Package</th>
+              {serviceLocked === 'static' && <th className="px-3 py-2">IP Address</th>}
               {!isHotspotOnlyPage && <th className="px-3 py-2">Technician</th>}
               <th className="px-3 py-2">MikroTik</th>
               <th className="px-3 py-2">Status</th>
@@ -599,6 +601,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                 </td>
                 {!isHotspotOnlyPage && <td className="table-cell px-3">Ksh {Number(customer.amount_payable || 0).toLocaleString('en-KE')}</td>}
                 <td className="table-cell px-3">{customer.package || '-'}</td>
+                {serviceLocked === 'static' && <td className="table-cell px-3 font-mono">{customer.ip_address || '-'}</td>}
                 {!isHotspotOnlyPage && <td className="table-cell px-3">{staffMap[customer.technician]?.name || customer.technician || '-'}</td>}
                 <td className="table-cell px-3">
                  {mikrotikRouterMap[customer.mikrotik_router_id]?.label || customer.mikrotik_router_id || '-'}

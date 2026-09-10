@@ -3,6 +3,7 @@ import html
 import logging
 import os
 import secrets
+import ipaddress
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -332,8 +333,8 @@ def package_expiry_date(start, package):
 
 def normalized_package_payload(data, default_service_type="hotspot", include_service_type=True):
     service_type = package_service_type(data or {})
-    if service_type not in {"hotspot", "pppoe"}:
-        service_type = default_service_type if default_service_type in {"hotspot", "pppoe"} else "hotspot"
+    if service_type not in {"hotspot", "pppoe", "static"}:
+        service_type = default_service_type if default_service_type in {"hotspot", "pppoe", "static"} else "hotspot"
     raw_unit = str((data or {}).get("duration_unit") or "").lower()
     if raw_unit.startswith("hour"):
         duration_unit = "hours"
@@ -373,7 +374,7 @@ def normalized_package_payload(data, default_service_type="hotspot", include_ser
 def sync_package_profile(tenant, package):
     service_type = package_service_type(package)
     duration_seconds = int(package_duration_delta(package).total_seconds())
-    if service_type == "pppoe":
+    if service_type in {"pppoe", "static"}:
         return create_ppp_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
     return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
 
@@ -1064,8 +1065,19 @@ def customer_add(request):
     if provision is None:
         provision = service_type in {"pppoe", "hotspot"}
     provision = bool(provision)
-    if provision and service_type == "static":
-        return ok({"message": "Static customers can be saved here, but MikroTik auto-provisioning is only available for PPPoE and Hotspot customers"}, 400)
+    if service_type == "static":
+        used_ips = {str(c.get("ip_address") or "").strip() for c in list_children(f"tenants/{request.tenant['id']}/customers")}
+        requested_ip = str(data.get("ip_address") or "").strip()
+        if requested_ip:
+            try:
+                if ipaddress.ip_address(requested_ip) not in ipaddress.ip_network("172.30.0.0/16") or requested_ip in used_ips:
+                    return ok({"message": "Static IP must be unique and belong to 172.30.0.0/16"}, 400)
+            except ValueError:
+                return ok({"message": "Enter a valid static IP address"}, 400)
+        else:
+            requested_ip = next(str(address) for address in ipaddress.ip_network("172.30.0.0/16").hosts() if str(address) not in used_ips)
+        data["ip_address"] = requested_ip
+        provision = True
     linked_routers = request.tenant.get("linked_routers") or {}
     mikrotik_router_id = str(data.get("mikrotik_router_id") or "").strip()
     if service_type in {"pppoe", "static"} and linked_routers:
@@ -1095,7 +1107,7 @@ def customer_add(request):
             return ok({"message": "Link a MikroTik router before provisioning customers"}, 400)
         if has_mikrotik_credentials(request.tenant):
             try:
-                if service_type == "pppoe":
+                if service_type in {"pppoe", "static"}:
                     create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
                 else:
                     create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
@@ -1130,6 +1142,7 @@ def customer_add(request):
             "package": data["package_name"],
             "amount_payable": amount_payable,
             "service_type": service_type,
+            "ip_address": data.get("ip_address") or "",
             "provisioning_status": provisioning_status,
             "provisioning_message": provisioning_message,
             "status": customer_status,

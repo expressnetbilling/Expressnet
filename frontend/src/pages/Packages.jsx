@@ -34,6 +34,7 @@ function packageDuration(pkg) {
 
 function packageType(pkg) {
   const value = String(pkg?.service_type || pkg?.package_type || pkg?.type || '').trim().toLowerCase();
+  if (value === 'static') return 'static';
   if (['pppoe', 'ppoe', 'ppp', 'broadband'].includes(value)) return 'pppoe';
   return 'hotspot';
 }
@@ -432,6 +433,7 @@ export default function Packages() {
     if (filter === 'free') return text.includes('free') || Number(pkg.price || 0) === 0;
     if (filter === 'pppoe') return packageType(pkg) === 'pppoe';
     if (filter === 'hotspot') return packageType(pkg) === 'hotspot';
+    if (filter === 'static') return packageType(pkg) === 'static';
     return true;
   });
 
@@ -439,6 +441,7 @@ export default function Packages() {
     all: packages.length,
     hotspot: packages.filter((pkg) => packageType(pkg) === 'hotspot').length,
     pppoe: packages.filter((pkg) => packageType(pkg) === 'pppoe').length,
+    static: packages.filter((pkg) => packageType(pkg) === 'static').length,
     free: packages.filter((pkg) => Number(pkg.price || 0) === 0 || `${pkg.name || ''}`.toLowerCase().includes('free')).length,
   };
 
@@ -585,9 +588,10 @@ export default function Packages() {
               <div className="sm:col-span-2">
                 <label className="form-label" htmlFor="service_type">Package type</label>
                 <div className="grid gap-2 sm:grid-cols-2">
-                  {[
+              {[
                     ['hotspot', Wifi, 'Hotspot'],
                     ['pppoe', PlugZap, 'PPPoE'],
+                    ['static', Router, 'Static'],
                   ].map(([key, Icon, label]) => (
                     <label key={key} className={`flex cursor-pointer items-center gap-3 rounded-md border p-3 text-sm font-semibold ${form.service_type === key ? 'border-app-navy bg-app-navy text-white' : 'border-slate-200 bg-white text-slate-700'}`}>
                       <input className="sr-only" type="radio" name="service_type" value={key} checked={form.service_type === key} onChange={update} />

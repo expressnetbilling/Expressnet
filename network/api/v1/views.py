@@ -1812,7 +1812,7 @@ def customer_provision(request, customer_id):
     if has_mikrotik_credentials(request.tenant):
         try:
             if pkg:
-                if service_type == "pppoe":
+                if service_type in {"pppoe", "static"}:
                     create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
                 elif service_type == "hotspot":
                     create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
@@ -1893,8 +1893,8 @@ def packages(request, package_id=None):
             return ok({"message": "No package fields provided"}, 400)
         if "service_type" in updates:
             requested_service_type = str(updates["service_type"] or "").strip().lower()
-            if requested_service_type not in {"hotspot", "pppoe"}:
-                return ok({"message": "Package type must be Hotspot or PPPoE"}, 400)
+            if requested_service_type not in {"hotspot", "pppoe", "static"}:
+                return ok({"message": "Package type must be Hotspot, PPPoE, or Static"}, 400)
             updates["service_type"] = requested_service_type
         if "price" in updates:
             updates["price"] = float(updates["price"])

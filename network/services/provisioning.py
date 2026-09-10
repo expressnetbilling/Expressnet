@@ -344,6 +344,8 @@ def package_service_type(package):
         return "hotspot"
     if raw in {"pppoe", "ppoe", "ppp", "broadband"}:
         return "pppoe"
+    if raw == "static":
+        return "static"
 
     # Legacy packages often missed service_type even though this product sells
     # Hotspot vouchers by default. Only explicit PPP/PPPoE values go to /ppp.
@@ -1368,7 +1370,15 @@ def upsert_customer_access(tenant, customer, disabled=False):
                 router_path.update(**{".id": existing[".id"], **fields})
                 return existing[".id"]
             return router_path.add(**fields)
-        path = ("ppp", "secret") if service_type == "pppoe" else ("ip", "hotspot", "user")
+        if service_type == "static":
+            pool_path = api.path("ip", "pool")
+            static_pool = find_router_item(api, ("ip", "pool"), "Expressnet-static-pool")
+            pool_fields = {"name": "Expressnet-static-pool", "ranges": "172.30.0.2-172.30.255.254", "comment": "Expressnet static customer pool"}
+            if static_pool and static_pool.get(".id"):
+                pool_path.update(**{".id": static_pool[".id"], **pool_fields})
+            else:
+                pool_path.add(**pool_fields)
+        path = ("ppp", "secret") if service_type in {"pppoe", "static"} else ("ip", "hotspot", "user")
         router_path = api.path(*path)
         existing = find_router_item(api, path, customer.get("username"))
         
@@ -1381,8 +1391,10 @@ def upsert_customer_access(tenant, customer, disabled=False):
             "disabled": "yes" if disabled else "no",
             "comment": f"billing-saas access expires: {customer.get('expires_at') or customer.get('expiry_date') or ''}".strip(),
         }
-        if service_type == "pppoe":
+        if service_type in {"pppoe", "static"}:
             fields["service"] = "pppoe"
+            if service_type == "static" and customer.get("ip_address"):
+                fields["remote-address"] = customer["ip_address"]
         else:
             limit_uptime = routeros_duration(customer.get("duration_seconds") or customer.get("limit_seconds"))
             if limit_uptime:
