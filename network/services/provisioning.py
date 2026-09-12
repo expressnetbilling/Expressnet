@@ -1370,6 +1370,10 @@ def upsert_customer_access(tenant, customer, disabled=False):
                 return existing[".id"]
             return router_path.add(**fields)
         if service_type == "static":
+            managed_bridge = mikrotik_managed_bridge_name(tenant)
+            bridge_path = api.path("interface", "bridge")
+            if not find_router_item(api, ("interface", "bridge"), managed_bridge):
+                bridge_path.add(name=managed_bridge, comment="Created by Expressnet")
             pool_path = api.path("ip", "pool")
             static_pool = find_router_item(api, ("ip", "pool"), "Expressnet-static-pool")
             pool_fields = {"name": "Expressnet-static-pool", "ranges": "172.30.0.2-172.30.255.254", "comment": "Expressnet static customer pool"}
@@ -1377,6 +1381,24 @@ def upsert_customer_access(tenant, customer, disabled=False):
                 pool_path.update(**{".id": static_pool[".id"], **pool_fields})
             else:
                 pool_path.add(**pool_fields)
+            upsert_router_item(
+                api,
+                ("ip", "address"),
+                {"interface": managed_bridge, "comment": "Expressnet static gateway"},
+                {"address": "172.30.0.1/16", "interface": managed_bridge, "comment": "Expressnet static gateway"},
+            )
+            upsert_router_item(
+                api,
+                ("ip", "dhcp-server", "network"),
+                {"address": "172.30.0.0/16"},
+                {"address": "172.30.0.0/16", "gateway": "172.30.0.1", "dns-server": "172.30.0.1"},
+            )
+            upsert_router_item(
+                api,
+                ("ip", "firewall", "nat"),
+                {"chain": "srcnat", "src-address": "172.30.0.0/16", "comment": "billing-saas static masquerade"},
+                {"chain": "srcnat", "src-address": "172.30.0.0/16", "action": "masquerade", "comment": "billing-saas static masquerade"},
+            )
             if customer.get("ip_address"):
                 binding_path = api.path("ip", "hotspot", "ip-binding")
                 binding = find_router_item_by_fields(api, ("ip", "hotspot", "ip-binding"), {"address": customer["ip_address"]})

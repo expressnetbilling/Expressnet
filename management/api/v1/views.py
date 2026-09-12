@@ -1186,7 +1186,7 @@ def customer_add(request):
                 _queue_router_command(request, {
                     "type": "sync_secrets",
                     "router_id": mikrotik_router_id,
-                    "script": _customer_secret_script({**data, "package": data["package_name"], "speed": pkg.get("speed"), "service_type": service_type, "status": customer_status}),
+                    "script": _customer_secret_script({**data, "package": data["package_name"], "speed": pkg.get("speed"), "service_type": service_type, "status": customer_status, "mikrotik_bridge_name": mikrotik_managed_bridge_name(request.tenant)}),
                 })
                 provisioning_status = "queued"
                 provisioning_message = f"{service_type.upper()} access queued for MikroTik sync"
@@ -1194,7 +1194,7 @@ def customer_add(request):
             _queue_router_command(request, {
                 "type": "sync_secrets",
                 "router_id": mikrotik_router_id,
-                "script": _customer_secret_script({**data, "package": data["package_name"], "speed": pkg.get("speed"), "service_type": service_type, "status": customer_status}),
+                "script": _customer_secret_script({**data, "package": data["package_name"], "speed": pkg.get("speed"), "service_type": service_type, "status": customer_status, "mikrotik_bridge_name": mikrotik_managed_bridge_name(request.tenant)}),
             })
             provisioning_status = "queued"
             provisioning_message = f"{service_type.upper()} access queued for MikroTik sync"

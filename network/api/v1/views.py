@@ -1846,13 +1846,20 @@ def customer_provision(request, customer_id):
     if not has_mikrotik_credentials(request.tenant) and not _router_is_agent_linked(request.tenant):
         return ok({"message": "Link a MikroTik router before provisioning customers"}, 400)
     service_type = customer.get("service_type") or "hotspot"
+    if service_type == "static":
+        customer = {
+            **customer,
+            "subnet_mask": customer.get("subnet_mask") or "255.255.0.0",
+            "gateway": customer.get("gateway") or "172.30.0.1",
+            "preferred_dns": customer.get("preferred_dns") or "172.30.0.1",
+        }
     pkg = find_child_by_field(f"tenants/{request.tenant['id']}/packages", "name", customer.get("package"))
     provisioning_status = "queued"
     provisioning_message = f"{service_type.upper()} access queued for MikroTik sync"
     if has_mikrotik_credentials(request.tenant):
         try:
             if pkg:
-                if service_type in {"pppoe", "static"}:
+                if service_type == "pppoe":
                     create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
                 elif service_type == "hotspot":
                     create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
@@ -1863,16 +1870,23 @@ def customer_provision(request, customer_id):
             _queue_router_command(request, {
                 "type": "sync_secrets",
                 "customer_ids": [customer_id],
-                "script": _customer_secret_script({**customer, "package_name": customer.get("package"), "speed": (pkg or {}).get("speed"), "service_type": service_type}),
+                "script": _customer_secret_script({**customer, "package_name": customer.get("package"), "speed": (pkg or {}).get("speed"), "service_type": service_type, "mikrotik_bridge_name": mikrotik_managed_bridge_name(request.tenant)}),
             })
     else:
         _queue_router_command(request, {
             "type": "sync_secrets",
             "customer_ids": [customer_id],
-            "script": _customer_secret_script({**customer, "package_name": customer.get("package"), "speed": (pkg or {}).get("speed"), "service_type": service_type}),
+            "script": _customer_secret_script({**customer, "package_name": customer.get("package"), "speed": (pkg or {}).get("speed"), "service_type": service_type, "mikrotik_bridge_name": mikrotik_managed_bridge_name(request.tenant)}),
         })
     ref(f"tenants/{request.tenant['id']}/customers/{customer_id}").update(
-        {"provisioning_status": provisioning_status, "service_type": service_type, "auto_reconnect": True, "provisioning_message": provisioning_message, "provisioned_at": iso_now()}
+        {
+            "provisioning_status": provisioning_status,
+            "service_type": service_type,
+            "auto_reconnect": True,
+            "provisioning_message": provisioning_message,
+            "provisioned_at": iso_now(),
+            **({"subnet_mask": customer.get("subnet_mask"), "gateway": customer.get("gateway"), "preferred_dns": customer.get("preferred_dns")} if service_type == "static" else {}),
+        }
     )
     # Sync to Postgres + RADIUS if tenant has RADIUS enabled --
     if request.tenant.get("radius_enabled"):
@@ -2355,6 +2369,28 @@ def router_delete(request):
 def _customer_secret_script(customer):
     """Generate an .rsc snippet that upserts a single customer into /ppp secret or /ip hotspot user."""
     service_type = customer.get("service_type") or "hotspot"
+    if service_type == "static":
+        ip_address = _rsc_escape(customer.get("ip_address") or "")
+        bridge_name = _rsc_escape(customer.get("mikrotik_bridge_name") or customer.get("bridge_name") or "Expressnet-bridge")
+        comment = _rsc_escape(f"Expressnet-static-pool: {customer.get('name') or customer.get('phone') or ip_address}".strip())
+        disabled = "yes" if str(customer.get("status") or "active").strip().lower() in {"inactive", "paused", "suspended"} else "no"
+        if not ip_address:
+            return ""
+        return (
+            f':local billingBridge "{bridge_name}";'
+            ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};'
+            ':do { /ip pool add name=Expressnet-static-pool ranges=172.30.0.2-172.30.255.254 comment="Expressnet static customer pool" } '
+            'on-error={ /ip pool set [find name=Expressnet-static-pool] ranges=172.30.0.2-172.30.255.254 comment="Expressnet static customer pool" };'
+            ':do { /ip address add address=172.30.0.1/16 interface=$billingBridge comment="Expressnet static gateway" } '
+            'on-error={ /ip address set [find interface=$billingBridge comment="Expressnet static gateway"] address=172.30.0.1/16 interface=$billingBridge comment="Expressnet static gateway" };'
+            ':do { /ip dhcp-server network add address=172.30.0.0/16 gateway=172.30.0.1 dns-server=172.30.0.1 } '
+            'on-error={ /ip dhcp-server network set [find address=172.30.0.0/16] gateway=172.30.0.1 dns-server=172.30.0.1 };'
+            ':do { /ip firewall nat add chain=srcnat src-address=172.30.0.0/16 action=masquerade comment="billing-saas static masquerade" } '
+            'on-error={ /ip firewall nat set [find comment="billing-saas static masquerade"] chain=srcnat src-address=172.30.0.0/16 action=masquerade comment="billing-saas static masquerade" };'
+            f':if ([:len [/ip hotspot ip-binding find address="{ip_address}"]] = 0) do={{'
+            f' /ip hotspot ip-binding add address="{ip_address}" type=bypassed disabled={disabled} comment="{comment}" }} '
+            f'else={{ /ip hotspot ip-binding set [find address="{ip_address}"] type=bypassed disabled={disabled} comment="{comment}" }};'
+        )
     if service_type not in {"pppoe", "hotspot"}:
         service_type = "hotspot"
     username = _rsc_escape(customer.get("username") or "")
