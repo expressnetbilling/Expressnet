@@ -45,6 +45,15 @@ class SimpleRateLimitMiddleware:
         rule = self.rules().get((request.method.upper(), request.path.rstrip("/")))
         if request.method.upper() == "POST" and request.path.startswith(f"/{api_base}/public/") and request.path.rstrip("/").endswith("/pay"):
             rule = (10, 10 * 60)
+        if request.method.upper() == "GET" and request.path.startswith(f"/{api_base}/public/") and request.path.rstrip("/").endswith("/verify"):
+            rule = (30, 10 * 60)
+        if request.method.upper() == "POST" and request.path.startswith(f"/{api_base}/public/") and (
+            request.path.rstrip("/").endswith("/redeem")
+            or request.path.rstrip("/").endswith("/voucher-login")
+        ):
+            rule = (20, 10 * 60)
+        if request.method.upper() == "GET" and request.path.startswith(f"/{api_base}/router/agent/"):
+            rule = (120, 10 * 60)
         if request.method.upper() == "POST" and request.path.startswith(f"/{api_base}/daraja/callback/"):
             rule = (20, 60)
         if rule:

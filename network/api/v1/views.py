@@ -1,6 +1,8 @@
 import json
 import html
 import hashlib
+import hmac
+import ipaddress
 import logging
 import os
 import re
@@ -86,6 +88,34 @@ from billing_api.services import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def sanitize_router_login_url(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        return ""
+    if not (address.is_private or address.is_link_local or address.is_loopback):
+        return ""
+    path = parsed.path or ""
+    if path and not path.endswith("/login"):
+        return ""
+    return raw
+
+
+def make_payment_access_token(tenant_id, payment_id):
+    digest = hmac.new(
+        settings.SECRET_KEY.encode(),
+        f"payment-access:{tenant_id}:{payment_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return digest[:32]
 
 
 DEFAULT_SITE = {
@@ -674,7 +704,15 @@ def _router_connection_status(tenant, live=False):
 
 def _router_login_form_html(username, password, router_ip="", link_login="", dst="", delay_ms=800):
     router_ip_value = str(router_ip or "").strip()
-    login_action_value = str(link_login or "").strip() or (f"http://{router_ip_value}/login" if router_ip_value else "")
+    safe_router_ip = ""
+    if router_ip_value:
+        try:
+            address = ipaddress.ip_address(router_ip_value)
+            if address.is_private or address.is_link_local or address.is_loopback:
+                safe_router_ip = router_ip_value
+        except ValueError:
+            safe_router_ip = ""
+    login_action_value = sanitize_router_login_url(link_login) or (f"http://{safe_router_ip}/login" if safe_router_ip else "")
     if not login_action_value:
         return ""
     username_value = html.escape(str(username or ""), quote=True)
@@ -911,7 +949,7 @@ def captive_portal_page(request, tenant_id):
         payment = _refresh_captive_daraja_payment(tenant_id, {"id": tenant_id, **tenant}, payment_id, payment)
         if payment and payment.get("status") == "success":
             router_ip = _router_ip_from_captive_data(request.GET, tenant, payment)
-            link_login = payment.get("link_login") or request.GET.get("link_login") or request.GET.get("link-login") or ""
+            link_login = sanitize_router_login_url(payment.get("link_login") or request.GET.get("link_login") or request.GET.get("link-login") or "")
             dst = payment.get("dst") or request.GET.get("dst") or request.GET.get("link-orig") or "http://connectivitycheck.gstatic.com/generate_204"
             username = payment.get("access_username") or payment.get("username") or ""
             password = payment.get("access_password") or ""
@@ -1368,7 +1406,7 @@ def _public_pay_impl(request, tenant_id):
     router_client_ip = str(data.get("ip") or data.get("client_ip") or "").strip()
     router_mac = str(data.get("mac") or data.get("router_mac") or "").strip()
     router_client_mac = normalize_mac(router_mac)
-    link_login = str(data.get("link_login") or data.get("link-login") or "").strip()
+    link_login = sanitize_router_login_url(data.get("link_login") or data.get("link-login"))
     dst = str(data.get("dst") or data.get("link-orig") or "").strip()
     service_type = str(data.get("service_type") or "hotspot").strip().lower()
     if service_type not in {"hotspot", "pppoe", "tv"}:
@@ -1460,11 +1498,13 @@ def _public_pay_impl(request, tenant_id):
             },
             payment_method=daraja_method,
         )
-        payment_ref.update({"daraja_checkout_request_id": checkout.get("checkout_request_id"), "daraja_merchant_request_id": checkout.get("merchant_request_id"), "daraja_callback_url": checkout.get("callback_url"), "checkout_requested_at": iso_now()})
+        access_token = make_payment_access_token(tenant_id, payment_ref.key)
+        payment_ref.update({"daraja_checkout_request_id": checkout.get("checkout_request_id"), "daraja_merchant_request_id": checkout.get("merchant_request_id"), "daraja_callback_url": checkout.get("callback_url"), "checkout_requested_at": iso_now(), "access_verify_token": access_token})
         return ok({
             "success": True,
             "message": checkout.get("customer_message") or "Check your phone and enter your M-Pesa PIN to complete payment.",
             "paymentId": payment_ref.key,
+            "verifyToken": access_token,
             "provider": "mpesa",
             "checkoutRequestId": checkout.get("checkout_request_id"),
         }, 201)
@@ -1529,7 +1569,7 @@ def public_redeem(request, tenant_id):
             "mac_address": payment.get("access_mac_address") or payment.get("mac_address"),
             "router_ip": _router_ip_from_captive_data(data, tenant, payment),
             "router_mac": payment.get("router_mac"),
-            "link_login": data.get("link_login") or data.get("link-login") or payment.get("link_login"),
+            "link_login": sanitize_router_login_url(data.get("link_login") or data.get("link-login") or payment.get("link_login")),
             "dst": data.get("dst") or data.get("link-orig") or payment.get("dst"),
             "expires_at": payment.get("access_expires_at"),
         }
@@ -1741,7 +1781,7 @@ def public_voucher_login(request, tenant_id):
         "username": access_payload.get("username"),
         "password": access_payload.get("password"),
         "router_ip": _router_ip_from_captive_data(data, tenant),
-        "link_login": data.get("link_login") or data.get("link-login") or "",
+        "link_login": sanitize_router_login_url(data.get("link_login") or data.get("link-login")),
         "dst": data.get("dst") or data.get("link-orig") or "http://connectivitycheck.gstatic.com/generate_204",
         "package_name": access_payload.get("package"),
         "credential_type": credential_kind,
@@ -3176,7 +3216,19 @@ def router_provision_script(request, token):
             close_old_connections()
         return HttpResponse(_router_migration_export_script(snapshot_url, callback_base_url), content_type="text/plain")
 
-    agent_token = jwt.encode({"purpose": "mikrotik_agent", "tenant_id": tenant_id}, _get_jwt_secret("JWT_SECRET"), algorithm="HS256")
+    try:
+        agent_token_days = max(1, int(os.getenv("ROUTER_AGENT_TOKEN_DAYS", "30")))
+    except ValueError:
+        agent_token_days = 30
+    agent_token = jwt.encode(
+        {
+            "purpose": "mikrotik_agent",
+            "tenant_id": tenant_id,
+            "exp": utcnow() + timedelta(days=agent_token_days),
+        },
+        _get_jwt_secret("JWT_SECRET"),
+        algorithm="HS256",
+    )
     agent_poll_url = f"{app_base_url}/api/router/agent/{agent_token}/poll"
 
     hotspot_file_script = _hotspot_captive_file_script(tenant, app_base_url)

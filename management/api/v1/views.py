@@ -1,5 +1,7 @@
 import json
 import html
+import hashlib
+import hmac
 import logging
 import os
 import secrets
@@ -114,6 +116,38 @@ MASKED = "••••••••"
 SENSITIVE_FIELDS = {"password", "mikrotik_pass", }
 
 
+def make_payment_access_token(tenant_id, payment_id):
+    digest = hmac.new(
+        settings.SECRET_KEY.encode(),
+        f"payment-access:{tenant_id}:{payment_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return digest[:32]
+
+
+def verify_payment_access_token(tenant_id, payment_id, token):
+    return hmac.compare_digest(make_payment_access_token(tenant_id, payment_id), str(token or ""))
+
+
+def sanitize_router_login_url(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        return ""
+    if not (address.is_private or address.is_link_local or address.is_loopback):
+        return ""
+    path = parsed.path or ""
+    if path and not path.endswith("/login"):
+        return ""
+    return raw
+
+
 def _customer_username_seed(name, phone):
     base = "".join(ch for ch in str(name or "").lower() if ch.isalnum())
     digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
@@ -139,6 +173,22 @@ def _generate_customer_username(tenant_id, name, phone):
 def _generate_customer_password():
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
     return "".join(secrets.choice(alphabet) for _ in range(8))
+
+
+def static_ip_network_details(ip_address):
+    if not ip_address:
+        return {}
+    network = ipaddress.ip_network("172.30.0.0/16")
+    address = ipaddress.ip_address(ip_address)
+    if address not in network:
+        return {}
+    hosts = network.hosts()
+    gateway = str(next(hosts))
+    return {
+        "subnet_mask": str(network.netmask),
+        "gateway": gateway,
+        "preferred_dns": gateway,
+    }
 
 
 def _customer_credentials_sms(customer, tenant):
@@ -633,7 +683,7 @@ def _public_pay_impl(request, tenant_id):
     router_ip = str(data.get("router_ip") or "").strip()
     router_mac = str(data.get("mac") or data.get("router_mac") or "").strip()
     router_client_mac = normalize_mac(router_mac)
-    link_login = str(data.get("link_login") or data.get("link-login") or "").strip()
+    link_login = sanitize_router_login_url(data.get("link_login") or data.get("link-login"))
     dst = str(data.get("dst") or data.get("link-orig") or "").strip()
     service_type = str(data.get("service_type") or "hotspot").strip().lower()
     if service_type not in {"hotspot", "pppoe", "tv"}:
@@ -725,10 +775,13 @@ def _public_pay_impl(request, tenant_id):
             payment_method=daraja_method,
         )
         payment_ref.update({"daraja_checkout_request_id": checkout.get("checkout_request_id"), "daraja_merchant_request_id": checkout.get("merchant_request_id"), "daraja_callback_url": checkout.get("callback_url"), "checkout_requested_at": iso_now()})
+        access_token = make_payment_access_token(tenant_id, payment_ref.key)
+        payment_ref.update({"access_verify_token": access_token})
         return ok({
             "success": True,
             "message": checkout.get("customer_message") or "Check your phone and enter your M-Pesa PIN to complete payment.",
             "paymentId": payment_ref.key,
+            "verifyToken": access_token,
             "provider": "mpesa",
             "checkoutRequestId": checkout.get("checkout_request_id"),
         }, 201)
@@ -774,6 +827,7 @@ def public_verify(request, tenant_id):
     if not requested_payment_id:
         return ok({"message": "Payment ID is required"}, 400)
     payment_id = str(requested_payment_id)
+    requested_token = request.GET.get("verify_token") or request.GET.get("verifyToken") or request.GET.get("token")
     payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get()
     if not payment:
         return ok({"message": "Payment not found"}, 404)
@@ -831,24 +885,33 @@ def public_verify(request, tenant_id):
         except Exception:
             logger.exception("Paid payment activation retry failed tenant=%s payment=%s", tenant_id, payment_id)
             return ok({"success": False, "status": "activation_failed", "message": "Payment confirmed, but internet activation is still pending. Please wait a moment."}, 202)
-    return ok(
-        {
+    can_return_access = verify_payment_access_token(
+        tenant_id,
+        payment_id,
+        requested_token or payment.get("access_verify_token"),
+    ) and bool(requested_token)
+    payload = {
             "success": payment.get("status") == "success",
             "status": payment.get("status"),
             "package_name": payment.get("package_name"),
             "service_type": payment.get("service_type"),
             "phone": payment.get("phone"),
+            "expires_at": payment.get("access_expires_at"),
+            "paymentId": payment_id,
+        }
+    if can_return_access:
+        payload.update({
             "username": payment.get("access_username"),
             "password": payment.get("access_password"),
             "mac_address": payment.get("access_mac_address") or payment.get("mac_address"),
             "router_ip": payment.get("router_ip"),
             "router_mac": payment.get("router_mac"),
-            "link_login": payment.get("link_login"),
+            "link_login": sanitize_router_login_url(payment.get("link_login")),
             "dst": payment.get("dst"),
-            "expires_at": payment.get("access_expires_at"),
-            "paymentId": payment_id,
-        }
-    )
+        })
+    elif payment.get("status") == "success":
+        payload["message"] = "Payment verified. Access credentials require the original verification token."
+    return ok(payload)
 
 
 def _truthy(value):
@@ -1081,6 +1144,7 @@ def customer_add(request):
         else:
             requested_ip = next(str(address) for address in ipaddress.ip_network("172.30.0.0/16").hosts() if str(address) not in used_ips)
         data["ip_address"] = requested_ip
+        data.update(static_ip_network_details(requested_ip))
         provision = True
     linked_routers = request.tenant.get("linked_routers") or {}
     mikrotik_router_id = str(data.get("mikrotik_router_id") or "").strip()
@@ -1147,6 +1211,9 @@ def customer_add(request):
             "amount_payable": amount_payable,
             "service_type": service_type,
             "ip_address": data.get("ip_address") or "",
+            "subnet_mask": data.get("subnet_mask") or "",
+            "gateway": data.get("gateway") or "",
+            "preferred_dns": data.get("preferred_dns") or "",
             "ip_pool": "Expressnet-static-pool" if service_type == "static" else "",
             "provisioning_status": provisioning_status,
             "provisioning_message": provisioning_message,
@@ -1158,7 +1225,7 @@ def customer_add(request):
         }
     new_ref = ref(f"tenants/{request.tenant['id']}/customers").push(customer_payload)
     notification_result = None
-    if service_type == "pppoe":
+    if service_type in {"pppoe", "static"}:
         try:
             notification_result = notify_customer_created(request.tenant, customer_payload)
             ref(f"tenants/{request.tenant['id']}/customers/{new_ref.key}").update({
@@ -2678,6 +2745,14 @@ def append_customer_created_details(message, context):
 def append_technician_credentials_details(message, context):
     service_label = str(context.get("service_type") or "internet").upper()
     base = str(message or "").strip() or f"A {service_label} customer account has been created."
+    network_details = ""
+    if context.get("ip_address"):
+        network_details = (
+            f" IP address: {context.get('ip_address') or ''}. "
+            f"Subnet mask: {context.get('subnet_mask') or ''}. "
+            f"Gateway: {context.get('gateway') or ''}. "
+            f"Preferred DNS: {context.get('preferred_dns') or ''}."
+        )
     details = (
         f"Customer: {context.get('name') or 'customer'}. "
         f"Phone: {context.get('phone') or ''}. "
@@ -2685,6 +2760,7 @@ def append_technician_credentials_details(message, context):
         f"Amount payable: Ksh {context.get('amount_payable') or ''}. "
         f"Username: {context.get('username') or ''}. "
         f"Password: {context.get('password') or ''}."
+        f"{network_details}"
     )
     return f"{base} {details}"
 
@@ -2704,6 +2780,10 @@ def notify_customer_created(tenant, customer):
         "amount_payable": customer.get("amount_payable") or "",
         "username": customer.get("username") or "",
         "password": customer.get("password") or "",
+        "ip_address": customer.get("ip_address") or "",
+        "subnet_mask": customer.get("subnet_mask") or "",
+        "gateway": customer.get("gateway") or "",
+        "preferred_dns": customer.get("preferred_dns") or "",
     }
     template = (tenant or {}).get("customer_created_whatsapp_template") or f"Your {service_type.upper()} internet account has been created."
     technician_template = (tenant or {}).get("technician_customer_credentials_template") or f"A {service_type.upper()} customer account has been created."

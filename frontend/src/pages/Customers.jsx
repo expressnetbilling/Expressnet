@@ -734,6 +734,9 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
             <CustomerDetailCard icon={PlugZap} title="Connection Details" tone="var(--app-focus-ring)">
               <CustomerDetailField label="Connection Type" value={serviceLabel(serviceTypeOf(viewingCustomer))} />
               <CustomerDetailField label="Static IP Address" value={viewingCustomer.ip_address} />
+              <CustomerDetailField label="Subnet Mask" value={viewingCustomer.subnet_mask} />
+              <CustomerDetailField label="Gateway" value={viewingCustomer.gateway} />
+              <CustomerDetailField label="Preferred DNS" value={viewingCustomer.preferred_dns} />
               <CustomerDetailField label="IP Pool" value={viewingCustomer.ip_pool} />
             </CustomerDetailCard>
             <CustomerDetailCard icon={Database} title="Package Information">

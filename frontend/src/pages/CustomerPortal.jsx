@@ -9,11 +9,41 @@ const publicApi = axios.create({
   headers: { 'X-Requested-With': 'XMLHttpRequest' },
 });
 
+function safeRouterLoginUrl(linkLogin = '') {
+  try {
+    const url = new URL(linkLogin);
+    const host = url.hostname;
+    const privateHost = (
+      host === 'localhost' ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    );
+    if (!['http:', 'https:'].includes(url.protocol) || !privateHost || (url.pathname && !url.pathname.endsWith('/login'))) return '';
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
+function safeRouterIp(routerIp = '') {
+  const host = String(routerIp || '').trim();
+  const privateHost = (
+    host === 'localhost' ||
+    host.startsWith('10.') ||
+    host.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+  );
+  return privateHost ? host : '';
+}
+
 function submitRouterLogin(routerIp, username, password, linkLogin = '', dst = '') {
-  if ((!routerIp && !linkLogin) || !username || !password) return false;
+  const safeLinkLogin = safeRouterLoginUrl(linkLogin);
+  const loginIp = safeRouterIp(routerIp);
+  if ((!loginIp && !safeLinkLogin) || !username || !password) return false;
   const form = document.createElement('form');
   form.method = 'POST';
-  form.action = linkLogin || `http://${routerIp}/login`;
+  form.action = safeLinkLogin || `http://${loginIp}/login`;
   form.style.display = 'none';
   [
     ['username', username],
@@ -74,7 +104,7 @@ export default function CustomerPortal() {
   const [error, setError] = useState('');
   const [routerContext, setRouterContext] = useState({ routerIp: '', clientIp: '', mac: '', linkLogin: '', dst: '' });
   const [paymentMethod, setPaymentMethod] = useState('');
-  const [pendingPaymentId, setPendingPaymentId] = useState('');
+  const [pendingPayment, setPendingPayment] = useState(null);
 
   useEffect(() => {
     const routeServiceType = pathServiceType();
@@ -157,7 +187,7 @@ export default function CustomerPortal() {
   }, [tenantId]);
 
   useEffect(() => {
-    if (!pendingPaymentId) return undefined;
+    if (!pendingPayment?.id) return undefined;
     let stopped = false;
     let attempts = 0;
 
@@ -165,20 +195,20 @@ export default function CustomerPortal() {
       attempts += 1;
       setVerifying(true);
       try {
-        const { data } = await publicApi.get(`/public/${tenantId}/verify?payment_id=${encodeURIComponent(pendingPaymentId)}`);
+        const { data } = await publicApi.get(`/public/${tenantId}/verify?payment_id=${encodeURIComponent(pendingPayment.id)}&verify_token=${encodeURIComponent(pendingPayment.verifyToken || '')}`);
         if (stopped) return;
         setVerification(data);
         if (data.success) {
-          setPendingPaymentId('');
+          setPendingPayment(null);
           toast.success('Payment verified');
           submitRouterLogin(routerContext.routerIp || data.router_ip, data.username, data.password, routerContext.linkLogin || data.link_login, routerContext.dst || data.dst);
         } else if (attempts >= 18) {
-          setPendingPaymentId('');
+          setPendingPayment(null);
         }
       } catch (err) {
         if (stopped) return;
         if (attempts >= 18) {
-          setPendingPaymentId('');
+          setPendingPayment(null);
           setVerification({ success: false, message: err.response?.data?.message || 'Payment verification is still pending. Please contact your ISP if this continues.' });
         }
       } finally {
@@ -192,7 +222,7 @@ export default function CustomerPortal() {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [pendingPaymentId, routerContext.dst, routerContext.routerIp, routerContext.linkLogin, tenantId]);
+  }, [pendingPayment, routerContext.dst, routerContext.routerIp, routerContext.linkLogin, tenantId]);
 
   const openPayment = (pkg, type = serviceType) => {
     setSelectedPackage(pkg);
@@ -265,7 +295,7 @@ export default function CustomerPortal() {
       toast.success(data.message || 'Check your phone for the M-Pesa prompt');
       if (data.paymentId) {
         setVerification({ success: false, status: 'pending', message: 'Waiting for M-Pesa confirmation.' });
-        setPendingPaymentId(data.paymentId);
+        setPendingPayment({ id: data.paymentId, verifyToken: data.verifyToken || '' });
       }
       setSelectedPackage(null);
       setPhone('');
