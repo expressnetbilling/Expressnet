@@ -297,8 +297,7 @@ def upsert_router_profile(tenant, path, name, speed, session_timeout=None):
         existing = find_router_item(api, path, name)
         fields = {"name": name}
         rate_limit = normalize_rate_limit(speed)
-        if rate_limit:
-            fields["rate-limit"] = rate_limit
+        fields["rate-limit"] = rate_limit or ""
         if path == ("ppp", "profile"):
             fields.setdefault("local-address", "172.31.0.1")
             fields.setdefault("remote-address", "Expressnet-pool")

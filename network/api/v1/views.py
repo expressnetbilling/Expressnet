@@ -1898,6 +1898,8 @@ def packages(request, package_id=None):
             if requested_service_type not in {"hotspot", "pppoe"}:
                 return ok({"message": "Package type must be Hotspot or PPPoE"}, 400)
             updates["service_type"] = requested_service_type
+        if "speed" in updates:
+            updates["speed"] = normalize_rate_limit(updates["speed"]) or str(updates["speed"] or "").strip()
         if "price" in updates:
             updates["price"] = float(updates["price"])
         if "amount_payable" in updates:
@@ -1978,6 +1980,7 @@ def package_add(request):
     if any(not data.get(field) for field in ["name", "speed", "price"]):
         return ok({"message": "All package fields are required"}, 400)
     package_payload = normalized_package_payload(data)
+    speed = normalize_rate_limit(data["speed"]) or str(data["speed"] or "").strip()
     if find_child_by_field(f"tenants/{request.tenant['id']}/packages", "name", data["name"]):
         return ok({"message": "A package with this name already exists"}, 409)
     router_synced = False
@@ -1990,14 +1993,14 @@ def package_add(request):
             try:
                 if package_service_type({**data, **package_payload}) == "hotspot":
                     ensure_hotspot_captive_portal({"id": request.tenant["id"], **request.tenant}, public_base_url(request).rstrip("/"))
-                sync_package_profile(request.tenant, {**data, **package_payload})
+                sync_package_profile(request.tenant, {**data, **package_payload, "speed": speed})
                 router_synced = True
             except Exception as exc:
                 router_error = str(exc)
     new_ref = ref(f"tenants/{request.tenant['id']}/packages").push(
         {
             "name": data["name"],
-            "speed": data["speed"],
+            "speed": speed,
             **package_payload,
             "price": float(data["price"]),
             "amount_payable": float(data.get("amount_payable") or data["price"]),
@@ -2010,12 +2013,12 @@ def package_add(request):
         }
     )
     if router_queued:
-        _queue_router_command(request, {"type": "sync_packages", "script": _package_sync_script_for_request(request, {"id": new_ref.key, **data, **package_payload}), "package_ids": [new_ref.key]})
+        _queue_router_command(request, {"type": "sync_packages", "script": _package_sync_script_for_request(request, {"id": new_ref.key, **data, **package_payload, "speed": speed}), "package_ids": [new_ref.key]})
     if request.tenant.get("radius_enabled"):
         try:
             from billing_api.radius_provisioning import upsert_pg_package
 
-            upsert_pg_package(Tenant.objects.get(pk=request.tenant["id"]), {"id": new_ref.key, **data, **package_payload})
+            upsert_pg_package(Tenant.objects.get(pk=request.tenant["id"]), {"id": new_ref.key, **data, **package_payload, "speed": speed})
         except Exception:
             logger.warning("RADIUS package mirror failed tenant=%s package=%s", request.tenant["id"], new_ref.key, exc_info=True)
     message = "Package and MikroTik profile created" if router_synced else "Package created and queued for MikroTik sync" if router_queued else "Package created. Sync router after MikroTik is connected."
@@ -2327,7 +2330,7 @@ def _customer_secret_script(customer):
     else:
         disabled = "no" if status == "active" else "yes"
     rate_limit = _rsc_escape(normalize_rate_limit(customer.get("speed")) or "")
-    rate_limit_field = f' rate-limit="{rate_limit}"' if rate_limit else ""
+    rate_limit_field = f' rate-limit="{rate_limit}"'
     limit_uptime = _rsc_escape(routeros_duration(customer.get("duration_seconds") or customer.get("limit_seconds")) or "")
     limit_uptime_field = f' limit-uptime="{limit_uptime}"' if limit_uptime and service_type == "hotspot" else ""
     ppp_profile_script = (
@@ -2335,25 +2338,12 @@ def _customer_secret_script(customer):
         f':if ([:len [/ppp profile find name="{profile}"]] = 0) do={{'
         f' /ppp profile add name="{profile}" local-address=172.31.0.1 remote-address=Expressnet-pool{rate_limit_field} }} '
         f'else={{ /ppp profile set [find name="{profile}"] local-address=172.31.0.1 remote-address=Expressnet-pool{rate_limit_field} }}; }};'
-        if rate_limit
-        else (
-            f':if ("{profile}" != "default") do={{ '
-            f':if ([:len [/ppp profile find name="{profile}"]] = 0) do={{'
-            f' /ppp profile add name="{profile}" local-address=172.31.0.1 remote-address=Expressnet-pool }} '
-            f'else={{ /ppp profile set [find name="{profile}"] local-address=172.31.0.1 remote-address=Expressnet-pool }}; }};'
-        )
     )
     hotspot_profile_script = (
         f':if ("{profile}" != "default") do={{ '
         f':if ([:len [/ip hotspot user profile find name="{profile}"]] = 0) do={{'
         f' /ip hotspot user profile add name="{profile}"{rate_limit_field} }} '
         f'else={{ /ip hotspot user profile set [find name="{profile}"]{rate_limit_field} }}; }};'
-        if rate_limit
-        else (
-            f':if ("{profile}" != "default") do={{ '
-            f':if ([:len [/ip hotspot user profile find name="{profile}"]] = 0) do={{'
-            f' /ip hotspot user profile add name="{profile}" }}; }};'
-        )
     )
     if service_type == "pppoe":
         return (
@@ -2623,7 +2613,7 @@ def _package_profile_script(package):
         return ""
     service_type = package_service_type(package)
     rate_limit = _rsc_escape(normalize_rate_limit(package.get("speed")) or "")
-    rate_limit_field = f' rate-limit="{rate_limit}"' if rate_limit else ""
+    rate_limit_field = f' rate-limit="{rate_limit}"'
     session_timeout = _rsc_escape(routeros_duration(package_duration_delta(package)) or "")
     session_timeout_field = f' session-timeout="{session_timeout}"' if session_timeout else ""
     if service_type == "pppoe":
