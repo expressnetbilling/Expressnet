@@ -58,6 +58,7 @@ urlpatterns = [
     path("customers/", management_views.customers),
     path("customers/add", management_views.customer_add),
     path("customers/hotspot-portal", network_views.customer_hotspot_portal),
+    path("customers/provision-bulk", network_views.customer_provision_bulk),
     path("customers/<str:customer_id>", management_views.customers),
     path("customers/<str:customer_id>/provision", network_views.customer_provision),
     path("customers/<str:customer_id>/renew", management_views.customer_renew),

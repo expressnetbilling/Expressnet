@@ -191,6 +191,28 @@ def static_ip_network_details(ip_address):
     }
 
 
+def static_customer_network():
+    return ipaddress.ip_network("172.30.0.0/16")
+
+
+def static_customer_gateway():
+    return str(next(static_customer_network().hosts()))
+
+
+def is_reserved_static_ip(ip_address):
+    return str(ip_address or "").strip() == static_customer_gateway()
+
+
+def next_static_customer_ip(used_ips):
+    reserved = {static_customer_gateway()}
+    unavailable = {str(value or "").strip() for value in used_ips if str(value or "").strip()} | reserved
+    for address in static_customer_network().hosts():
+        address_text = str(address)
+        if address_text not in unavailable:
+            return address_text
+    raise ValueError("No static IP addresses are available")
+
+
 def _customer_credentials_sms(customer, tenant):
     brand = tenant.get("business_name") or tenant.get("name") or "Expressnet"
     service_type = str(customer.get("service_type") or "internet").upper()
@@ -1137,12 +1159,15 @@ def customer_add(request):
         requested_ip = str(data.get("ip_address") or "").strip()
         if requested_ip:
             try:
-                if ipaddress.ip_address(requested_ip) not in ipaddress.ip_network("172.30.0.0/16") or requested_ip in used_ips:
-                    return ok({"message": "Static IP must be unique and belong to 172.30.0.0/16"}, 400)
+                if ipaddress.ip_address(requested_ip) not in static_customer_network() or requested_ip in used_ips or is_reserved_static_ip(requested_ip):
+                    return ok({"message": "Static IP must be unique, belong to 172.30.0.0/16, and not use the gateway 172.30.0.1"}, 400)
             except ValueError:
                 return ok({"message": "Enter a valid static IP address"}, 400)
         else:
-            requested_ip = next(str(address) for address in ipaddress.ip_network("172.30.0.0/16").hosts() if str(address) not in used_ips)
+            try:
+                requested_ip = next_static_customer_ip(used_ips)
+            except ValueError as exc:
+                return ok({"message": str(exc)}, 400)
         data["ip_address"] = requested_ip
         data.update(static_ip_network_details(requested_ip))
         provision = True

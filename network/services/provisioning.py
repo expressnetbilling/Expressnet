@@ -1399,8 +1399,16 @@ def upsert_customer_access(tenant, customer, disabled=False):
                 {"chain": "srcnat", "src-address": "172.30.0.0/16", "comment": "billing-saas static masquerade"},
                 {"chain": "srcnat", "src-address": "172.30.0.0/16", "action": "masquerade", "comment": "billing-saas static masquerade"},
             )
+            binding_path = api.path("ip", "hotspot", "ip-binding")
+            gateway_binding = find_router_item_by_fields(api, ("ip", "hotspot", "ip-binding"), {"address": "172.30.0.1"})
+            if gateway_binding and gateway_binding.get(".id"):
+                try:
+                    binding_path.remove(gateway_binding[".id"])
+                except Exception:
+                    pass
             if customer.get("ip_address"):
-                binding_path = api.path("ip", "hotspot", "ip-binding")
+                if str(customer.get("ip_address") or "").strip() == "172.30.0.1":
+                    return True
                 binding = find_router_item_by_fields(api, ("ip", "hotspot", "ip-binding"), {"address": customer["ip_address"]})
                 binding_fields = {
                     "address": customer["ip_address"],

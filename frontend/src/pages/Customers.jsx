@@ -89,6 +89,8 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
   const [showEditPassword, setShowEditPassword] = useState(false);
   const [viewingCustomer, setViewingCustomer] = useState(null);
   const [actionsPosition, setActionsPosition] = useState(null);
+  const [selectedCustomerIds, setSelectedCustomerIds] = useState([]);
+  const [bulkProvisioning, setBulkProvisioning] = useState(false);
   const actionsMenuRef = useRef(null);
   const actionsButtonRefs = useRef({});
   const isHotspotOnlyPage = serviceLocked === 'hotspot';
@@ -185,6 +187,15 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
     ['offline', 'Offline', userStats.offline, PlugZap],
   ].filter(([key]) => !serviceLocked || ['all', serviceLocked, 'paused', 'offline'].includes(key))), [serviceLocked, userStats]);
 
+  const filteredCustomerIds = useMemo(() => filteredCustomers.map((customer) => customer.id), [filteredCustomers]);
+  const selectedVisibleIds = selectedCustomerIds.filter((id) => filteredCustomerIds.includes(id));
+  const allVisibleSelected = filteredCustomerIds.length > 0 && selectedVisibleIds.length === filteredCustomerIds.length;
+  const tableColSpan = (isHotspotOnlyPage ? 10 : 13) + 1;
+
+  useEffect(() => {
+    setSelectedCustomerIds((current) => current.filter((id) => filteredCustomerIds.includes(id)));
+  }, [filteredCustomerIds]);
+
   async function load() {
     setLoading(true);
     try {
@@ -217,6 +228,21 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
   useEffect(() => {
     load();
   }, []);
+
+  const toggleCustomerSelection = (customerId) => {
+    setSelectedCustomerIds((current) => (
+      current.includes(customerId)
+        ? current.filter((id) => id !== customerId)
+        : [...current, customerId]
+    ));
+  };
+
+  const toggleAllVisibleCustomers = () => {
+    setSelectedCustomerIds((current) => {
+      if (allVisibleSelected) return current.filter((id) => !filteredCustomerIds.includes(id));
+      return Array.from(new Set([...current, ...filteredCustomerIds]));
+    });
+  };
 
   useEffect(() => {
     setStatusFilter(initialFilter);
@@ -333,7 +359,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
       mikrotik_router_id: form.mikrotik_router_id,
       package: form.package_name,
       service_type: serviceType,
-      provision_mikrotik: serviceType !== 'static' && form.provision_mikrotik,
+      provision_mikrotik: serviceType === 'static' || form.provision_mikrotik,
     };
     if (['pppoe', 'static'].includes(serviceType)) payload.amount_payable = Number(form.amount_payable || 0);
     if (serviceType === 'pppoe' && form.grace_period_enabled) {
@@ -514,6 +540,31 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
     }
   };
 
+  const provisionSelectedCustomers = async () => {
+    const customerIds = selectedVisibleIds;
+    if (customerIds.length === 0) {
+      toast.error('Select at least one customer');
+      return;
+    }
+    closeActionsMenu();
+    setBulkProvisioning(true);
+    try {
+      const { data } = await api.post('/customers/provision-bulk', { customer_ids: customerIds });
+      const failed = Array.isArray(data.results) ? data.results.filter((item) => !item.success).length : 0;
+      if (failed) {
+        toast.error(data.message || `${failed} customer${failed === 1 ? '' : 's'} failed to provision`);
+      } else {
+        toast.success(data.message || 'Selected customers provisioned on MikroTik');
+      }
+      setSelectedCustomerIds([]);
+      await load();
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Failed to provision selected customers');
+    } finally {
+      setBulkProvisioning(false);
+    }
+  };
+
   const openCustomer = filteredCustomers.find((customer) => customer.id === openActionsId);
 
   return (
@@ -567,7 +618,17 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
               placeholder={isHotspotOnlyPage ? 'Search name, phone, username, package' : 'Search name, phone, location, username, package'}
             />
           </label>
-          
+          {!hideManualAccessActions && (
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={provisionSelectedCustomers}
+              disabled={bulkProvisioning || selectedVisibleIds.length === 0}
+            >
+              <Router size={15} />
+              {bulkProvisioning ? 'Provisioning...' : `Provision Selected (${selectedVisibleIds.length})`}
+            </button>
+          )}
         </div>
       </section>
 
@@ -575,6 +636,15 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
         <table className={`${isHotspotOnlyPage ? 'min-w-[820px]' : 'min-w-[1020px]'} w-full divide-y divide-slate-200`}>
           <thead className="table-head">
             <tr>
+              <th className="px-3 py-2">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={toggleAllVisibleCustomers}
+                  disabled={filteredCustomerIds.length === 0}
+                  aria-label="Select all visible customers"
+                />
+              </th>
               <th className="px-3 py-2">Name</th>
               <th className="px-3 py-2">Phone</th>
               {!isHotspotOnlyPage && <th className="px-3 py-2">Location</th>}
@@ -593,11 +663,19 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
-              <tr><td className="table-cell text-slate-500" colSpan={isHotspotOnlyPage ? 10 : 13}>Loading customers...</td></tr>
+              <tr><td className="table-cell text-slate-500" colSpan={tableColSpan}>Loading customers...</td></tr>
             ) : filteredCustomers.length === 0 ? (
-              <tr><td className="table-cell text-slate-500" colSpan={isHotspotOnlyPage ? 10 : 13}>No customers found.</td></tr>
+              <tr><td className="table-cell text-slate-500" colSpan={tableColSpan}>No customers found.</td></tr>
             ) : filteredCustomers.map((customer) => (
               <tr key={customer.id}>
+                <td className="table-cell px-3">
+                  <input
+                    type="checkbox"
+                    checked={selectedCustomerIds.includes(customer.id)}
+                    onChange={() => toggleCustomerSelection(customer.id)}
+                    aria-label={`Select ${customer.name || 'customer'}`}
+                  />
+                </td>
                 <td className="table-cell px-3 font-medium text-slate-900">{customer.name}</td>
                 <td className="table-cell px-3">{customer.phone}</td>
                 {!isHotspotOnlyPage && <td className="table-cell px-3">{customer.location || '-'}</td>}

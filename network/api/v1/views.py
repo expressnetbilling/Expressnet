@@ -1912,6 +1912,97 @@ def customer_provision(request, customer_id):
 
 
 @csrf_exempt
+@api_view(["POST"])
+@tenant_required
+def customer_provision_bulk(request):
+    data = body(request)
+    customer_ids = data.get("customer_ids") or data.get("customerIds") or []
+    if not isinstance(customer_ids, list):
+        return ok({"message": "customer_ids must be a list"}, 400)
+    customer_ids = [str(customer_id).strip() for customer_id in customer_ids if str(customer_id).strip()]
+    if not customer_ids:
+        return ok({"message": "Select at least one customer"}, 400)
+    if len(customer_ids) > 100:
+        return ok({"message": "You can provision up to 100 customers at a time"}, 400)
+    if not has_mikrotik_credentials(request.tenant) and not _router_is_agent_linked(request.tenant):
+        return ok({"message": "Link a MikroTik router before provisioning customers"}, 400)
+
+    tenant_id = request.tenant["id"]
+    results = []
+    queued_scripts = []
+    queued_customer_ids = []
+    for customer_id in customer_ids:
+        customer = ref(f"tenants/{tenant_id}/customers/{customer_id}").get()
+        if not customer:
+            results.append({"id": customer_id, "success": False, "message": "Customer not found"})
+            continue
+        service_type = customer.get("service_type") or "hotspot"
+        if service_type == "static":
+            customer = {
+                **customer,
+                "subnet_mask": customer.get("subnet_mask") or "255.255.0.0",
+                "gateway": customer.get("gateway") or "172.30.0.1",
+                "preferred_dns": customer.get("preferred_dns") or "172.30.0.1",
+            }
+        pkg = find_child_by_field(f"tenants/{tenant_id}/packages", "name", customer.get("package"))
+        provisioning_status = "queued"
+        provisioning_message = f"{service_type.upper()} access queued for MikroTik sync"
+        try:
+            if has_mikrotik_credentials(request.tenant):
+                if pkg:
+                    if service_type == "pppoe":
+                        create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
+                    elif service_type == "hotspot":
+                        create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
+                upsert_customer_access(request.tenant, {**customer, "package_name": customer.get("package"), "service_type": service_type}, disabled=customer.get("status") != "active")
+                provisioning_status = "provisioned"
+                provisioning_message = f"{service_type.upper()} access synced on MikroTik"
+            else:
+                script = _customer_secret_script({
+                    **customer,
+                    "package_name": customer.get("package"),
+                    "speed": (pkg or {}).get("speed"),
+                    "service_type": service_type,
+                    "mikrotik_bridge_name": mikrotik_managed_bridge_name(request.tenant),
+                })
+                if script:
+                    queued_scripts.append(script)
+                    queued_customer_ids.append(customer_id)
+            updates = {
+                "provisioning_status": provisioning_status,
+                "service_type": service_type,
+                "auto_reconnect": True,
+                "provisioning_message": provisioning_message,
+                "provisioned_at": iso_now(),
+            }
+            if service_type == "static":
+                updates.update({
+                    "subnet_mask": customer.get("subnet_mask"),
+                    "gateway": customer.get("gateway"),
+                    "preferred_dns": customer.get("preferred_dns"),
+                })
+            ref(f"tenants/{tenant_id}/customers/{customer_id}").update(updates)
+            results.append({"id": customer_id, "success": True, "status": provisioning_status, "message": provisioning_message})
+        except Exception as exc:
+            logger.exception("Bulk customer provision failed tenant=%s customer=%s", tenant_id, customer_id)
+            results.append({"id": customer_id, "success": False, "message": str(exc)})
+
+    if queued_scripts:
+        _queue_router_command(request, {
+            "type": "sync_secrets",
+            "customer_ids": queued_customer_ids,
+            "script": "".join(queued_scripts),
+        })
+    success_count = sum(1 for item in results if item.get("success"))
+    failed_count = len(results) - success_count
+    return ok({
+        "success": failed_count == 0,
+        "message": f"Provisioned {success_count} customer{'s' if success_count != 1 else ''}" + (f"; {failed_count} failed" if failed_count else ""),
+        "results": results,
+    }, 200 if success_count else 400)
+
+
+@csrf_exempt
 @api_view(["GET"])
 @tenant_required
 def customer_hotspot_portal(request):
@@ -2376,6 +2467,15 @@ def _customer_secret_script(customer):
         disabled = "yes" if str(customer.get("status") or "active").strip().lower() in {"inactive", "paused", "suspended"} else "no"
         if not ip_address:
             return ""
+        gateway_cleanup = ':do { /ip hotspot ip-binding remove [find address=172.30.0.1] } on-error={};'
+        if ip_address == "172.30.0.1":
+            return (
+                f':local billingBridge "{bridge_name}";'
+                ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};'
+                ':do { /ip address add address=172.30.0.1/16 interface=$billingBridge comment="Expressnet static gateway" } '
+                'on-error={ /ip address set [find interface=$billingBridge comment="Expressnet static gateway"] address=172.30.0.1/16 interface=$billingBridge comment="Expressnet static gateway" };'
+                f'{gateway_cleanup}'
+            )
         return (
             f':local billingBridge "{bridge_name}";'
             ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};'
@@ -2387,6 +2487,7 @@ def _customer_secret_script(customer):
             'on-error={ /ip dhcp-server network set [find address=172.30.0.0/16] gateway=172.30.0.1 dns-server=172.30.0.1 };'
             ':do { /ip firewall nat add chain=srcnat src-address=172.30.0.0/16 action=masquerade comment="billing-saas static masquerade" } '
             'on-error={ /ip firewall nat set [find comment="billing-saas static masquerade"] chain=srcnat src-address=172.30.0.0/16 action=masquerade comment="billing-saas static masquerade" };'
+            f'{gateway_cleanup}'
             f':if ([:len [/ip hotspot ip-binding find address="{ip_address}"]] = 0) do={{'
             f' /ip hotspot ip-binding add address="{ip_address}" type=bypassed disabled={disabled} comment="{comment}" }} '
             f'else={{ /ip hotspot ip-binding set [find address="{ip_address}"] type=bypassed disabled={disabled} comment="{comment}" }};'
