@@ -19,7 +19,7 @@ from django.core.files.storage import FileSystemStorage
 from django.core.management import call_command
 from django.core.mail import EmailMultiAlternatives, send_mail
 from django.core.paginator import Paginator
-from django.db import close_old_connections, connection
+from django.db import IntegrityError, close_old_connections, connection
 from django.db.utils import OperationalError
 from django.db.models import Count, Sum
 from django.http import FileResponse, Http404, HttpResponse
@@ -741,42 +741,52 @@ def auth_register(request):
     if missing:
         return ok({"message": f"Missing fields: {', '.join(missing)}"}, 400)
     email = data["email"].lower().strip()
-    if find_child_by_field("tenants", "email", email):
+    if Tenant.objects.filter(email__iexact=email).exists():
         return ok({"message": "Email already registered"}, 400)
     base_slug = tenant_slug(data["business_name"])
     slug = base_slug
     suffix = 2
-    while find_child_by_field("tenants", "subdomain", slug):
+    while Tenant.objects.filter(extra__subdomain=slug).exists():
         slug = f"{base_slug}-{suffix}"
         suffix += 1
     workspace_url = f"https://{tenant_portal_domain(slug)}"
 
-    tenant_ref = ref("tenants").push(
-        {
-            "business_name": data["business_name"],
-            "owner_name": data["owner_name"],
-            "email": email,
-            "phone": data["phone"],
-            "subdomain": slug,
-            "domain": tenant_portal_domain(slug),
-            "workspace_url": workspace_url,
-            "password": hash_password(data["password"]),
-            "business_number": str(data.get("business_number") or "").strip(),
-            "bank_code": str(data.get("bank_code") or "").strip(),
-            "bank_name": str(data.get("bank_name") or "").strip(),
-            "bank_account_number": str(data.get("bank_account_number") or "").strip(),
-            "mikrotik_host": "",
-            "mikrotik_user": "",
-            "mikrotik_pass": "",
-            "mikrotik_port": 8728,
-            "sms_balance": 10,
-            "sms_sent_count": 0,
-            "theme_color": data.get("theme_color") or "#fa8200",
-            "dark_mode": False,
-            "status": "active",
-            "created_at": iso_now(),
-        }
-    )
+    try:
+        tenant_ref = ref("tenants").push(
+            {
+                "business_name": data["business_name"],
+                "owner_name": data["owner_name"],
+                "email": email,
+                "phone": data["phone"],
+                "subdomain": slug,
+                "domain": tenant_portal_domain(slug),
+                "workspace_url": workspace_url,
+                "password": hash_password(data["password"]),
+                "business_number": str(data.get("business_number") or "").strip(),
+                "bank_code": str(data.get("bank_code") or "").strip(),
+                "bank_name": str(data.get("bank_name") or "").strip(),
+                "bank_account_number": str(data.get("bank_account_number") or "").strip(),
+                "mikrotik_host": "",
+                "mikrotik_user": "",
+                "mikrotik_pass": "",
+                "mikrotik_port": 8728,
+                "sms_balance": 10,
+                "sms_sent_count": 0,
+                "theme_color": data.get("theme_color") or "#fa8200",
+                "dark_mode": False,
+                "status": "active",
+                "created_at": iso_now(),
+            }
+        )
+    except IntegrityError as exc:
+        if "email" in str(exc).lower() or "unique" in str(exc).lower():
+            logger.info("Tenant registration duplicate email race for %s", email)
+            return ok({"message": "Email already registered"}, 400)
+        logger.exception("Tenant registration database constraint failed for %s", email)
+        return ok({"message": "Registration failed because the database schema is out of date. Please run migrations."}, 500)
+    except Exception:
+        logger.exception("Tenant registration failed for %s", email)
+        return ok({"message": "Registration failed. Please try again or contact support."}, 500)
     tenant_data = ref(f"tenants/{tenant_ref.key}").get() or {}
     notify_admins_tenant_signup(tenant_ref.key, tenant_data)
     notify_tenant_registered(tenant_data, request)

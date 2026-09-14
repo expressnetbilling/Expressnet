@@ -38,9 +38,17 @@ if RAILWAY_TCP_PROXY_DOMAIN and RAILWAY_TCP_PROXY_PORT:
 else:
     RAILWAY_PUBLIC_DATABASE_URL = None
 
-DATABASE_URL = os.getenv("DATABASE_PUBLIC_URL") or RAILWAY_PUBLIC_DATABASE_URL or os.getenv("DATABASE_URL")
+PRIVATE_RAILWAY_HOST = "postgres.railway.internal"
+private_database_url = os.getenv("DATABASE_URL") or ""
+configured_database_url = os.getenv("DATABASE_PUBLIC_URL") or RAILWAY_PUBLIC_DATABASE_URL or private_database_url
+use_local_sqlite_fallback = (
+    not RAILWAY_PUBLIC_DATABASE_URL
+    and PRIVATE_RAILWAY_HOST in configured_database_url
+)
+
+DATABASE_URL = None if use_local_sqlite_fallback else configured_database_url
 if DATABASE_URL:
-    database_ssl_default = "postgres.railway.internal" not in DATABASE_URL
+    database_ssl_default = PRIVATE_RAILWAY_HOST not in DATABASE_URL
     DATABASES = {
         "default": dj_database_url.parse(
             DATABASE_URL,

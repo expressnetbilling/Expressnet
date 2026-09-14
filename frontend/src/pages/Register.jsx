@@ -64,7 +64,8 @@ export default function Register() {
       toast.success(data.message || 'Registration successful. Please wait for admin activation.');
       navigate('/login');
     } catch (error) {
-      toast.error(error.response?.data?.message || 'Registration failed');
+      const message = error.response?.data?.message || error.response?.data?.error || error.message || 'Registration failed';
+      toast.error(message);
     } finally {
       setLoading(false);
     }
