@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -347,6 +348,28 @@ def notify_tenant_registered(tenant, request=None):
         ),
         [tenant.get("email")],
     )
+
+
+def send_tenant_registration_notifications_async(tenant_id, tenant, login_url):
+    def _send():
+        try:
+            notify_admins_tenant_signup(tenant_id, tenant)
+            send_system_email(
+                "Your Expressnetbilling workspace is ready",
+                (
+                    f"Hello {tenant.get('owner_name') or tenant.get('business_name')},\n\n"
+                    f"Your {tenant.get('business_name') or 'Expressnetbilling'} workspace has been created.\n\n"
+                    f"Subdomain: {tenant.get('subdomain')}\n"
+                    f"Workspace URL: {tenant.get('workspace_url')}\n"
+                    f"Login: {login_url}\n\n"
+                    "Use the email and password you provided during registration to sign in."
+                ),
+                [tenant.get("email")],
+            )
+        except Exception:
+            logger.exception("Tenant registration notifications failed for %s", tenant_id)
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 def method(request, *allowed):
@@ -741,7 +764,17 @@ def auth_register(request):
     if missing:
         return ok({"message": f"Missing fields: {', '.join(missing)}"}, 400)
     email = data["email"].lower().strip()
-    if Tenant.objects.filter(email__iexact=email).exists():
+    existing_tenant = Tenant.objects.filter(email__iexact=email).first()
+    if existing_tenant and check_password(data["password"], existing_tenant.password):
+        ensure_subscription(existing_tenant, data.get("plan") or "basic")
+        return ok(
+            {
+                "success": True,
+                "message": "This email is already registered. You can log in with the password you provided.",
+                "tenantId": str(existing_tenant.pk),
+            }
+        )
+    if existing_tenant:
         return ok({"message": "Email already registered"}, 400)
     base_slug = tenant_slug(data["business_name"])
     slug = base_slug
@@ -788,11 +821,11 @@ def auth_register(request):
         logger.exception("Tenant registration failed for %s", email)
         return ok({"message": "Registration failed. Please try again or contact support."}, 500)
     tenant_data = ref(f"tenants/{tenant_ref.key}").get() or {}
-    notify_admins_tenant_signup(tenant_ref.key, tenant_data)
-    notify_tenant_registered(tenant_data, request)
     tenant_instance = Tenant.objects.filter(pk=tenant_ref.key).first()
     if tenant_instance:
         ensure_subscription(tenant_instance, data.get("plan") or "basic")
+    login_url = f"{public_base_url(request).rstrip('/')}/login"
+    send_tenant_registration_notifications_async(tenant_ref.key, tenant_data, login_url)
     return ok({"success": True, "message": "Business registered successfully. Your account is active.", "tenantId": tenant_ref.key})
 
 
