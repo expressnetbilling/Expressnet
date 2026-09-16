@@ -49,26 +49,26 @@ export default function AdminLogin() {
             <Shield size={26} />
           </div>
           <div>
-            <p className="text-xs font-bold uppercase tracking-widest text-[#e94560]">Admin Portal</p>
-            <h1 className="text-2xl font-bold">Secure Sign In</h1>
+            <p className="text-xs font-medium uppercase tracking-wide text-[#e94560]">Admin Portal</p>
+            <h1 className="text-2xl font-semibold tracking-tight">Secure Sign In</h1>
           </div>
         </div>
 
         <form className="space-y-5" onSubmit={submit}>
           <div>
-            <label className="block text-sm font-medium text-slate-200" htmlFor="email">Email</label>
-            <input id="email" name="email" type="email" className="mt-1 w-full rounded-md border border-slate-600 bg-[#1a1a2e] px-3 py-2 text-sm outline-none focus:border-[#e94560] focus:ring-2 focus:ring-[#e94560]/20" value={form.email} onChange={update} />
+            <label className="block text-xs font-medium uppercase tracking-wide text-slate-300" htmlFor="email">Email</label>
+            <input id="email" name="email" type="email" className="mt-1 h-8 w-full rounded-md border border-slate-600 bg-[#1a1a2e] px-3 text-xs outline-none focus:border-[#e94560] focus:ring-2 focus:ring-[#e94560]/20" value={form.email} onChange={update} />
             {errors.email && <p className="mt-1 text-xs font-medium text-red-300">{errors.email}</p>}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-200" htmlFor="password">Password</label>
+            <label className="block text-xs font-medium uppercase tracking-wide text-slate-300" htmlFor="password">Password</label>
             <div className="relative">
               <input
                 id="password"
                 name="password"
                 type={showPassword ? 'text' : 'password'}
-                className="mt-1 w-full rounded-md border border-slate-600 bg-[#1a1a2e] px-3 py-2 pr-11 text-sm outline-none focus:border-[#e94560] focus:ring-2 focus:ring-[#e94560]/20"
+                className="mt-1 h-8 w-full rounded-md border border-slate-600 bg-[#1a1a2e] px-3 pr-11 text-xs outline-none focus:border-[#e94560] focus:ring-2 focus:ring-[#e94560]/20"
                 value={form.password}
                 onChange={update}
               />
@@ -84,7 +84,7 @@ export default function AdminLogin() {
             {errors.password && <p className="mt-1 text-xs font-medium text-red-300">{errors.password}</p>}
           </div>
 
-          <button type="submit" className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-[#e94560] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#c73652] disabled:opacity-60" disabled={loading}>
+          <button type="submit" className="inline-flex h-8 w-full items-center justify-center gap-2 rounded-md bg-[#e94560] px-4 text-xs font-medium text-white transition hover:bg-[#c73652] disabled:opacity-60" disabled={loading}>
             {loading ? 'Verifying...' : 'Login as Admin'}
           </button>
         </form>

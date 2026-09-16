@@ -224,15 +224,22 @@ def _login_failure_response(request, email):
     limit = int(os.getenv("TENANT_LOGIN_FAILURE_LIMIT", "5"))
     window = int(os.getenv("TENANT_LOGIN_FAILURE_WINDOW", str(15 * 60)))
     key = _login_failure_key(request, email)
-    failures = int(cache.get(key) or 0) + 1
-    cache.set(key, failures, timeout=window)
+    try:
+        failures = int(cache.get(key) or 0) + 1
+        cache.set(key, failures, timeout=window)
+    except Exception:
+        logger.warning("Tenant login failure rate limit cache unavailable", exc_info=True)
+        return None
     if failures > limit:
         return ok({"message": "Too many wrong password attempts. Please try again later."}, 429)
     return None
 
 
 def _clear_login_failures(request, email):
-    cache.delete(_login_failure_key(request, email))
+    try:
+        cache.delete(_login_failure_key(request, email))
+    except Exception:
+        logger.warning("Tenant login failure cache cleanup unavailable", exc_info=True)
 
 
 def _tenant_login_payload(tenant, member_id=None):

@@ -52,8 +52,8 @@ export default function AdminUsers() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Platform Users</h1>
-          <p className="mt-1 text-sm text-slate-500">View and manage hotspot customers across all tenants.</p>
+          <h1 className="page-title">Platform Users</h1>
+          <p className="page-subtitle">View and manage hotspot customers across all tenants.</p>
         </div>
         <div className="relative sm:w-80">
           <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />

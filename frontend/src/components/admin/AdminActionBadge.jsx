@@ -12,7 +12,7 @@ export default function AdminActionBadge({ action }) {
   const key = Object.keys(colors).find((prefix) => label.startsWith(prefix)) || 'VIEW';
 
   return (
-    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${colors[key]}`}>
+    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${colors[key]}`}>
       {label}
     </span>
   );

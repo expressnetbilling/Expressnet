@@ -105,14 +105,14 @@ function StatCard({ label, value, note, icon: Icon, tone = 'blue' }) {
     <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-[0_10px_30px_rgba(15,34,64,0.05)]">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-[11px] font-extrabold text-[#102347]">{label}</p>
-          <p className="mt-2 text-3xl font-extrabold leading-none tracking-normal text-[#102347]">{value}</p>
+          <p className="theme-muted text-xs font-medium">{label}</p>
+          <p className="theme-text mt-1 text-2xl font-semibold leading-none tracking-tight">{value}</p>
         </div>
         <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${tones[tone]}`}>
           <Icon size={21} />
         </div>
       </div>
-      <p className={`mt-3 text-[11px] font-semibold ${tone === 'rose' ? 'text-rose-600' : tone === 'amber' || tone === 'orange' ? 'text-orange-600' : 'text-emerald-600'}`}>{note}</p>
+      <p className={`mt-3 text-xs font-normal ${tone === 'rose' ? 'text-rose-600' : tone === 'amber' || tone === 'orange' ? 'text-orange-600' : 'text-emerald-600'}`}>{note}</p>
     </section>
   );
 }
@@ -121,8 +121,8 @@ function StatusFilterButton({ active, children, dot, onClick }) {
   return (
     <button
       type="button"
-      className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-[11px] font-bold transition ${
-        active ? 'border-blue-500 bg-white text-blue-600 shadow-[0_0_0_3px_rgba(59,130,246,0.12)]' : 'border-slate-200 bg-white text-[#102347] hover:border-blue-200'
+      className={`inline-flex h-8 items-center gap-2 rounded-md border px-3 text-xs font-medium transition ${
+        active ? 'border-blue-500 bg-white text-blue-600 shadow-[0_0_0_3px_rgba(59,130,246,0.12)]' : 'border-slate-200 bg-white text-slate-700 hover:border-blue-200'
       }`}
       onClick={onClick}
     >
@@ -136,7 +136,7 @@ function HealthBadge({ value }) {
   const normalized = String(value || 'Healthy').toLowerCase();
   const tone = normalized === 'critical' ? 'bg-rose-500' : normalized === 'warning' ? 'bg-amber-500' : normalized === 'offline' ? 'bg-slate-400' : 'bg-emerald-500';
   return (
-    <span className="inline-flex items-center gap-2 text-[12px] font-bold text-[#102347]">
+    <span className="theme-text inline-flex items-center gap-2 text-xs font-medium">
       <span className={`h-2.5 w-2.5 rounded-full ${tone}`} />
       {value}
     </span>
@@ -146,7 +146,7 @@ function HealthBadge({ value }) {
 function TenantAvatar({ tenant, index }) {
   const colors = ['bg-blue-600', 'bg-orange-500', 'bg-cyan-500', 'bg-violet-600', 'bg-sky-500', 'bg-red-500', 'bg-slate-300', 'bg-emerald-500', 'bg-indigo-500', 'bg-purple-500'];
   return (
-    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[11px] font-extrabold text-white ${colors[index % colors.length]}`}>
+    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white ${colors[index % colors.length]}`}>
       {tenant.logo ? <img src={tenant.logo} alt="" className="h-full w-full rounded-full object-cover" /> : tenantInitials(tenant.business_name)}
     </div>
   );
@@ -174,6 +174,10 @@ export default function AdminTenants() {
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [page, setPage] = useState(1);
+  const [openActionId, setOpenActionId] = useState(null);
+  const [subscriptionModalTenant, setSubscriptionModalTenant] = useState(null);
+  const [subscriptionDate, setSubscriptionDate] = useState('');
+  const [subscriptionSaving, setSubscriptionSaving] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -293,6 +297,7 @@ export default function AdminTenants() {
   };
 
   const setStatus = async (tenant, status) => {
+    setOpenActionId(null);
     setUpdatingId(tenant.id);
     try {
       if (status === 'suspended') {
@@ -325,13 +330,32 @@ export default function AdminTenants() {
 
   const extendTenant = async (tenant) => {
     const current = tenant.subscription?.expires_at ? new Date(tenant.subscription.expires_at) : new Date();
-    current.setDate(current.getDate() + 30);
+    setSubscriptionModalTenant(tenant);
+    setSubscriptionDate(current.toISOString().slice(0, 10));
+    setOpenActionId(null);
+  };
+
+  const closeSubscriptionModal = () => {
+    if (subscriptionSaving) return;
+    setSubscriptionModalTenant(null);
+    setSubscriptionDate('');
+  };
+
+  const saveSubscriptionDate = async (event) => {
+    event.preventDefault();
+    if (!subscriptionModalTenant || !subscriptionDate) return;
+    setSubscriptionSaving(true);
     try {
-      await adminApi.patch(`/admin/tenants/${tenant.id}/subscription`, { expires_at: current.toISOString() });
-      toast.success('Subscription extended');
-      load();
+      const expiresAt = new Date(`${subscriptionDate}T23:59:59`);
+      await adminApi.patch(`/admin/tenants/${subscriptionModalTenant.id}/subscription`, { expires_at: expiresAt.toISOString() });
+      toast.success('Subscription date updated');
+      setSubscriptionModalTenant(null);
+      setSubscriptionDate('');
+      await load();
     } catch (error) {
-      toast.error(error.response?.data?.error || 'Failed to extend subscription');
+      toast.error(error.response?.data?.error || 'Failed to update subscription');
+    } finally {
+      setSubscriptionSaving(false);
     }
   };
 
@@ -339,14 +363,14 @@ export default function AdminTenants() {
     <div className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-xl font-extrabold text-[#102347]">Tenants</h1>
-          <div className="mt-2 flex items-center gap-2 text-[11px] font-semibold text-slate-400">
+          <h1 className="page-title">Tenants</h1>
+          <div className="mt-1 flex items-center gap-2 text-xs font-normal text-slate-400">
             <span>Home</span>
             <span>/</span>
             <span className="text-blue-600">Tenants</span>
           </div>
         </div>
-        <button className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-blue-600 px-4 text-xs font-bold text-white shadow-[0_10px_22px_rgba(37,99,235,0.22)] hover:bg-blue-700" type="button" onClick={openCreate}>
+        <button className="btn-primary" type="button" onClick={openCreate}>
           <Plus size={16} />
           Create Tenant
           <ChevronDown size={14} />
@@ -365,14 +389,14 @@ export default function AdminTenants() {
         <div className="flex flex-col gap-4 border-b border-slate-100 p-4 xl:flex-row xl:items-center xl:justify-between">
           <label className="relative block w-full xl:max-w-[390px]">
             <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-blue-500" />
-            <input className="h-11 w-full rounded-md border border-slate-200 bg-white pl-11 pr-3 text-[12px] font-semibold text-[#102347] outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="Search tenants, owner, email or domain..." value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} />
+            <input className="form-input h-8 pl-10" placeholder="Search tenants, owner, email or domain..." value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} />
           </label>
           <div className="flex flex-wrap items-center gap-2">
-            <button type="button" className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-[11px] font-bold text-[#102347] hover:bg-slate-50">
+            <button type="button" className="btn-secondary">
               <Download size={15} />
               Export
             </button>
-            <button type="button" className="flex h-10 w-10 items-center justify-center rounded-md border border-slate-200 text-[#102347] hover:bg-slate-50" aria-label="Export options">
+            <button type="button" className="flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50" aria-label="Export options">
               <ChevronDown size={15} />
             </button>
           </div>
@@ -380,7 +404,7 @@ export default function AdminTenants() {
 
         <div className="flex flex-col gap-4 border-b border-slate-100 p-4 xl:flex-row xl:items-center xl:justify-between">
           <div className="flex flex-wrap items-center gap-3">
-            <span className="text-[11px] font-extrabold text-[#102347]">Status:</span>
+            <span className="theme-muted text-xs font-medium">Status:</span>
             <StatusFilterButton active={statusFilter === 'all'} onClick={() => { setStatusFilter('all'); setPage(1); }}>All Status</StatusFilterButton>
             <StatusFilterButton active={statusFilter === 'active'} dot="bg-emerald-500" onClick={() => { setStatusFilter('active'); setPage(1); }}>Active</StatusFilterButton>
             <StatusFilterButton active={statusFilter === 'pending_setup'} dot="bg-amber-500" onClick={() => { setStatusFilter('pending_setup'); setPage(1); }}>Pending Setup</StatusFilterButton>
@@ -389,8 +413,8 @@ export default function AdminTenants() {
             <StatusFilterButton active={statusFilter === 'inactive'} dot="bg-slate-400" onClick={() => { setStatusFilter('inactive'); setPage(1); }}>Offline</StatusFilterButton>
           </div>
           <div className="flex items-center gap-3">
-            <span className="text-[11px] font-bold text-slate-500">Sort by</span>
-            <button type="button" className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-[11px] font-bold text-[#102347]">
+            <span className="text-xs font-normal text-slate-500">Sort by</span>
+            <button type="button" className="btn-secondary">
               <ArrowDownUp size={14} />
               Newest First
               <ChevronDown size={14} />
@@ -404,7 +428,7 @@ export default function AdminTenants() {
 
         <div className="overflow-x-auto">
         <table className="w-full min-w-[1120px] text-left">
-          <thead className="bg-slate-50 text-[10px] font-extrabold uppercase text-slate-500">
+          <thead className="table-head">
             <tr>
               <th className="px-4 py-4">Tenant</th>
               <th className="px-4 py-3">Owner</th>
@@ -431,7 +455,7 @@ export default function AdminTenants() {
                   <div className="flex items-center gap-3">
                     <TenantAvatar tenant={tenant} index={index} />
                     <div className="min-w-0">
-                      <p className="truncate text-[12px] font-extrabold uppercase text-[#102347]">{tenant.business_name || '-'}</p>
+                      <p className="theme-text truncate text-xs font-medium uppercase">{tenant.business_name || '-'}</p>
                       <a className="inline-flex max-w-[190px] items-center gap-1 truncate text-[11px] font-semibold text-blue-500 hover:text-blue-700" href={`/portal/${tenant.id}`} target="_blank" rel="noreferrer">
                         {tenant.domain || `${String(tenant.business_name || 'tenant').toLowerCase().replace(/\s+/g, '')}.expressnet.com`}
                         <ExternalLink size={11} />
@@ -440,33 +464,59 @@ export default function AdminTenants() {
                   </div>
                 </td>
                 <td className="px-4 py-3">
-                  <p className="text-[12px] font-bold text-[#102347]">{tenant.owner_name || '-'}</p>
-                  <p className="text-[11px] font-semibold text-slate-500">{tenant.email || tenant.phone || '-'}</p>
+                  <p className="theme-text text-xs font-medium">{tenant.owner_name || '-'}</p>
+                  <p className="theme-muted text-[11px] font-normal">{tenant.email || tenant.phone || '-'}</p>
                 </td>
                 <td className="px-4 py-3">
-                  <p className="text-[12px] font-extrabold text-[#102347]">{Number(getUserCount(tenant)).toLocaleString()}</p>
-                  <p className="text-[11px] font-semibold text-emerald-600">{Number(getOnlineCount(tenant)).toLocaleString()} online</p>
+                  <p className="theme-text text-xs font-semibold">{Number(getUserCount(tenant)).toLocaleString()}</p>
+                  <p className="text-[11px] font-normal text-emerald-600">{Number(getOnlineCount(tenant)).toLocaleString()} online</p>
                 </td>
                 <td className="px-4 py-3">
-                  <p className="text-[12px] font-extrabold text-[#102347]">{formatKES(revenue)}</p>
-                  <p className={`text-[11px] font-bold ${revenue > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>{revenue > 0 ? '+ 8.2%' : '0%'}</p>
+                  <p className="theme-text text-xs font-semibold">{formatKES(revenue)}</p>
+                  <p className={`text-[11px] font-normal ${revenue > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>{revenue > 0 ? '+ 8.2%' : '0%'}</p>
                 </td>
                 <td className="px-4 py-3"><HealthBadge value={health} /></td>
                 <td className="px-4 py-3">
-                  <p className="text-[12px] font-extrabold text-[#102347]">{formatDate(tenant.subscription?.expires_at)}</p>
-                  <p className={`text-[11px] font-bold ${days !== null && days <= 7 ? 'text-orange-600' : 'text-blue-600'}`}>{days === null ? '-' : days < 0 ? 'Expired' : `${days} days left`}</p>
+                  <p className="theme-text text-xs font-semibold">{formatDate(tenant.subscription?.expires_at)}</p>
+                  <p className={`text-[11px] font-normal ${days !== null && days <= 7 ? 'text-orange-600' : 'text-blue-600'}`}>{days === null ? '-' : days < 0 ? 'Expired' : `${days} days left`}</p>
                 </td>
-                <td className="px-4 py-3 text-[12px] font-bold text-[#102347]">{formatDate(tenant.created_at)}</td>
+                <td className="theme-text px-4 py-3 text-xs font-medium">{formatDate(tenant.created_at)}</td>
                 <td className="px-4 py-3">
-                  <div className="flex items-center gap-2">
-                    <button className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-[#102347] hover:bg-slate-50" type="button" onClick={() => openEdit(tenant)} aria-label="Edit tenant"><Edit size={15} /></button>
-                    <button className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-blue-600 hover:bg-blue-50" type="button" onClick={() => extendTenant(tenant)} aria-label="Extend subscription"><CalendarClock size={15} /></button>
-                    {tenant.status !== 'active' ? (
-                      <button className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-emerald-600 hover:bg-emerald-50" type="button" onClick={() => setStatus(tenant, 'active')} disabled={updatingId === tenant.id} aria-label="Activate tenant"><ShieldCheck size={15} /></button>
-                    ) : (
-                      <button className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-rose-600 hover:bg-rose-50" type="button" onClick={() => setStatus(tenant, 'suspended')} disabled={updatingId === tenant.id} aria-label="Suspend tenant"><Power size={15} /></button>
+                  <div className="relative inline-flex">
+                    <button
+                      className="btn-secondary"
+                      type="button"
+                      onClick={() => setOpenActionId((current) => (current === tenant.id ? null : tenant.id))}
+                      disabled={updatingId === tenant.id}
+                      aria-expanded={openActionId === tenant.id}
+                      aria-haspopup="menu"
+                    >
+                      Actions
+                      <MoreHorizontal size={15} />
+                    </button>
+                    {openActionId === tenant.id && (
+                      <div className="theme-card absolute right-0 top-10 z-20 w-48 overflow-hidden rounded-md border py-1 text-xs font-medium shadow-[0_18px_40px_rgba(15,34,64,0.16)]" role="menu">
+                        <button className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50" type="button" onClick={() => { setOpenActionId(null); openEdit(tenant); }} role="menuitem">
+                          <Edit size={14} />
+                          Edit tenant
+                        </button>
+                        <button className="flex w-full items-center gap-2 px-3 py-2 text-left text-blue-600 hover:bg-blue-50" type="button" onClick={() => extendTenant(tenant)} role="menuitem">
+                          <CalendarClock size={14} />
+                          Set subscription date
+                        </button>
+                        {tenant.status !== 'active' ? (
+                          <button className="flex w-full items-center gap-2 px-3 py-2 text-left text-emerald-600 hover:bg-emerald-50" type="button" onClick={() => setStatus(tenant, 'active')} role="menuitem">
+                            <ShieldCheck size={14} />
+                            Activate tenant
+                          </button>
+                        ) : (
+                          <button className="flex w-full items-center gap-2 px-3 py-2 text-left text-rose-600 hover:bg-rose-50" type="button" onClick={() => setStatus(tenant, 'suspended')} role="menuitem">
+                            <Power size={14} />
+                            Suspend tenant
+                          </button>
+                        )}
+                      </div>
                     )}
-                    <button className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-[#102347] hover:bg-slate-50" type="button" aria-label="More actions"><MoreHorizontal size={16} /></button>
                   </div>
                 </td>
               </tr>);
@@ -477,13 +527,13 @@ export default function AdminTenants() {
         <div className="flex flex-col gap-3 border-t border-slate-100 px-4 py-3 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
           <span className="font-semibold">Showing {filteredTenants.length === 0 ? 0 : ((page - 1) * pageSize) + 1} to {Math.min(page * pageSize, filteredTenants.length)} of {filteredTenants.length} tenants</span>
           <div className="flex items-center gap-1">
-            <button className="h-9 rounded-md border border-slate-200 px-3 text-[11px] font-bold disabled:opacity-50" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button>
+            <button className="h-8 rounded-md border border-slate-200 px-3 text-xs font-medium disabled:opacity-50" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button>
             {Array.from({ length: Math.min(totalPages, 5) }, (_, item) => item + 1).map((item) => (
-              <button key={item} className={`h-9 w-9 rounded-md text-[12px] font-extrabold ${page === item ? 'bg-blue-600 text-white' : 'border border-slate-200 text-[#102347]'}`} onClick={() => setPage(item)}>{item}</button>
+              <button key={item} className={`h-8 w-8 rounded-md text-xs font-medium ${page === item ? 'bg-app-accent text-white' : 'border border-slate-200 text-slate-700'}`} onClick={() => setPage(item)}>{item}</button>
             ))}
             {totalPages > 6 && <span className="px-2 text-slate-400">...</span>}
-            {totalPages > 5 && <button className={`h-9 w-9 rounded-md text-[12px] font-extrabold ${page === totalPages ? 'bg-blue-600 text-white' : 'border border-slate-200 text-[#102347]'}`} onClick={() => setPage(totalPages)}>{totalPages}</button>}
-            <button className="h-9 rounded-md border border-slate-200 px-3 text-[11px] font-bold text-blue-600 disabled:opacity-50" disabled={page >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button>
+            {totalPages > 5 && <button className={`h-8 w-8 rounded-md text-xs font-medium ${page === totalPages ? 'bg-app-accent text-white' : 'border border-slate-200 text-slate-700'}`} onClick={() => setPage(totalPages)}>{totalPages}</button>}
+            <button className="h-8 rounded-md border border-slate-200 px-3 text-xs font-medium text-app-accent disabled:opacity-50" disabled={page >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button>
           </div>
         </div>
       </section>
@@ -492,7 +542,7 @@ export default function AdminTenants() {
         <Modal title={modalMode === 'create' ? 'Create Tenant' : `Edit ${editingTenant?.business_name || 'Tenant'}`} onClose={closeModal}>
           <form className="space-y-5" onSubmit={saveTenant}>
             <section>
-              <h2 className="mb-3 text-sm font-bold text-slate-900">Business Info</h2>
+              <h2 className="theme-text mb-3 text-sm font-semibold tracking-tight">Business Info</h2>
               <div className="grid gap-4 md:grid-cols-2">
                 <Field name="business_name" value={form.business_name} error={errors.business_name} onChange={update} />
                 <Field name="owner_name" value={form.owner_name} error={errors.owner_name} onChange={update} />
@@ -522,7 +572,7 @@ export default function AdminTenants() {
             </section>
 
             <section>
-              <h2 className="mb-3 text-sm font-bold text-slate-900">MikroTik</h2>
+              <h2 className="theme-text mb-3 text-sm font-semibold tracking-tight">MikroTik</h2>
               <div className="grid gap-4 md:grid-cols-2">
                 <Field name="mikrotik_host" value={form.mikrotik_host} error={errors.mikrotik_host} onChange={update} />
                 <Field name="mikrotik_user" value={form.mikrotik_user} error={errors.mikrotik_user} onChange={update} />
@@ -533,8 +583,32 @@ export default function AdminTenants() {
 
             <div className="flex justify-end gap-3 border-t border-slate-200 pt-4">
               <button type="button" className="btn-secondary" onClick={closeModal}>Cancel</button>
-              <button type="submit" className="inline-flex items-center justify-center rounded-md bg-[#e94560] px-4 py-2 text-xs font-bold text-white hover:bg-[#c73652]" disabled={saving}>
+              <button type="submit" className="btn-primary" disabled={saving}>
                 {saving ? 'Saving...' : modalMode === 'create' ? 'Create Tenant' : 'Update Tenant'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {subscriptionModalTenant && (
+        <Modal title={`Subscription for ${subscriptionModalTenant.business_name || 'Tenant'}`} onClose={closeSubscriptionModal}>
+          <form className="space-y-5" onSubmit={saveSubscriptionDate}>
+            <div>
+              <label className="form-label" htmlFor="subscription_expires_at">Subscription expiry date</label>
+              <input
+                id="subscription_expires_at"
+                type="date"
+                className="form-input"
+                value={subscriptionDate}
+                onChange={(event) => setSubscriptionDate(event.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="flex justify-end gap-3 border-t border-slate-200 pt-4">
+              <button type="button" className="btn-secondary" onClick={closeSubscriptionModal}>Cancel</button>
+              <button type="submit" className="btn-primary" disabled={subscriptionSaving || !subscriptionDate}>
+                {subscriptionSaving ? 'Saving...' : 'Save date'}
               </button>
             </div>
           </form>

@@ -1,7 +1,7 @@
 from .base import *
 
 import dj_database_url
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 
 DEBUG = env_bool("DJANGO_DEBUG", True)
@@ -40,35 +40,72 @@ else:
 
 PRIVATE_RAILWAY_HOST = "postgres.railway.internal"
 private_database_url = os.getenv("DATABASE_URL") or ""
-configured_database_url = os.getenv("DATABASE_PUBLIC_URL") or RAILWAY_PUBLIC_DATABASE_URL or private_database_url
-use_local_sqlite_fallback = (
-    not RAILWAY_PUBLIC_DATABASE_URL
-    and PRIVATE_RAILWAY_HOST in configured_database_url
+
+
+def railway_public_url_with_private_credentials(public_url, private_url):
+    public_database = urlparse(public_url or "")
+    private_database = urlparse(private_url or "")
+    if (
+        PRIVATE_RAILWAY_HOST not in (private_database.hostname or "")
+        or not public_database.hostname
+        or ".rlwy.net" not in public_database.hostname
+        or not private_database.username
+        or private_database.password is None
+    ):
+        return public_url
+
+    netloc = f"{quote(unquote(private_database.username))}:{quote(unquote(private_database.password))}@{public_database.hostname}"
+    if public_database.port:
+        netloc += f":{public_database.port}"
+    path = public_database.path or private_database.path or "/railway"
+    return urlunparse((public_database.scheme or "postgresql", netloc, path, "", public_database.query, ""))
+
+
+configured_public_database_url = railway_public_url_with_private_credentials(
+    os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_EXTERNAL_URL") or os.getenv("POSTGRES_PUBLIC_URL"),
+    private_database_url,
+)
+configured_database_url = (
+    RAILWAY_PUBLIC_DATABASE_URL
+    or configured_public_database_url
+    or private_database_url
+    or os.getenv("POSTGRES_URL")
 )
 
-DATABASE_URL = None if use_local_sqlite_fallback else configured_database_url
-if DATABASE_URL:
-    database_ssl_default = PRIVATE_RAILWAY_HOST not in DATABASE_URL
-    DATABASES = {
-        "default": dj_database_url.parse(
-            DATABASE_URL,
-            conn_max_age=600,
-            conn_health_checks=True,
-            ssl_require=env_bool("DATABASE_SSL_REQUIRE", database_ssl_default),
-        )
-    }
-    if USE_DJANGO_TENANTS:
-        DATABASES["default"]["ENGINE"] = "django_tenants.postgresql_backend"
-else:
-    DATABASES = {
+if not configured_database_url:
+    raise RuntimeError("PostgreSQL DATABASE_URL is required. SQLite fallback is disabled for this project.")
+
+if PRIVATE_RAILWAY_HOST in configured_database_url and not RAILWAY_PUBLIC_DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL points to postgres.railway.internal, which only works inside Railway. "
+        "Set DATABASE_PUBLIC_URL/DATABASE_EXTERNAL_URL to a public Railway Postgres URL, or set "
+        "RAILWAY_TCP_PROXY_DOMAIN and RAILWAY_TCP_PROXY_PORT so local Django can reach the production database."
+    )
+
+DATABASE_URL = configured_database_url
+database_ssl_default = PRIVATE_RAILWAY_HOST not in DATABASE_URL
+DATABASES = {
+    "default": dj_database_url.parse(
+        DATABASE_URL,
+        conn_max_age=600,
+        conn_health_checks=True,
+        ssl_require=env_bool("DATABASE_SSL_REQUIRE", database_ssl_default),
+    )
+}
+if USE_DJANGO_TENANTS:
+    DATABASES["default"]["ENGINE"] = "django_tenants.postgresql_backend"
+
+PRIVATE_RAILWAY_REDIS_HOST = "redis.railway.internal"
+if PRIVATE_RAILWAY_REDIS_HOST in str(REDIS_URL or ""):
+    REDIS_URL = "locmem://billing-saas-local"
+    CACHES = {
         "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
-            "CONN_MAX_AGE": 60,
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "billing-saas-local",
         }
     }
-    if USE_DJANGO_TENANTS:
-        raise RuntimeError("USE_DJANGO_TENANTS requires PostgreSQL; set DATABASE_URL.")
+    CELERY_BROKER_URL = "memory://"
+    CELERY_RESULT_BACKEND = "cache+memory://"
 
 SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", False)
 SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0"))

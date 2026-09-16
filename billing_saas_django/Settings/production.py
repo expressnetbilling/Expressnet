@@ -63,7 +63,18 @@ PUBLIC_APP_URL = production_public_url("PUBLIC_APP_URL", "https://expressnetbill
 DARAJA_CALLBACK_BASE_URL = production_public_url("DARAJA_CALLBACK_BASE_URL", "https://expressnetbilling.com")
 PAYSTACK_CALLBACK_BASE_URL = production_public_url("PAYSTACK_CALLBACK_BASE_URL", PUBLIC_APP_URL)
 
-DATABASE_URL = os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
+private_database_url = os.getenv("DATABASE_URL") or ""
+DATABASE_URL = (
+    private_database_url
+    if "postgres.railway.internal" in private_database_url
+    else (
+        os.getenv("DATABASE_PUBLIC_URL")
+        or os.getenv("DATABASE_EXTERNAL_URL")
+        or os.getenv("POSTGRES_PUBLIC_URL")
+        or private_database_url
+        or os.getenv("POSTGRES_URL")
+    )
+)
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is required in production.")
 

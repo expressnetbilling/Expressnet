@@ -38,8 +38,8 @@ export default function AdminAuditLog() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Audit Log</h1>
-          <p className="mt-1 text-sm text-slate-500">Auto-refreshes every 30 seconds.</p>
+          <h1 className="page-title">Audit Log</h1>
+          <p className="page-subtitle">Auto-refreshes every 30 seconds.</p>
         </div>
         <input className="form-input sm:max-w-xs" placeholder="Filter by action or admin email" value={query} onChange={(event) => setQuery(event.target.value)} />
       </div>

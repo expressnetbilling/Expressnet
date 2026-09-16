@@ -67,10 +67,10 @@ function tenantInitials(name) {
 
 function Panel({ title, action, children, className = '' }) {
   return (
-    <section className={`overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_10px_28px_rgba(15,34,64,0.05)] ${className}`}>
+    <section className={`theme-card overflow-hidden rounded-lg border shadow-sm ${className}`}>
       <div className="flex items-center justify-between px-5 py-4">
-        <h2 className="text-[16px] font-extrabold text-[#06173a]">{title}</h2>
-        {action && <Link to={action.to} className="text-[12px] font-extrabold text-blue-600 hover:text-blue-700">{action.label}</Link>}
+        <h2 className="theme-text text-sm font-semibold tracking-tight">{title}</h2>
+        {action && <Link to={action.to} className="text-xs font-medium text-app-accent">{action.label}</Link>}
       </div>
       {children}
     </section>
@@ -114,15 +114,15 @@ function MetricCard({ label, value, helper, icon: Icon, tone = 'blue', spark }) 
   const [iconTone, line, fill] = tones[tone];
 
   return (
-    <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-[0_10px_28px_rgba(15,34,64,0.05)]">
+    <section className="theme-card rounded-lg border p-3.5 shadow-sm">
       <div className="flex items-start gap-4">
-        <div className={`mt-1 flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${iconTone}`}>
-          <Icon size={24} />
+        <div className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${iconTone}`}>
+          <Icon size={18} />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-[11px] font-extrabold text-[#06173a]">{label}</p>
-          <p className="mt-1 text-[24px] font-black leading-none tracking-normal text-[#06173a]">{value}</p>
-          {helper && <p className="mt-3 text-[12px] font-bold text-slate-500">{helper}</p>}
+          <p className="theme-muted text-xs font-medium">{label}</p>
+          <p className="theme-text mt-1 text-2xl font-semibold leading-none tracking-tight">{value}</p>
+          {helper && <p className="theme-muted mt-2 text-xs font-normal">{helper}</p>}
         </div>
       </div>
       <Sparkline color={line} fill={fill} points={spark} />
@@ -133,7 +133,7 @@ function MetricCard({ label, value, helper, icon: Icon, tone = 'blue', spark }) 
 function TenantAvatar({ tenant, index }) {
   const colors = ['bg-blue-600', 'bg-orange-500', 'bg-cyan-500', 'bg-violet-600', 'bg-sky-500', 'bg-red-500'];
   return (
-    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[11px] font-extrabold text-white ${colors[index % colors.length]}`}>
+    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white ${colors[index % colors.length]}`}>
       {tenantInitials(tenant.business_name)}
     </div>
   );
@@ -142,7 +142,6 @@ function TenantAvatar({ tenant, index }) {
 function RevenueTrend({ chart }) {
   const rows = Array.isArray(chart) ? chart : [];
   const amounts = rows.map((item) => Number(item.amount || 0));
-  const total = amounts.reduce((sum, amount) => sum + amount, 0);
   const max = Math.max(...amounts, 1);
   const toPoints = (series) => series.map((value, index) => `${(index / Math.max(series.length - 1, 1)) * 620},${190 - (value / max) * 160}`).join(' ');
   const points = toPoints(amounts.length ? amounts : [0, 0]);
@@ -150,29 +149,8 @@ function RevenueTrend({ chart }) {
   return (
     <Panel title="Revenue Trend" className="xl:col-span-2">
       <div className="px-5 pb-5">
-        <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <div className="flex gap-8 text-[12px] font-extrabold text-[#06173a]">
-              <span className="flex items-center gap-2"><span className="h-3 w-3 rotate-45 rounded-sm bg-blue-600" />Subscription payments</span>
-            </div>
-            <div className="mt-5 grid gap-3 sm:grid-cols-4">
-              {[
-                ['Total Revenue', formatKES(total)],
-                ['Highest Day', formatKES(max)],
-                ['Days Loaded', rows.length.toLocaleString()],
-                ['Average / Day', formatKES(rows.length ? total / rows.length : 0)],
-              ].map(([label, value]) => (
-                <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                  <p className="text-[11px] font-bold text-blue-700">{label}</p>
-                  <p className="mt-1 text-[20px] font-black text-[#06173a]">{value}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-          <button type="button" className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-[12px] font-bold text-[#06173a]">This Month <ChevronDown size={14} /></button>
-        </div>
         <div className="relative h-[250px]">
-          <div className="absolute inset-0 grid grid-rows-4 pl-1 text-[12px] font-extrabold text-blue-600">
+          <div className="absolute inset-0 grid grid-rows-4 pl-1 text-xs font-medium text-blue-600">
             {['250K', '150K', '50K', '0'].map((label) => <div key={label} className="border-t border-slate-100 pt-0.5">{label}</div>)}
           </div>
           <svg className="absolute left-12 top-2 h-[210px] w-[calc(100%-4rem)]" viewBox="0 0 620 210" preserveAspectRatio="none">
@@ -189,7 +167,7 @@ function RevenueTrend({ chart }) {
             <polygon points={`0,210 ${points} 620,210`} fill="url(#trafficBlue)" />
             <polyline points={points} fill="none" stroke="#2563eb" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-          <div className="absolute bottom-0 left-12 right-0 grid grid-cols-7 text-[11px] font-bold text-[#173b66]">
+          <div className="absolute bottom-0 left-12 right-0 grid grid-cols-7 text-[11px] font-normal text-slate-500">
             {rows.filter((_, index) => index % Math.max(Math.floor(rows.length / 6), 1) === 0).slice(0, 7).map((item) => <span key={item.date}>{formatDateShort(item.date)}</span>)}
           </div>
         </div>
@@ -214,14 +192,14 @@ function PlatformHealth({ health }) {
           <div key={label} className="flex items-center gap-4 py-4">
             <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full ${iconTone[tone]}`}><Icon size={22} /></div>
             <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-extrabold text-[#06173a]">{label}</p>
-              <p className="text-[12px] font-semibold text-[#173b66]">{detail}</p>
+              <p className="theme-text text-xs font-medium">{label}</p>
+              <p className="theme-muted text-xs font-normal">{detail}</p>
             </div>
-            <span className={`rounded-md px-4 py-1.5 text-[12px] font-extrabold ${status === 'ok' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{status}</span>
+            <span className={`rounded-md px-3 py-1 text-xs font-medium ${status === 'ok' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{status}</span>
           </div>
         ))}
       </div>
-      <div className="border-t border-slate-100 px-5 py-3 text-[12px] font-bold text-[#173b66]">
+      <div className="theme-muted border-t border-slate-100 px-5 py-3 text-xs font-medium">
         <span className="inline-flex items-center gap-2"><CheckCircle2 size={15} className={status === 'healthy' ? 'text-emerald-600' : 'text-rose-600'} />System status: {status}</span>
       </div>
     </Panel>
@@ -244,8 +222,8 @@ function SystemPerformance({ stats }) {
           {services.map(([label, value]) => (
             <div key={label} className="flex h-9 items-center gap-3 rounded-md border border-slate-200 px-3">
               <Server size={15} className="text-blue-600" />
-              <span className="flex-1 text-[12px] font-bold text-[#173b66]">{label}</span>
-              <span className="text-[12px] font-black text-[#06173a]">{value}</span>
+              <span className="theme-muted flex-1 text-xs font-normal">{label}</span>
+              <span className="theme-text text-xs font-semibold">{value}</span>
             </div>
           ))}
         </div>
@@ -259,28 +237,28 @@ function RecentTenants({ tenants }) {
     <Panel title="Recent Tenants" action={{ to: adminPath('tenants'), label: 'View All' }} className="xl:col-span-2">
       <div className="overflow-x-auto px-5 pb-4">
         <table className="w-full min-w-[650px] text-left">
-          <thead className="text-[10px] font-black uppercase text-[#173b66]">
+          <thead className="table-head">
             <tr>{['Tenant', 'Plan', 'Users', 'Revenue (This Month)', 'Status', 'Joined On'].map((heading) => <th key={heading} className="px-1 py-3">{heading}</th>)}</tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {tenants.length === 0 ? (
-              <tr><td colSpan="6" className="py-6 text-sm text-slate-500">No tenants found.</td></tr>
+              <tr><td colSpan="6" className="py-6 text-xs text-slate-500">No tenants found.</td></tr>
             ) : tenants.map((tenant, index) => (
               <tr key={tenant.id}>
                 <td className="py-3">
-                  <div className="flex items-center gap-3"><TenantAvatar tenant={tenant} index={index} /><span className="text-[13px] font-black uppercase text-[#06173a]">{tenant.business_name || tenant.owner_name || '-'}</span></div>
+                  <div className="flex items-center gap-3"><TenantAvatar tenant={tenant} index={index} /><span className="theme-text text-xs font-medium uppercase">{tenant.business_name || tenant.owner_name || '-'}</span></div>
                 </td>
-                <td className="text-[12px] font-bold text-[#06173a]">{tenant.subscription?.plan || '-'}</td>
-                <td className="text-[12px] font-black text-[#06173a]">{Number(getUserCount(tenant)).toLocaleString()}</td>
-                <td><p className="text-[12px] font-black text-[#06173a]">{formatKES(getTenantRevenue(tenant))}</p></td>
-                <td><span className={`rounded-md px-3 py-1.5 text-[11px] font-black ${tenant.status === 'active' ? 'bg-emerald-100 text-emerald-700' : tenant.status === 'suspended' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>{tenant.status || '-'}</span></td>
-                <td className="text-[12px] font-bold text-[#06173a]">{formatDate(tenant.created_at || tenant.updated_at)}</td>
+                <td className="theme-text text-xs font-medium">{tenant.subscription?.plan || '-'}</td>
+                <td className="theme-text text-xs font-semibold">{Number(getUserCount(tenant)).toLocaleString()}</td>
+                <td><p className="theme-text text-xs font-semibold">{formatKES(getTenantRevenue(tenant))}</p></td>
+                <td><span className={`rounded-md px-3 py-1.5 text-[11px] font-medium ${tenant.status === 'active' ? 'bg-emerald-100 text-emerald-700' : tenant.status === 'suspended' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>{tenant.status || '-'}</span></td>
+                <td className="theme-text text-xs font-medium">{formatDate(tenant.created_at || tenant.updated_at)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <Link to={adminPath('tenants')} className="flex items-center justify-center gap-2 px-5 pb-5 text-[12px] font-extrabold text-blue-600">View all tenants <ArrowRight size={14} /></Link>
+      <Link to={adminPath('tenants')} className="flex items-center justify-center gap-2 px-5 pb-5 text-xs font-medium text-app-accent">View all tenants <ArrowRight size={14} /></Link>
     </Panel>
   );
 }
@@ -288,18 +266,18 @@ function RecentTenants({ tenants }) {
 function TopTenants({ tenants }) {
   const ranked = [...tenants].sort((a, b) => getTenantRevenue(b) - getTenantRevenue(a)).slice(0, 5);
   return (
-    <Panel title={<span>Top Tenants by Revenue <span className="font-bold text-[#173b66]">(This Month)</span></span>} action={{ to: adminPath('tenants'), label: 'View All' }}>
+    <Panel title={<span>Top Tenants by Revenue <span className="font-medium text-slate-500">(This Month)</span></span>} action={{ to: adminPath('tenants'), label: 'View All' }}>
       <div className="divide-y divide-slate-100 px-5 pb-4">
         {ranked.length === 0 ? <p className="py-6 text-sm text-slate-500">No tenant revenue yet.</p> : ranked.map((tenant, index) => (
           <div key={tenant.id} className="flex items-center gap-4 py-3">
-            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-100 text-[12px] font-black text-[#173b66]">{index + 1}</span>
+            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-100 text-xs font-medium text-slate-600">{index + 1}</span>
             <TenantAvatar tenant={tenant} index={index + 3} />
             <div className="min-w-0 flex-1">
-              <p className="truncate text-[13px] font-black uppercase text-[#06173a]">{tenant.business_name || '-'}</p>
-              <p className="text-[12px] font-bold text-[#173b66]">{Number(getUserCount(tenant)).toLocaleString()} users</p>
+              <p className="theme-text truncate text-xs font-medium uppercase">{tenant.business_name || '-'}</p>
+              <p className="theme-muted text-xs font-normal">{Number(getUserCount(tenant)).toLocaleString()} users</p>
             </div>
             <div className="text-right">
-              <p className="text-[13px] font-black text-[#06173a]">{formatKES(getTenantRevenue(tenant))}</p>
+              <p className="theme-text text-xs font-semibold">{formatKES(getTenantRevenue(tenant))}</p>
             </div>
           </div>
         ))}
@@ -323,10 +301,10 @@ function RecentActivity({ activities }) {
         {rows.length === 0 ? <p className="py-6 text-sm text-slate-500">No recent activity.</p> : rows.map(([time, title, detail, Icon, tone]) => (
           <div key={`${time}-${title}`} className="flex items-center gap-4 py-3">
             <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${tone}`}><Icon size={17} /></div>
-            <span className="w-20 text-[12px] font-bold text-[#173b66]">{time}</span>
+            <span className="theme-muted w-20 text-xs font-normal">{time}</span>
             <div className="min-w-0">
-              <p className="text-[13px] font-black text-[#06173a]">{title}</p>
-              <p className="truncate text-[12px] font-bold text-[#173b66]">{detail}</p>
+              <p className="theme-text text-xs font-medium">{title}</p>
+              <p className="theme-muted truncate text-xs font-normal">{detail}</p>
             </div>
           </div>
         ))}
@@ -392,23 +370,23 @@ export default function AdminDashboard() {
   }, [tenants]);
 
   if (loading) {
-    return <p className="text-sm font-medium text-slate-600">Loading admin dashboard...</p>;
+    return <p className="text-xs font-medium text-slate-600">Loading admin dashboard...</p>;
   }
 
   return (
     <div className="space-y-5">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
         <div>
-          <h1 className="text-[24px] font-black text-[#06173a]">Dashboard</h1>
-          <p className="mt-1 text-[13px] font-semibold text-[#173b66]">Overview of your platform operations</p>
+          <h1 className="page-title">Dashboard</h1>
+          <p className="page-subtitle">Overview of your platform operations</p>
         </div>
         <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
           <label className="relative block w-full sm:w-[340px]">
             <Search size={17} className="absolute left-4 top-1/2 -translate-y-1/2 text-blue-700" />
-            <input className="h-11 w-full rounded-md border border-slate-200 bg-white pl-12 pr-14 text-[12px] font-semibold text-[#06173a] outline-none placeholder:text-[#173b66] focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="Search tenants, users, invoices..." />
-            <span className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md bg-slate-100 px-2 py-1 text-[11px] font-black text-[#173b66]">Ctrl K</span>
+            <input className="form-input h-8 pl-10 pr-14" placeholder="Search tenants, users, invoices..." />
+            <span className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500">Ctrl K</span>
           </label>
-          <button type="button" className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-200 bg-white px-4 text-[12px] font-black text-[#06173a] shadow-sm" onClick={load}>
+          <button type="button" className="btn-secondary" onClick={load}>
             <CalendarDays size={15} />
             {formatMonthRange()}
             <ChevronDown size={14} />

@@ -856,15 +856,56 @@ def _linked_router_from_tenant(tenant):
     }
 
 
-def _update_linked_router(tenant_id, tenant_data, **updates):
-    router = {**_linked_router_from_tenant(tenant_data), **updates}
+def _router_match_key(router):
+    identity = str((router or {}).get("identity") or "").strip().lower()
+    if identity:
+        return ("identity", identity)
+    tunnel_ip = str((router or {}).get("tunnel_ip") or "").strip()
+    if tunnel_ip:
+        return ("tunnel_ip", tunnel_ip)
+    last_seen_ip = str((router or {}).get("last_seen_ip") or "").strip()
+    if last_seen_ip:
+        return ("last_seen_ip", last_seen_ip)
+    return None
+
+
+def _normalize_linked_routers(tenant_data, allow_multiple=False):
     existing = dict((tenant_data or {}).get("linked_routers") or {})
+    current = _linked_router_from_tenant(tenant_data)
+    if not existing:
+        return {"primary": {**current, "id": "primary"}} if _router_is_agent_linked(tenant_data) else {}
+
+    normalized = {}
+    seen = set()
+    for key, item in existing.items():
+        router = {**item, "id": key}
+        match_key = _router_match_key(router)
+        if match_key and match_key in seen:
+            continue
+        if match_key:
+            seen.add(match_key)
+        normalized[key] = router
+
+    if not allow_multiple:
+        primary = normalized.get("primary")
+        current_key = _router_match_key(current)
+        if current_key:
+            primary = next((item for item in normalized.values() if _router_match_key(item) == current_key), primary)
+        primary = {**(primary or {}), **current, "id": "primary"}
+        return {"primary": primary}
+
+    return normalized
+
+
+def _update_linked_router(tenant_id, tenant_data, allow_new=False, **updates):
+    router = {**_linked_router_from_tenant(tenant_data), **updates}
+    existing = _normalize_linked_routers(tenant_data, allow_multiple=allow_new)
     identity = str(router.get("identity") or "").strip().lower()
     ip = str(router.get("last_seen_ip") or "").strip()
     key = next((name for name, item in existing.items() if identity and str(item.get("identity") or "").strip().lower() == identity), None)
     key = key or next((name for name, item in existing.items() if ip and item.get("last_seen_ip") == ip), None)
     if not key:
-        key = "primary" if not existing else f"router-{len(existing) + 1}"
+        key = "primary" if (not existing or not allow_new) else f"router-{len(existing) + 1}"
     existing[key] = {**existing.get(key, {}), **router, "id": key}
     ref(f"tenants/{tenant_id}").update({"linked_routers": existing})
     return existing[key]
@@ -3967,6 +4008,7 @@ def router_provision_complete(request, token):
     if payload.get("purpose") not in {"mikrotik_provision", "mikrotik_agent"}:
         return ok({"message": "Invalid provisioning token"}, 401)
     tenant_id = str(payload.get("tenant_id") or "")
+    fresh_router = bool(payload.get("fresh_router"))
     migration_mode = payload.get("migration_mode") or str(request.GET.get("mode") or "").lower() == "migration"
     client_ip = (
         request.META.get("HTTP_NGROK_AGENT_IPS")
@@ -3986,7 +4028,7 @@ def router_provision_complete(request, token):
         }
         ref(f"tenants/{tenant_id}").update(updates)
         tenant_data = ref(f"tenants/{tenant_id}").get() or {}
-        _update_linked_router(tenant_id, {**tenant_data, **updates}, status="migration_exported")
+        _update_linked_router(tenant_id, {**tenant_data, **updates}, allow_new=fresh_router, status="migration_exported")
         return ok({"success": True, "message": "MikroTik migration export callback received"})
     updates = {
         "mikrotik_provisioning_status": "completed",
@@ -4030,7 +4072,7 @@ def router_provision_complete(request, token):
                 "provisioned_at": iso_now(),
             })
     tenant_data = ref(f"tenants/{tenant_id}").get() or {}
-    _update_linked_router(tenant_id, {**tenant_data, **updates}, status="online")
+    _update_linked_router(tenant_id, {**tenant_data, **updates}, allow_new=fresh_router, status="online")
 
     # Create RADIUS NAS client record if we have a pending secret and tunnel IP
     try:
@@ -4286,9 +4328,9 @@ def package_sync(request, package_id=None):
 @tenant_required
 def settings_mikrotik(request):
     if method(request, "GET"):
-        linked_routers = request.tenant.get("linked_routers") or {}
-        if _router_is_agent_linked(request.tenant) and not linked_routers:
-            linked_routers = {"primary": _linked_router_from_tenant(request.tenant)}
+        linked_routers = _normalize_linked_routers(request.tenant)
+        if linked_routers != (request.tenant.get("linked_routers") or {}):
+            ref(f"tenants/{request.tenant['id']}").update({"linked_routers": linked_routers})
         return ok({
             "mikrotik_name": request.tenant.get("mikrotik_name", "") or request.tenant.get("router_name", ""),
             "router_name": request.tenant.get("mikrotik_name", "") or request.tenant.get("router_name", ""),

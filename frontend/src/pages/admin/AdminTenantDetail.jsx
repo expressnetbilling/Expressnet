@@ -136,8 +136,8 @@ export default function AdminTenantDetail() {
     }
   };
 
-  if (loading) return <p className="text-sm font-medium text-slate-600">Loading tenant...</p>;
-  if (!tenant) return <p className="text-sm font-medium text-slate-600">Tenant not found.</p>;
+  if (loading) return <p className="text-xs font-semibold text-slate-500">Loading tenant...</p>;
+  if (!tenant) return <p className="text-xs font-semibold text-slate-500">Tenant not found.</p>;
 
   const columns = {
     customers: [
@@ -170,8 +170,8 @@ export default function AdminTenantDetail() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">{tenant.business_name}</h1>
-          <p className="mt-1 text-sm text-slate-500">Tenant ID: {tenant.id}</p>
+          <h1 className="page-title">{tenant.business_name}</h1>
+          <p className="mt-1 text-[11px] font-semibold text-slate-400">Tenant ID: {tenant.id}</p>
         </div>
         <a className="btn-secondary" href={`/portal/${tenant.id}`} target="_blank" rel="noreferrer">
           <ExternalLink size={16} />
@@ -181,9 +181,9 @@ export default function AdminTenantDetail() {
 
       <form className="rounded-lg bg-white p-6 shadow-soft ring-1 ring-slate-200" onSubmit={save}>
         <div className="mb-4 grid gap-3 md:grid-cols-3">
-          <div className="rounded-md bg-slate-50 p-3"><p className="text-xs text-slate-500">Customers</p><p className="text-xl font-bold">{tab === 'customers' ? tabRows.length : tenant.onboarding?.customers ? 'Set' : '0'}</p></div>
-          <div className="rounded-md bg-slate-50 p-3"><p className="text-xs text-slate-500">Packages</p><p className="text-xl font-bold">{tenant.onboarding?.packages ? 'Set' : '0'}</p></div>
-          <div className="rounded-md bg-slate-50 p-3"><p className="text-xs text-slate-500">MikroTik</p><p className="text-xl font-bold">{tenant.onboarding?.mikrotik ? 'Set' : '0'}</p></div>
+          <div className="rounded-md bg-slate-50 p-3"><p className="theme-muted text-xs font-medium">Customers</p><p className="theme-text mt-1 text-2xl font-semibold leading-none tracking-tight">{tab === 'customers' ? tabRows.length : tenant.onboarding?.customers ? 'Set' : '0'}</p></div>
+          <div className="rounded-md bg-slate-50 p-3"><p className="theme-muted text-xs font-medium">Packages</p><p className="theme-text mt-1 text-2xl font-semibold leading-none tracking-tight">{tenant.onboarding?.packages ? 'Set' : '0'}</p></div>
+          <div className="rounded-md bg-slate-50 p-3"><p className="theme-muted text-xs font-medium">MikroTik</p><p className="theme-text mt-1 text-2xl font-semibold leading-none tracking-tight">{tenant.onboarding?.mikrotik ? 'Set' : '0'}</p></div>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           {editableFields.map((field) => (
@@ -228,21 +228,21 @@ export default function AdminTenantDetail() {
           </div>
         </div>
 
-        <button type="submit" className="mt-5 inline-flex items-center justify-center gap-2 rounded-md bg-[#e94560] px-4 py-2 text-sm font-bold text-white hover:bg-[#c73652] disabled:opacity-60" disabled={saving}>
+        <button type="submit" className="btn-primary mt-5" disabled={saving}>
           <Save size={17} />
           {saving ? 'Saving...' : 'Save Changes'}
         </button>
-        <button type="button" className="ml-3 mt-5 inline-flex items-center justify-center gap-2 rounded-md bg-[#16213e] px-4 py-2 text-sm font-bold text-white" onClick={testMikrotik}>
+        <button type="button" className="btn-secondary ml-3 mt-5" onClick={testMikrotik}>
           <Router size={17} />
           Test MikroTik
         </button>
-        {mikrotikResult && <span className={`ml-3 text-sm font-semibold ${mikrotikResult.success ? 'text-emerald-600' : 'text-red-600'}`}>{mikrotikResult.success ? `Connected - ${mikrotikResult.routers_count} profiles` : mikrotikResult.error}</span>}
+        {mikrotikResult && <span className={`ml-3 text-xs font-semibold ${mikrotikResult.success ? 'text-emerald-600' : 'text-red-600'}`}>{mikrotikResult.success ? `Connected - ${mikrotikResult.routers_count} profiles` : mikrotikResult.error}</span>}
       </form>
 
       <section className="space-y-4">
         <div className="flex flex-wrap gap-2">
           {['customers', 'payments', 'packages'].map((item) => (
-            <button key={item} className={`rounded-md px-4 py-2 text-sm font-bold capitalize ${tab === item ? 'bg-[#e94560] text-white' : 'bg-white text-slate-700 ring-1 ring-slate-200'}`} onClick={() => switchTab(item)}>
+            <button key={item} className={`h-8 rounded-md px-3 text-xs font-medium capitalize ${tab === item ? 'bg-app-accent text-white' : 'bg-white text-slate-700 ring-1 ring-slate-200'}`} onClick={() => switchTab(item)}>
               {item}
             </button>
           ))}
