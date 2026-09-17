@@ -367,7 +367,7 @@ def sync_package_profile(tenant, package):
     if service_type == "pppoe":
         return create_ppp_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
     if service_type == "static":
-        return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
+        return None
     return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
 
 
@@ -606,7 +606,9 @@ def _public_packages_for_tenant(tenant_id, requested_service=""):
     return [
         _public_package_payload(pkg)
         for pkg in list_children(f"tenants/{tenant_id}/packages")
-        if pkg.get("is_active") is not False and (requested_service not in {"hotspot", "pppoe"} or package_service_type(pkg) == requested_service)
+        if pkg.get("is_active") is not False
+        and package_service_type(pkg) != "static"
+        and (requested_service not in {"hotspot", "pppoe"} or package_service_type(pkg) == requested_service)
     ]
 
 
@@ -664,6 +666,7 @@ def _html_page(title, body, status=200):
     .quick form{{display:grid;grid-template-columns:1fr;gap:8px}}
     .pkg{{display:flex;gap:14px;align-items:center;justify-content:space-between;min-height:88px;padding:17px 20px}}
     .pkg > *{{min-width:0}}
+    .pkg-actions{{display:flex;flex-direction:column;gap:8px;align-items:stretch;flex-shrink:0}}
     .pkg-title{{font-size:16px;font-weight:750;text-transform:uppercase;line-height:1.22;overflow-wrap:anywhere}}
     .pkg-meta{{margin-top:5px;font-size:14px;color:#cbd5e1}}
     form{{width:100%}}
@@ -693,7 +696,7 @@ def _html_page(title, body, status=200):
     .close-btn{{width:38px;min-width:38px;min-height:38px;padding:0;background:transparent;border:1px solid rgba(255,255,255,.16);box-shadow:none;font-size:22px;line-height:1;color:#fff;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;border-radius:7px}}
     .modal-actions{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}}
     @media(min-width:600px){{.quick form.row{{grid-template-columns:1fr auto}} .quick form.credentials{{grid-template-columns:1fr 1fr auto}} .quick button{{width:auto;min-width:118px}}}}
-    @media(max-width:520px){{header{{width:100%;margin-top:0;border-radius:0 0 18px 18px}}main{{padding-left:14px;padding-right:14px}}.pkg{{padding:16px;gap:10px}}.pkg-title{{font-size:15px}}.pkg-meta{{font-size:13px}}.buy-btn{{min-width:72px;padding-left:16px;padding-right:16px}}.modal-actions{{grid-template-columns:1fr}}}}
+    @media(max-width:520px){{header{{width:100%;margin-top:0;border-radius:0 0 18px 18px}}main{{padding-left:14px;padding-right:14px}}.pkg{{align-items:stretch;flex-direction:column;padding:16px;gap:10px}}.pkg-actions{{width:100%}}.pkg-title{{font-size:15px}}.pkg-meta{{font-size:13px}}.buy-btn{{width:100%;min-width:72px;padding-left:16px;padding-right:16px}}.modal-actions{{grid-template-columns:1fr}}}}
   </style>
 </head>
 <body>{body}</body>
@@ -1082,7 +1085,10 @@ def captive_portal_page(request, tenant_id):
                 <div class="pkg-meta"><span class="price">Ksh {html.escape(str(pkg.get('amount_payable') or pkg.get('price') or 0))}</span> for {html.escape(str(pkg.get('duration_label') or ''))}</div>
                 {f"<div class='muted'>{html.escape(str(pkg.get('speed') or ''))}</div>" if pkg.get('speed') else ""}
               </div>
-              <a class="buy-btn" href="#pay-{html.escape(str(pkg.get('id')), quote=True)}">Buy</a>
+              <div class="pkg-actions">
+                <a class="buy-btn" href="#pay-{html.escape(str(pkg.get('id')), quote=True)}">Buy</a>
+                {f'<a class="buy-btn secondary" href="#tv-{html.escape(str(pkg.get("id")), quote=True)}">Buy for TV</a>' if pkg.get('service_type') == 'hotspot' else ''}
+              </div>
             </div>"""
             for pkg in packages
         )
@@ -1111,6 +1117,32 @@ def captive_portal_page(request, tenant_id):
             </div>"""
             for pkg in packages
         )
+        tv_payment_modals_v2 = "".join(
+            f"""
+            <div id="tv-{html.escape(str(pkg.get('id')), quote=True)}" class="pay-modal" aria-hidden="true">
+              <form class="pay-box" method="post" action="/api/captive/{html.escape(str(tenant_id))}/pay">
+                <div class="pay-head">
+                  <div>
+                    <h2>{html.escape(str(pkg.get('name') or 'Buy package'))} for TV</h2>
+                    <p>Enter the TV MAC address and your M-Pesa phone number.</p>
+                  </div>
+                  <a class="close-btn" href="#" aria-label="Close">x</a>
+                </div>
+                <input type="hidden" name="package_id" value="{html.escape(str(pkg.get('id')))}">
+                <input type="hidden" name="service_type" value="tv">
+                <input type="hidden" name="payment_method" value="{html.escape(selected_payment_method)}">
+                {hidden}
+                <input name="mac_address" required placeholder="TV MAC address e.g. AA:BB:CC:DD:EE:FF" autocomplete="off">
+                <input name="phone" inputmode="tel" required placeholder="M-Pesa/phone number" autocomplete="tel">
+                <div class="modal-actions">
+                  <a class="secondary close-link" href="#">Cancel</a>
+                  <button type="submit">Send prompt</button>
+                </div>
+              </form>
+            </div>"""
+            for pkg in packages
+            if pkg.get("service_type") == "hotspot"
+        )
     else:
         total_packages = len(list_children(f"tenants/{tenant_id}/packages"))
         package_html_v2 = (
@@ -1119,6 +1151,7 @@ def captive_portal_page(request, tenant_id):
             else "<div class='alert'>No packages are configured yet. Please contact the provider.</div>"
         )
         payment_modals_v2 = ""
+        tv_payment_modals_v2 = ""
 
     link_login_v2 = str(request.GET.get("link_login") or request.GET.get("link-login") or "").strip()
     voucher_autocomplete = ' autocomplete="one-time-code"' if link_login_v2 else ""
@@ -1162,6 +1195,7 @@ def captive_portal_page(request, tenant_id):
         {package_html_v2}
         {voucher_html_v2}
         {payment_modals_v2}
+        {tv_payment_modals_v2}
       </main>
       </div>
     """
@@ -1935,7 +1969,7 @@ def customer_provision(request, customer_id):
             if pkg:
                 if service_type == "pppoe":
                     create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
-                elif service_type in {"hotspot", "static"}:
+                elif service_type == "hotspot":
                     create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
             upsert_customer_access(request.tenant, {**customer, "package_name": customer.get("package"), "service_type": service_type}, disabled=customer.get("status") != "active")
             provisioning_status = "provisioned"
@@ -1963,7 +1997,7 @@ def customer_provision(request, customer_id):
         }
     )
     # Sync to Postgres + RADIUS if tenant has RADIUS enabled --
-    if request.tenant.get("radius_enabled"):
+    if request.tenant.get("radius_enabled") and service_type in {"hotspot", "pppoe"}:
         try:
             from billing_api.radius_provisioning import upsert_pg_customer, sync_radius_customer
             from billing_api.models import Tenant as TenantModel
@@ -2026,7 +2060,7 @@ def customer_provision_bulk(request):
                 if pkg:
                     if service_type == "pppoe":
                         create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
-                    elif service_type in {"hotspot", "static"}:
+                    elif service_type == "hotspot":
                         create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
                 upsert_customer_access(request.tenant, {**customer, "package_name": customer.get("package"), "service_type": service_type}, disabled=customer.get("status") != "active")
                 provisioning_status = "provisioned"
@@ -2153,7 +2187,7 @@ def packages(request, package_id=None):
         else:
             router_updates.update({"ppp_profile_status": "pending"})
         ref(f"tenants/{tenant_id}/packages/{package_id}").update({**updates, **router_updates})
-        if request.tenant.get("radius_enabled"):
+        if request.tenant.get("radius_enabled") and package_service_type({**existing, **updates}) in {"hotspot", "pppoe"}:
             try:
                 from billing_api.radius_provisioning import upsert_pg_package
 
@@ -2204,15 +2238,18 @@ def package_add(request):
     speed = normalize_rate_limit(data["speed"]) or str(data["speed"] or "").strip()
     if find_child_by_field(f"tenants/{request.tenant['id']}/packages", "name", data["name"]):
         return ok({"message": "A package with this name already exists"}, 409)
+    service_type = package_service_type({**data, **package_payload})
     router_synced = False
     router_queued = False
     router_error = None
-    if has_mikrotik_credentials(request.tenant):
+    if service_type == "static":
+        router_synced = True
+    elif has_mikrotik_credentials(request.tenant):
         if request.tenant.get("mikrotik_provisioning_status") in {"script_downloaded", "completed"} or request.tenant.get("mikrotik_last_seen_at"):
             router_queued = True
         else:
             try:
-                if package_service_type({**data, **package_payload}) == "hotspot":
+                if service_type == "hotspot":
                     ensure_hotspot_captive_portal({"id": request.tenant["id"], **request.tenant}, public_base_url(request).rstrip("/"))
                 sync_package_profile(request.tenant, {**data, **package_payload, "speed": speed})
                 router_synced = True
@@ -2234,15 +2271,17 @@ def package_add(request):
         }
     )
     if router_queued:
-        _queue_router_command(request, {"type": "sync_packages", "script": _package_sync_script_for_request(request, {"id": new_ref.key, **data, **package_payload, "speed": speed}), "package_ids": [new_ref.key]})
-    if request.tenant.get("radius_enabled"):
+        script = _package_sync_script_for_request(request, {"id": new_ref.key, **data, **package_payload, "speed": speed})
+        if script:
+            _queue_router_command(request, {"type": "sync_packages", "script": script, "package_ids": [new_ref.key]})
+    if request.tenant.get("radius_enabled") and service_type in {"hotspot", "pppoe"}:
         try:
             from billing_api.radius_provisioning import upsert_pg_package
 
             upsert_pg_package(Tenant.objects.get(pk=request.tenant["id"]), {"id": new_ref.key, **data, **package_payload, "speed": speed})
         except Exception:
             logger.warning("RADIUS package mirror failed tenant=%s package=%s", request.tenant["id"], new_ref.key, exc_info=True)
-    message = "Package and MikroTik profile created" if router_synced else "Package created and queued for MikroTik sync" if router_queued else "Package created. Sync router after MikroTik is connected."
+    message = "Static package created" if service_type == "static" else "Package and MikroTik profile created" if router_synced else "Package created and queued for MikroTik sync" if router_queued else "Package created. Sync router after MikroTik is connected."
     return ok({"success": True, "message": message, "packageId": new_ref.key}, 201)
 
 
@@ -2543,6 +2582,17 @@ def _customer_secret_script(customer):
         if not ip_address:
             return ""
         gateway_cleanup = ':do { /ip hotspot ip-binding remove [find address=172.30.0.1] } on-error={};'
+        status = str(customer.get("status") or "active").strip().lower()
+        disabled = "no" if status == "active" else "yes"
+        comment_name = _rsc_escape(customer.get("name") or customer.get("phone") or customer.get("username") or "")
+        rate_limit = _rsc_escape(normalize_rate_limit(customer.get("speed") or customer.get("rate_limit") or "") or "")
+        queue_name = _rsc_escape(f"Expressnet-static-{ip_address}")
+        queue_script = (
+            f':if ("{rate_limit}" != "") do={{ '
+            f':if ([:len [/queue simple find name="{queue_name}"]] = 0) do={{'
+            f' /queue simple add name="{queue_name}" target="{ip_address}/32" max-limit="{rate_limit}" disabled={disabled} comment="billing-saas static bandwidth" }} '
+            f'else={{ /queue simple set [find name="{queue_name}"] target="{ip_address}/32" max-limit="{rate_limit}" disabled={disabled} comment="billing-saas static bandwidth" }}; }};'
+        )
         if ip_address == "172.30.0.1":
             return (
                 f':local billingBridge "{bridge_name}";'
@@ -2551,7 +2601,7 @@ def _customer_secret_script(customer):
                 'on-error={ /ip address set [find interface=$billingBridge comment="Expressnet static gateway"] address=172.30.0.1/16 interface=$billingBridge comment="Expressnet static gateway" };'
                 f'{gateway_cleanup}'
             )
-        static_setup_script = (
+        return (
             f':local billingBridge "{bridge_name}";'
             ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};'
             ':do { /ip pool add name=Expressnet-static-pool ranges=172.30.0.2-172.30.255.254 comment="Expressnet static customer pool" } '
@@ -2564,8 +2614,9 @@ def _customer_secret_script(customer):
             'on-error={ /ip firewall nat set [find comment="billing-saas static masquerade"] chain=srcnat src-address=172.30.0.0/16 action=masquerade comment="billing-saas static masquerade" };'
             f'{gateway_cleanup}'
             f':do {{ /ip hotspot ip-binding remove [find address="{ip_address}"] }} on-error={{}};'
+            f'/ip hotspot ip-binding add address="{ip_address}" type=bypassed disabled={disabled} comment="Expressnet-static-pool: {comment_name}";'
+            f'{queue_script}'
         )
-        service_type = "hotspot"
     if service_type not in {"pppoe", "hotspot"}:
         service_type = "hotspot"
     username = _rsc_escape(customer.get("username") or "")
@@ -2872,6 +2923,8 @@ def _package_profile_script(package):
     if not name:
         return ""
     service_type = package_service_type(package)
+    if service_type == "static":
+        return ""
     rate_limit = _rsc_escape(normalize_rate_limit(package.get("speed")) or "")
     rate_limit_field = f' rate-limit="{rate_limit}"'
     session_timeout = "" if package_is_bundle(package) else _rsc_escape(routeros_duration(package_duration_delta(package)) or "")
@@ -2901,6 +2954,8 @@ def _package_profile_delete_script(package):
     name = _rsc_escape(package.get("name") or "")
     if not name:
         return ""
+    if package_service_type(package) == "static":
+        return ""
     if package_service_type(package) == "pppoe":
         return f':do {{ /ppp profile remove [find name="{name}" comment="billing-saas-package"] }} on-error={{}};'
     return f':do {{ /ip hotspot user profile remove [find name="{name}"] }} on-error={{}};'
@@ -2913,6 +2968,8 @@ def _delete_package_profile_from_router(tenant, package):
     if not name:
         return None
     service_type = package_service_type(package)
+    if service_type == "static":
+        return None
     api = router_connect(tenant)
     try:
         path = ("ppp", "profile") if service_type == "pppoe" else ("ip", "hotspot", "user", "profile")

@@ -1410,12 +1410,39 @@ def upsert_customer_access(tenant, customer, disabled=False):
                 if str(customer.get("ip_address") or "").strip() == "172.30.0.1":
                     return True
                 binding = find_router_item_by_fields(api, ("ip", "hotspot", "ip-binding"), {"address": customer["ip_address"]})
+                binding_fields = {
+                    "address": customer["ip_address"],
+                    "type": "bypassed",
+                    "comment": f"Expressnet-static-pool: {customer.get('name') or customer.get('phone') or customer.get('username') or ''}".strip(),
+                    "disabled": "yes" if disabled else "no",
+                }
                 if binding and binding.get(".id"):
-                    try:
-                        binding_path.remove(binding[".id"])
-                    except Exception:
-                        pass
-            service_type = "hotspot"
+                    binding_path.update(**{".id": binding[".id"], **binding_fields})
+                else:
+                    binding_path.add(**binding_fields)
+                queue_path = api.path("queue", "simple")
+                queue_name = f"Expressnet-static-{customer['ip_address']}"
+                existing_queue = find_router_item(api, ("queue", "simple"), queue_name)
+                rate_limit = normalize_rate_limit(customer.get("speed") or customer.get("rate_limit") or "")
+                if existing_queue and existing_queue.get(".id"):
+                    queue_fields = {
+                        "name": queue_name,
+                        "target": f"{customer['ip_address']}/32",
+                        "disabled": "yes" if disabled else "no",
+                        "comment": "billing-saas static bandwidth",
+                    }
+                    if rate_limit:
+                        queue_fields["max-limit"] = rate_limit
+                    queue_path.update(**{".id": existing_queue[".id"], **queue_fields})
+                elif rate_limit:
+                    queue_path.add(**{
+                        "name": queue_name,
+                        "target": f"{customer['ip_address']}/32",
+                        "max-limit": rate_limit,
+                        "disabled": "yes" if disabled else "no",
+                        "comment": "billing-saas static bandwidth",
+                    })
+            return True
         path = ("ppp", "secret") if service_type == "pppoe" else ("ip", "hotspot", "user")
         router_path = api.path(*path)
         existing = find_router_item(api, path, customer.get("username"))

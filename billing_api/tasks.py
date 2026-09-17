@@ -2,7 +2,7 @@ from celery import shared_task
 from django.utils import timezone
 
 from .models import TenantSubscription
-from .services import iso_now, list_children, ref, set_customer_enabled, write_audit_log
+from .services import iso_now, list_children, ref, set_customer_enabled, upsert_customer_access, write_audit_log
 
 """
 
@@ -49,7 +49,12 @@ def expire_customer_access():
                 continue
             service_type = customer.get("service_type") or "hotspot"
             username = customer.get("mac_address") if service_type == "tv" else customer.get("username")
-            if service_type != "pppoe":
+            if service_type == "static":
+                try:
+                    upsert_customer_access({"id": tenant_id, **tenant}, customer, disabled=True)
+                except Exception:
+                    pass
+            elif service_type != "pppoe":
                 try:
                     set_customer_enabled({"id": tenant_id, **tenant}, username, service_type, False)
                 except Exception:

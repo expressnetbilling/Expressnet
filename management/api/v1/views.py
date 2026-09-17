@@ -461,7 +461,7 @@ def sync_package_profile(tenant, package):
     if service_type == "pppoe":
         return create_ppp_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
     if service_type == "static":
-        return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
+        return None
     return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
 
 
@@ -1109,10 +1109,9 @@ def customers(request, customer_id=None):
             }
             try:
                 if has_mikrotik_credentials(tenant):
-                    if pkg and service_type_for_update == "static":
-                        create_hotspot_profile(tenant, pkg["name"], pkg.get("speed"))
                     upsert_customer_access(tenant, sync_payload, disabled=sync_payload.get("status") != "active")
-                    set_customer_enabled(tenant, sync_payload.get("username"), service_type_for_update, sync_payload.get("status") == "active")
+                    if service_type_for_update != "static":
+                        set_customer_enabled(tenant, sync_payload.get("username"), service_type_for_update, sync_payload.get("status") == "active")
                 elif _router_is_agent_linked(tenant):
                     _queue_router_command(request, {
                         "type": "sync_secrets",
@@ -1215,7 +1214,7 @@ def customer_add(request):
             try:
                 if service_type == "pppoe":
                     create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
-                elif service_type in {"hotspot", "static"}:
+                elif service_type == "hotspot":
                     create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
                 upsert_customer_access(request.tenant, {**data, "service_type": service_type, "status": customer_status}, disabled=router_disabled)
                 provisioning_status = "provisioned"
@@ -1274,7 +1273,7 @@ def customer_add(request):
         except Exception:
             logger.exception("Failed to send customer creation WhatsApp notification")
     # Sync to Postgres + RADIUS if tenant has RADIUS enabled
-    if request.tenant.get("radius_enabled"):
+    if request.tenant.get("radius_enabled") and service_type in {"hotspot", "pppoe"}:
         try:
             from billing_api.radius_provisioning import upsert_pg_customer, sync_radius_customer
             from billing_api.models import Tenant as TenantModel
@@ -3105,6 +3104,7 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
     router_client_mac = normalize_mac(payment.get("router_client_mac") or payment.get("router_mac"))
     router_client_ip = str(payment.get("router_client_ip") or payment.get("ip") or "").strip()
     mac_address = normalize_mac(payment.get("mac_address") or (router_client_mac if service_type == "hotspot" else "") or (customer or {}).get("mac_address"))
+    static_ip_address = str(payment.get("ip_address") or (customer or {}).get("ip_address") or "").strip()
     username = mac_address if service_type == "tv" else (payment.get("access_username") or payment.get("username") or (customer or {}).get("username") or to_access_username(phone))
     password = str(payment.get("pending_access_password") or payment.get("access_password") or (customer or {}).get("password") or payment_code)
     customer_name = _payment_customer_name({**(customer or {}), **payment}, phone, username)
@@ -3173,6 +3173,10 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
         "mac_address": mac_address,
         "router_client_mac": router_client_mac,
         "router_client_ip": router_client_ip,
+        "ip_address": static_ip_address,
+        "subnet_mask": ((customer or {}).get("subnet_mask") or "255.255.0.0") if service_type == "static" else (customer or {}).get("subnet_mask"),
+        "gateway": ((customer or {}).get("gateway") or "172.30.0.1") if service_type == "static" else (customer or {}).get("gateway"),
+        "preferred_dns": ((customer or {}).get("preferred_dns") or "172.30.0.1") if service_type == "static" else (customer or {}).get("preferred_dns"),
         "duration_seconds": duration_seconds,
         "limit_bytes_total": limit_bytes_total,
         "expires_at": expiry.isoformat(),
@@ -3186,7 +3190,8 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
             if service_type == "pppoe" and pkg:
                 create_ppp_profile(tenant, pkg["name"], pkg.get("speed"), duration_seconds)
             upsert_customer_access(tenant, access_payload)
-            set_customer_enabled(tenant, username, service_type, True)
+            if service_type != "static":
+                set_customer_enabled(tenant, username, service_type, True)
             router_access_status = "active"
         except Exception as exc:
             if _router_is_agent_linked(tenant):
