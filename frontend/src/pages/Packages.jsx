@@ -50,6 +50,9 @@ function amountPayable(pkg) {
   return Number(pkg?.amount_payable ?? pkg?.price ?? 0);
 }
 
+const neutralBadgeClass = 'inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-normal uppercase tracking-normal text-slate-600';
+const valueClass = 'text-xs font-normal text-slate-700';
+
 const MENU_WIDTH = 176; // w-44
 const MENU_MARGIN = 6;
 
@@ -544,19 +547,19 @@ export default function Packages() {
           </label>
         </div>
         <div className="table-shell overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-200">
+          <table className="min-w-full divide-y divide-slate-200 text-xs font-normal">
             <thead className="table-head">
               <tr>
-                <th className="px-4 py-3">Name</th>
-                <th className="px-4 py-3">Type</th>
-                <th className="px-4 py-3">Speed</th>
-                <th className="px-4 py-3">Duration</th>
-                <th className="px-4 py-3">Bundle</th>
-                <th className="px-4 py-3">Price</th>
-                <th className="px-4 py-3">Amount Payable</th>
-                <th className="px-4 py-3">Active</th>
-                <th className="px-4 py-3">Router</th>
-                <th className="px-4 py-3 text-right">Actions</th>
+                <th className="px-3 py-2.5 font-normal">Name</th>
+                <th className="px-3 py-2.5 font-normal">Type</th>
+                <th className="px-3 py-2.5 font-normal">Speed</th>
+                <th className="px-3 py-2.5 font-normal">Duration</th>
+                <th className="px-3 py-2.5 font-normal">Bundle</th>
+                <th className="px-3 py-2.5 font-normal">Price</th>
+                <th className="px-3 py-2.5 font-normal">Amount Payable</th>
+                <th className="px-3 py-2.5 font-normal">Active</th>
+                <th className="px-3 py-2.5 font-normal">Router</th>
+                <th className="px-3 py-2.5 text-right font-normal">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -565,38 +568,38 @@ export default function Packages() {
               ) : filteredPackages.length === 0 ? (
                 <tr><td className="table-cell text-slate-500" colSpan="10">No packages found.</td></tr>
               ) : filteredPackages.map((pkg, index) => (
-                <tr key={pkg.id} className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
-                  <td className="table-cell font-medium text-slate-950">{pkg.name}</td>
-                  <td className="table-cell">
-                    <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold uppercase text-slate-700">
+                <tr key={pkg.id} className={index % 2 === 0 ? 'bg-white text-slate-700' : 'bg-slate-50/70 text-slate-700'}>
+                  <td className="table-cell px-3 py-2.5 font-normal text-slate-800">{pkg.name}</td>
+                  <td className="table-cell px-3 py-2.5">
+                    <span className={neutralBadgeClass}>
                       {packageType(pkg) === 'static' ? <Database size={13} /> : packageType(pkg) === 'pppoe' ? <PlugZap size={13} /> : <Wifi size={13} />}
                       {packageType(pkg)}
                     </span>
                   </td>
-                  <td className="table-cell">{pkg.speed}</td>
-                  <td className="table-cell">{packageDuration(pkg)}</td>
-                  <td className="table-cell">
+                  <td className={`table-cell px-3 py-2.5 ${valueClass}`}>{pkg.speed}</td>
+                  <td className={`table-cell px-3 py-2.5 ${valueClass}`}>{packageDuration(pkg)}</td>
+                  <td className="table-cell px-3 py-2.5">
                     {packageKind(pkg) === 'bundle' ? (
-                      <span className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-800">
+                      <span className={neutralBadgeClass}>
                         <Gauge size={13} />
                         {Number(pkg.data_limit_mb || 0).toLocaleString('en-KE')} MB
                       </span>
                     ) : '-'}
                   </td>
-                  <td className="table-cell font-medium text-slate-950">KES {pkg.price}</td>
-                  <td className="table-cell font-semibold text-slate-950">KES {amountPayable(pkg).toLocaleString('en-KE')}</td>
-                  <td className="table-cell">
-                    <button type="button" className={`rounded-full px-2 py-1 text-xs font-semibold ${pkg.is_active === false ? 'bg-slate-100 text-slate-500' : 'bg-emerald-100 text-emerald-700'}`} onClick={() => togglePackage(pkg)}>
+                  <td className={`table-cell px-3 py-2.5 ${valueClass}`}>KES {pkg.price}</td>
+                  <td className={`table-cell px-3 py-2.5 ${valueClass}`}>KES {amountPayable(pkg).toLocaleString('en-KE')}</td>
+                  <td className="table-cell px-3 py-2.5">
+                    <button type="button" className={`${neutralBadgeClass} normal-case`} onClick={() => togglePackage(pkg)}>
                       {pkg.is_active === false ? 'Disabled' : 'Enabled'}
                     </button>
                   </td>
-                  <td className="table-cell">
-                    <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">
+                  <td className="table-cell px-3 py-2.5">
+                    <span className={`${neutralBadgeClass} normal-case`}>
                       <Router size={13} />
                       {pkg.ppp_profile_status || 'pending'}
                     </span>
                   </td>
-                  <td className="table-cell text-right">
+                  <td className="table-cell px-3 py-2.5 text-right">
                     <ActionsMenu
                       pkg={pkg}
                       onSync={syncPackage}
