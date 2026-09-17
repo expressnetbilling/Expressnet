@@ -461,7 +461,7 @@ def sync_package_profile(tenant, package):
     if service_type == "pppoe":
         return create_ppp_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
     if service_type == "static":
-        return None
+        return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
     return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
 
 
@@ -1097,7 +1097,7 @@ def customers(request, customer_id=None):
         updates["updated_at"] = iso_now()
         ref(f"tenants/{tenant['id']}/customers/{customer_id}").update(updates)
         should_sync_router = any(field in updates for field in ["username", "password", "package", "service_type", "status", "expiry_date"]) or adjustment_applied
-        if should_sync_router and service_type_for_update in {"pppoe", "hotspot"}:
+        if should_sync_router and service_type_for_update in {"pppoe", "hotspot", "static"}:
             synced_customer = {**customer, **updates}
             pkg = find_child_by_field(f"tenants/{tenant['id']}/packages", "name", synced_customer.get("package"))
             sync_payload = {
@@ -1109,6 +1109,8 @@ def customers(request, customer_id=None):
             }
             try:
                 if has_mikrotik_credentials(tenant):
+                    if pkg and service_type_for_update == "static":
+                        create_hotspot_profile(tenant, pkg["name"], pkg.get("speed"))
                     upsert_customer_access(tenant, sync_payload, disabled=sync_payload.get("status") != "active")
                     set_customer_enabled(tenant, sync_payload.get("username"), service_type_for_update, sync_payload.get("status") == "active")
                 elif _router_is_agent_linked(tenant):
@@ -1153,14 +1155,10 @@ def customer_add(request):
     service_type = str(data.get("service_type") or "hotspot").strip().lower()
     if service_type not in {"pppoe", "hotspot", "static"}:
         return ok({"message": "Customer service type must be PPPoE, Hotspot, or Static"}, 400)
-    if service_type == "static":
-        data["username"] = ""
-        data["password"] = ""
-    else:
-        data["username"] = str(data.get("username") or "").strip() or _generate_customer_username(request.tenant["id"], data.get("name"), data.get("phone"))
-        data["password"] = str(data.get("password") or "").strip() or _generate_customer_password()
-        if any(str(c.get("username", "")).lower() == str(data["username"]).lower() for c in list_children(f"tenants/{request.tenant['id']}/customers")):
-            return ok({"message": "A customer with this username already exists"}, 409)
+    data["username"] = str(data.get("username") or "").strip() or _generate_customer_username(request.tenant["id"], data.get("name"), data.get("phone"))
+    data["password"] = str(data.get("password") or "").strip() or _generate_customer_password()
+    if any(str(c.get("username", "")).lower() == str(data["username"]).lower() for c in list_children(f"tenants/{request.tenant['id']}/customers")):
+        return ok({"message": "A customer with this username already exists"}, 409)
     customer_status = str(data.get("status") or "active").strip().lower()
     if customer_status not in {"active", "inactive", "paused", "suspended"}:
         return ok({"message": "Customer status must be active, inactive, paused, or suspended"}, 400)
@@ -1217,7 +1215,7 @@ def customer_add(request):
             try:
                 if service_type == "pppoe":
                     create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
-                elif service_type == "hotspot":
+                elif service_type in {"hotspot", "static"}:
                     create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
                 upsert_customer_access(request.tenant, {**data, "service_type": service_type, "status": customer_status}, disabled=router_disabled)
                 provisioning_status = "provisioned"
@@ -2646,10 +2644,6 @@ def settings_notifications(request):
                 "roamtech_sender_id": request.tenant.get("roamtech_sender_id") or "",
                 "apiwap_base_url": request.tenant.get("apiwap_base_url") or "https://api.apiwap.com/api/v1",
                 "has_apiwap_api_key": bool(request.tenant.get("apiwap_api_key")),
-                "customer_created_whatsapp_template": strip_customer_template_tokens(request.tenant.get("customer_created_whatsapp_template") or "Your internet account has been created successfully."),
-                "payment_sms_template": strip_customer_template_tokens(request.tenant.get("payment_sms_template") or "Your payment is confirmed."),
-                "payment_whatsapp_template": strip_customer_template_tokens(request.tenant.get("payment_whatsapp_template") or "Your internet package is active. Thank you for your payment."),
-                "expiry_whatsapp_template": strip_customer_template_tokens(request.tenant.get("expiry_whatsapp_template") or "Your internet package is about to expire. Please renew to stay connected."),
             }
         )
     data = body(request)
@@ -2668,10 +2662,6 @@ def settings_notifications(request):
         "whatsapp_enabled": data.get("whatsapp_enabled") is not False,
         "roamtech_sender_id": str(data.get("roamtech_sender_id") or "").strip(),
         "apiwap_base_url": str(data.get("apiwap_base_url") or "https://api.apiwap.com/api/v1").strip(),
-        "customer_created_whatsapp_template": strip_customer_template_tokens(data.get("customer_created_whatsapp_template") or ""),
-        "payment_sms_template": strip_customer_template_tokens(data.get("payment_sms_template") or ""),
-        "payment_whatsapp_template": strip_customer_template_tokens(data.get("payment_whatsapp_template") or ""),
-        "expiry_whatsapp_template": strip_customer_template_tokens(data.get("expiry_whatsapp_template") or ""),
         "notifications_updated_at": iso_now(),
     }
     apiwap_api_key = str(data.get("apiwap_api_key") or "").strip()
@@ -2782,6 +2772,47 @@ def append_customer_created_details(message, context):
     return f"{base} {details}"
 
 
+def notification_brand(tenant):
+    return (tenant or {}).get("business_name") or (tenant or {}).get("name") or "Expressnet"
+
+
+def support_contact(tenant):
+    return (tenant or {}).get("phone") or (tenant or {}).get("support_phone") or (tenant or {}).get("support_email") or ""
+
+
+def system_customer_created_message(tenant, context):
+    brand = notification_brand(tenant)
+    package_name = context.get("package") or ""
+    amount = context.get("amount_payable") or ""
+    return (
+        f"Welcome to {brand}! Your internet account has been successfully created.\n\n"
+        f"Package: {package_name}\n"
+        f"Amount Payable: KSh {amount}\n\n"
+        "Please make payment to activate your internet service.\n\n"
+        f"Thank you for choosing {brand}."
+    )
+
+
+def system_payment_message(tenant, context):
+    brand = notification_brand(tenant)
+    amount = context.get("amount_payable") or context.get("amount") or ""
+    package_name = context.get("package") or ""
+    return (
+        f"Payment received! We have successfully received your payment of KSh {amount} for the {package_name} package.\n\n"
+        "Your payment has been confirmed and your internet service is being activated.\n\n"
+        f"Thank you for choosing {brand}."
+    )
+
+
+def system_expiry_message(tenant, context):
+    brand = notification_brand(tenant)
+    return (
+        f"{brand} Reminder: Your {context.get('package') or ''} package will expire on {context.get('expires_at') or ''}.\n\n"
+        "Please renew your package before the expiry date to avoid interruption of your internet service.\n\n"
+        f"Thank you for choosing {brand}."
+    )
+
+
 def append_technician_credentials_details(message, context):
     service_label = str(context.get("service_type") or "internet").upper()
     base = str(message or "").strip() or f"A {service_label} customer account has been created."
@@ -2825,12 +2856,11 @@ def notify_customer_created(tenant, customer):
         "gateway": customer.get("gateway") or "",
         "preferred_dns": customer.get("preferred_dns") or "",
     }
-    template = (tenant or {}).get("customer_created_whatsapp_template") or f"Your {service_type.upper()} internet account has been created."
     technician_template = (tenant or {}).get("technician_customer_credentials_template") or f"A {service_type.upper()} customer account has been created."
     results = {
         "customer_whatsapp": send_whatsapp_message(
             customer.get("phone"),
-            append_customer_created_details(strip_customer_template_tokens(template), context),
+            system_customer_created_message(tenant, context),
             tenant,
             recipient_name=context["name"],
         )
@@ -2949,8 +2979,7 @@ def notify_payment_access(tenant, payment, access):
         "password": access.get("password") or "",
         "expires_at": access.get("expiry_date") or "",
     }
-    template = (tenant or {}).get("payment_sms_template") or "Your payment is confirmed."
-    message = append_payment_access_details(strip_customer_template_tokens(template), notification_context)
+    message = system_payment_message(tenant, notification_context)
     results = {}
     if (tenant or {}).get("sms_on_payment") is not False:
         balance = int((tenant or {}).get("sms_balance") or 0)
@@ -2963,11 +2992,10 @@ def notify_payment_access(tenant, payment, access):
                 if tenant_id:
                     ref(f"tenants/{tenant_id}").update({"sms_balance": balance - 1, "sms_sent_count": int((tenant or {}).get("sms_sent_count") or 0) + 1})
     if (tenant or {}).get("whatsapp_enabled") is not False:
-        whatsapp_template = (tenant or {}).get("payment_whatsapp_template") or message
         customer_name = notification_context["name"]
         results["whatsapp"] = send_whatsapp_message(
             payment.get("phone"),
-            append_payment_access_details(strip_customer_template_tokens(whatsapp_template), notification_context),
+            message,
             tenant,
             recipient_name=customer_name,
         )
@@ -2983,8 +3011,7 @@ def notify_package_expiry(tenant, customer):
         "username": customer.get("username") or "",
         "expires_at": customer.get("expiry_date") or customer.get("expires_at") or "",
     }
-    template = (tenant or {}).get("expiry_whatsapp_template") or "Your internet package is about to expire. Please renew to stay connected."
-    message = append_expiry_details(strip_customer_template_tokens(template), context)
+    message = system_expiry_message(tenant, context)
     return {
         "whatsapp": send_whatsapp_message(
             customer.get("phone"),

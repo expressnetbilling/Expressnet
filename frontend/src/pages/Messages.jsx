@@ -29,11 +29,6 @@ const defaults = {
   sms_on_promotions: true,
   apiwap_base_url: 'https://api.apiwap.com/api/v1',
   apiwap_api_key: '',
-  customer_created_whatsapp_template: 'Your internet account has been created successfully.',
-  payment_whatsapp_template: 'Your internet package is active. Thank you for your payment.',
-  expiry_whatsapp_template: 'Your internet package is about to expire. Please renew to stay connected.',
-  sms_template_maintenance: 'We will be performing scheduled maintenance. Thank you for your patience.',
-  sms_template_promotion: 'Special offer from our team. Contact support for details.',
 };
 
 const providers = [
@@ -75,24 +70,45 @@ const providers = [
 
 const tabs = [
   ['types', Bell, 'Notification Types'],
-  ['templates', MessageSquare, 'Templates'],
   ['providers', PlugZap, 'Providers / APIs'],
 ];
 
 const notificationTypes = [
-  ['whatsapp_on_customer_created', PlugZap, 'Customer created', 'Sent when a PPPoE or Static customer account is created.'],
-  ['sms_on_payment', ShoppingCart, 'Package payments', 'Sent after customer payment and internet activation.'],
-  ['whatsapp_on_expiry', AlarmClock, 'Package expiry', 'Sent before a customer package expires.'],
-  ['sms_on_maintenance', AlarmClock, 'Maintenance notices', 'Use when notifying customers about planned service work.'],
-  ['sms_on_promotions', MessageCircle, 'Promotions', 'Use for offers, discounts, and customer updates.'],
-];
-
-const templateFields = [
-  ['customer_created_whatsapp_template', 'Customer created message', 'Customer name, package, and payable amount are added automatically. Credentials are sent to the assigned technician.'],
-  ['payment_whatsapp_template', 'Payment message', 'Customer name, package, amount, username, and password are added automatically.'],
-  ['expiry_whatsapp_template', 'Expiry message', 'Customer name, package, username, and expiry time are added automatically.'],
-  ['sms_template_maintenance', 'Maintenance message', 'Plain message for planned downtime or service work.'],
-  ['sms_template_promotion', 'Promotion message', 'Plain message for offers and general announcements.'],
+  {
+    key: 'whatsapp_on_customer_created',
+    icon: PlugZap,
+    title: 'Customer created',
+    description: 'Sent when a PPPoE or Static customer account is created. Includes the assigned package and payable amount.',
+    message: 'Welcome to [ISP_NAME]! Your internet account has been successfully created.\n\nPackage: [PACKAGE_NAME]\nAmount Payable: KSh [PACKAGE_AMOUNT]\n\nPlease make payment to activate your internet service.\n\nThank you for choosing [ISP_NAME].',
+  },
+  {
+    key: 'sms_on_payment',
+    icon: ShoppingCart,
+    title: 'Package payments',
+    description: 'Sent after a customer successfully pays for their assigned internet package and the payment is confirmed.',
+    message: 'Payment received! We have successfully received your payment of KSh [AMOUNT_PAID] for the [PACKAGE_NAME] package.\n\nYour payment has been confirmed and your internet service is being activated.\n\nThank you for choosing [ISP_NAME].',
+  },
+  {
+    key: 'whatsapp_on_expiry',
+    icon: AlarmClock,
+    title: 'Package expiry',
+    description: "Sent before a customer's package expires.",
+    message: '[ISP_NAME] Reminder: Your [PACKAGE_NAME] package will expire on [EXPIRY_DATE].\n\nPlease renew your package before the expiry date to avoid interruption of your internet service.\n\nThank you for choosing [ISP_NAME].',
+  },
+  {
+    key: 'sms_on_maintenance',
+    icon: AlarmClock,
+    title: 'Maintenance notices',
+    description: 'Used to notify customers about planned service maintenance.',
+    message: '[ISP_NAME] Maintenance Notice:\n\nWe will be performing planned maintenance on [MAINTENANCE_DATE] from [START_TIME] to [END_TIME].\n\nCustomers in [AFFECTED_AREA] may experience temporary interruptions during this period.\n\nWe apologize for any inconvenience and appreciate your understanding.\n\nFor assistance, contact [SUPPORT_CONTACT].',
+  },
+  {
+    key: 'sms_on_promotions',
+    icon: MessageCircle,
+    title: 'Promotions',
+    description: 'Used for offers, discounts, new packages, and customer promotional announcements.',
+    message: '[ISP_NAME] Offer:\n\n[PROMOTION_MESSAGE]\n\nOffer valid until [PROMOTION_EXPIRY_DATE].\n\nFor more information, contact [SUPPORT_CONTACT].',
+  },
 ];
 
 function Toggle({ checked, onChange }) {
@@ -111,10 +127,6 @@ function ProviderBadge({ provider }) {
       {provider.channel}
     </span>
   );
-}
-
-function cleanTemplate(text) {
-  return String(text || '').replace(/\{\{[^}]+\}\}/g, '').replace(/\s{2,}/g, ' ').trim();
 }
 
 export default function Messages() {
@@ -143,11 +155,6 @@ export default function Messages() {
           sms_on_promotions: data.sms_on_promotions !== false,
           apiwap_base_url: data.apiwap_base_url || defaults.apiwap_base_url,
           apiwap_api_key: data.has_apiwap_api_key ? MASKED : '',
-          customer_created_whatsapp_template: cleanTemplate(data.customer_created_whatsapp_template) || defaults.customer_created_whatsapp_template,
-          payment_whatsapp_template: cleanTemplate(data.payment_whatsapp_template) || defaults.payment_whatsapp_template,
-          expiry_whatsapp_template: cleanTemplate(data.expiry_whatsapp_template) || defaults.expiry_whatsapp_template,
-          sms_template_maintenance: cleanTemplate(data.sms_template_maintenance) || defaults.sms_template_maintenance,
-          sms_template_promotion: cleanTemplate(data.sms_template_promotion) || defaults.sms_template_promotion,
         });
       } catch (error) {
         toast.error(error.response?.data?.message || 'Failed to load message settings');
@@ -160,8 +167,7 @@ export default function Messages() {
 
   const update = (event) => {
     const { name, value } = event.target;
-    const nextValue = name.includes('template') ? cleanTemplate(value) : value;
-    setForm((current) => ({ ...current, [name]: nextValue }));
+    setForm((current) => ({ ...current, [name]: value }));
   };
 
   const toggle = (name) => {
@@ -172,10 +178,16 @@ export default function Messages() {
     setSaving(true);
     try {
       const { data } = await api.patch('/settings/notifications', {
-        ...nextForm,
+        provider: nextForm.provider,
         sms_enabled: nextForm.whatsapp_enabled,
         whatsapp_enabled: nextForm.whatsapp_enabled,
-        payment_sms_template: nextForm.payment_whatsapp_template,
+        sms_on_payment: nextForm.sms_on_payment,
+        whatsapp_on_customer_created: nextForm.whatsapp_on_customer_created,
+        whatsapp_on_expiry: nextForm.whatsapp_on_expiry,
+        sms_on_maintenance: nextForm.sms_on_maintenance,
+        sms_on_promotions: nextForm.sms_on_promotions,
+        apiwap_base_url: nextForm.apiwap_base_url,
+        apiwap_api_key: nextForm.apiwap_api_key,
       });
       toast.success(data.message || 'Message settings saved');
       setForm((current) => ({
@@ -230,7 +242,7 @@ export default function Messages() {
   return (
     <form className="space-y-4" onSubmit={save}>
       <section className="surface-card overflow-hidden">
-        <div className="grid grid-cols-3">
+        <div className="grid grid-cols-2">
           {tabs.map(([key, Icon, label]) => (
             <button key={key} type="button" onClick={() => setActiveTab(key)} className={`relative flex h-14 items-center justify-center gap-2 text-xs font-semibold transition ${activeTab === key ? 'text-violet-600' : 'text-slate-500 hover:text-slate-800'}`}>
               <Icon size={15} />
@@ -302,31 +314,20 @@ export default function Messages() {
         <section className="surface-card p-5">
           <h1 className="text-base font-bold text-slate-900">Notification Types</h1>
           <div className="mt-4 grid gap-3">
-            {notificationTypes.map(([key, Icon, title, description]) => (
-              <div key={key} className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 p-4">
-                <div className="flex items-center gap-3">
-                  <span className="flex h-9 w-9 items-center justify-center rounded-full bg-violet-50 text-violet-600"><Icon size={17} /></span>
-                  <div><h2 className="text-sm font-semibold text-slate-900">{title}</h2><p className="mt-1 text-xs text-slate-500">{description}</p></div>
+            {notificationTypes.map(({ key, icon: Icon, title, description, message }) => (
+              <div key={key} className="rounded-lg border border-slate-200 p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-violet-50 text-violet-600"><Icon size={17} /></span>
+                    <div>
+                      <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
+                      <p className="mt-1 text-xs text-slate-500">{description}</p>
+                    </div>
+                  </div>
+                  <Toggle checked={form[key]} onChange={() => toggle(key)} />
                 </div>
-                <Toggle checked={form[key]} onChange={() => toggle(key)} />
+                <pre className="mt-3 whitespace-pre-wrap rounded-md border border-slate-100 bg-slate-50 p-3 text-xs leading-relaxed text-slate-700">{message}</pre>
               </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {activeTab === 'templates' && (
-        <section className="surface-card p-5">
-          <h1 className="text-base font-bold text-slate-900">Message Templates</h1>
-          <p className="mt-1 text-xs text-slate-500">Write simple message text. Customer details are added automatically by the system.</p>
-          <div className="mt-4 grid gap-4 md:grid-cols-2">
-            {templateFields.map(([name, label, helper]) => (
-              <label key={name} className="block rounded-lg border border-slate-200 p-4">
-                <span className="text-sm font-semibold text-slate-900">{label}</span>
-                <textarea name={name} value={form[name]} onChange={update} className="mt-3 min-h-28 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-xs leading-relaxed outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100" />
-                <span className="mt-2 block text-[11px] text-slate-500">{helper}</span>
-                <span className="mt-1 block text-[11px] text-slate-400">Characters: {form[name]?.length || 0}</span>
-              </label>
             ))}
           </div>
         </section>

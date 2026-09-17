@@ -6,7 +6,9 @@ import AdminProtectedRoute from './components/admin/AdminProtectedRoute';
 import ProtectedRoute from './components/ProtectedRoute';
 import Sidebar from './components/Sidebar';
 import AdminAuditLog from './pages/admin/AdminAuditLog';
+import AdminCommunications from './pages/admin/AdminCommunications';
 import AdminDashboard from './pages/admin/AdminDashboard';
+import AdminIntegrations from './pages/admin/AdminIntegrations';
 import AdminLogin from './pages/admin/AdminLogin';
 import AdminSystem from './pages/admin/AdminSystem';
 import AdminTenantDetail from './pages/admin/AdminTenantDetail';
@@ -131,6 +133,8 @@ export default function App() {
           <Route path="tenants" element={<AdminTenants />} />
           <Route path="tenants/:id" element={<AdminTenantDetail />} />
           <Route path="users" element={<AdminUsers />} />
+          <Route path="communications" element={<AdminCommunications />} />
+          <Route path="integrations" element={<AdminIntegrations />} />
           <Route path="system" element={<AdminSystem />} />
           <Route path="audit" element={<AdminAuditLog />} />
         </Route>

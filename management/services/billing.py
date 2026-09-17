@@ -541,15 +541,27 @@ def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None):
 
 
 
+def platform_notification_settings():
+    try:
+        return ref("site_settings").get() or {}
+    except Exception:
+        return {}
+
+
 def whatsapp_enabled(tenant=None):
     if tenant and "whatsapp_enabled" in tenant:
         return tenant.get("whatsapp_enabled") is not False
+    platform = platform_notification_settings()
+    if "whatsapp_enabled" in platform:
+        return platform.get("whatsapp_enabled") is not False
     return os.getenv("WHATSAPP_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 
 
 def apiwap_config(tenant=None):
+    platform = platform_notification_settings()
     api_url = str(
         (tenant or {}).get("apiwap_base_url")
+        or platform.get("apiwap_base_url")
         or os.getenv("APIWAP_API_URL")
         or os.getenv("APIWAP_BASE_URL")
         or "https://api.apiwap.com/api/v1"
@@ -559,7 +571,7 @@ def apiwap_config(tenant=None):
     return {
         "enabled": (tenant or {}).get("whatsapp_enabled", True) is not False,
         "api_url": api_url,
-        "api_key": str((tenant or {}).get("apiwap_api_key") or os.getenv("APIWAP_TOKEN") or os.getenv("APIWAP_API_KEY") or "").strip(),
+        "api_key": str((tenant or {}).get("apiwap_api_key") or platform.get("apiwap_api_key") or os.getenv("APIWAP_TOKEN") or os.getenv("APIWAP_API_KEY") or "").strip(),
     }
 
 
@@ -652,7 +664,8 @@ def _post_apiwap_whatsapp(config, recipient, message):
 def send_whatsapp_message(phone, message, tenant=None, recipient_name=None, header=None):
     if not whatsapp_enabled(tenant):
         return {"sent": False, "skipped": "disabled"}
-    provider = str((tenant or {}).get("notification_provider") or os.getenv("WHATSAPP_PROVIDER") or "slek").strip().lower()
+    platform = platform_notification_settings()
+    provider = str((tenant or {}).get("notification_provider") or platform.get("notification_provider") or os.getenv("WHATSAPP_PROVIDER") or "slek").strip().lower()
     if provider in {"slek", "default", "expressnet"}:
         return send_slek_whatsapp_message(phone, message, tenant, recipient_name=recipient_name, header=header)
     if provider not in {"apiwap", "apiwap_whatsapp"}:

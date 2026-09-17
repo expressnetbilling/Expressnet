@@ -1410,18 +1410,13 @@ def upsert_customer_access(tenant, customer, disabled=False):
                 if str(customer.get("ip_address") or "").strip() == "172.30.0.1":
                     return True
                 binding = find_router_item_by_fields(api, ("ip", "hotspot", "ip-binding"), {"address": customer["ip_address"]})
-                binding_fields = {
-                    "address": customer["ip_address"],
-                    "type": "bypassed",
-                    "comment": f"Expressnet-static-pool: {customer.get('username') or ''}".strip(),
-                    "disabled": "yes" if disabled else "no",
-                }
                 if binding and binding.get(".id"):
-                    binding_path.update(**{".id": binding[".id"], **binding_fields})
-                else:
-                    binding_path.add(**binding_fields)
-            return True
-        path = ("ppp", "secret") if service_type in {"pppoe", "static"} else ("ip", "hotspot", "user")
+                    try:
+                        binding_path.remove(binding[".id"])
+                    except Exception:
+                        pass
+            service_type = "hotspot"
+        path = ("ppp", "secret") if service_type == "pppoe" else ("ip", "hotspot", "user")
         router_path = api.path(*path)
         existing = find_router_item(api, path, customer.get("username"))
         
@@ -1439,6 +1434,8 @@ def upsert_customer_access(tenant, customer, disabled=False):
             if service_type == "static" and customer.get("ip_address"):
                 fields["remote-address"] = customer["ip_address"]
         else:
+            if customer.get("ip_address"):
+                fields["address"] = str(customer.get("ip_address") or "").strip()
             limit_uptime = routeros_duration(customer.get("duration_seconds") or customer.get("limit_seconds"))
             if limit_uptime:
                 fields["limit-uptime"] = limit_uptime

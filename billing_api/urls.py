@@ -12,6 +12,8 @@ admin_urlpatterns = [
     path("tenants/", core_views.admin_tenants),
     path("tenants/stats/summary", core_views.admin_stats),
     path("system/stats", core_views.admin_system_stats),
+    path("communications", core_views.admin_communications),
+    path("integrations", core_views.admin_integrations),
     path("system", core_views.admin_system),
     path("system/migrations", core_views.admin_system_migrations),
     path("subscriptions", core_views.admin_subscriptions),

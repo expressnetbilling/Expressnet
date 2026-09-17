@@ -692,10 +692,6 @@ export default function Packages() {
                 <input id="price" name="price" type="number" className="form-input" value={form.price} onChange={update} />
                 {errors.price && <p className="form-error">{errors.price}</p>}
               </div>
-              <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                <p className="text-xs font-semibold uppercase text-slate-500">Amount payable</p>
-                <p className="mt-1 text-base font-bold text-slate-950">KES {Number(form.price || 0).toLocaleString('en-KE')}</p>
-              </div>
               <label className="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 sm:col-span-2">
                 <input type="checkbox" name="is_active" checked={form.is_active} onChange={update} />
                 Package is active and visible on public portal

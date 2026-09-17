@@ -367,7 +367,7 @@ def sync_package_profile(tenant, package):
     if service_type == "pppoe":
         return create_ppp_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
     if service_type == "static":
-        return None
+        return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
     return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
 
 
@@ -1935,7 +1935,7 @@ def customer_provision(request, customer_id):
             if pkg:
                 if service_type == "pppoe":
                     create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
-                elif service_type == "hotspot":
+                elif service_type in {"hotspot", "static"}:
                     create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
             upsert_customer_access(request.tenant, {**customer, "package_name": customer.get("package"), "service_type": service_type}, disabled=customer.get("status") != "active")
             provisioning_status = "provisioned"
@@ -2026,7 +2026,7 @@ def customer_provision_bulk(request):
                 if pkg:
                     if service_type == "pppoe":
                         create_ppp_profile(request.tenant, pkg["name"], pkg.get("speed"))
-                    elif service_type == "hotspot":
+                    elif service_type in {"hotspot", "static"}:
                         create_hotspot_profile(request.tenant, pkg["name"], pkg.get("speed"))
                 upsert_customer_access(request.tenant, {**customer, "package_name": customer.get("package"), "service_type": service_type}, disabled=customer.get("status") != "active")
                 provisioning_status = "provisioned"
@@ -2536,11 +2536,10 @@ def router_delete(request):
 def _customer_secret_script(customer):
     """Generate an .rsc snippet that upserts a single customer into /ppp secret or /ip hotspot user."""
     service_type = customer.get("service_type") or "hotspot"
+    static_setup_script = ""
     if service_type == "static":
         ip_address = _rsc_escape(customer.get("ip_address") or "")
         bridge_name = _rsc_escape(customer.get("mikrotik_bridge_name") or customer.get("bridge_name") or "Expressnet-bridge")
-        comment = _rsc_escape(f"Expressnet-static-pool: {customer.get('name') or customer.get('phone') or ip_address}".strip())
-        disabled = "yes" if str(customer.get("status") or "active").strip().lower() in {"inactive", "paused", "suspended"} else "no"
         if not ip_address:
             return ""
         gateway_cleanup = ':do { /ip hotspot ip-binding remove [find address=172.30.0.1] } on-error={};'
@@ -2552,7 +2551,7 @@ def _customer_secret_script(customer):
                 'on-error={ /ip address set [find interface=$billingBridge comment="Expressnet static gateway"] address=172.30.0.1/16 interface=$billingBridge comment="Expressnet static gateway" };'
                 f'{gateway_cleanup}'
             )
-        return (
+        static_setup_script = (
             f':local billingBridge "{bridge_name}";'
             ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};'
             ':do { /ip pool add name=Expressnet-static-pool ranges=172.30.0.2-172.30.255.254 comment="Expressnet static customer pool" } '
@@ -2564,10 +2563,9 @@ def _customer_secret_script(customer):
             ':do { /ip firewall nat add chain=srcnat src-address=172.30.0.0/16 action=masquerade comment="billing-saas static masquerade" } '
             'on-error={ /ip firewall nat set [find comment="billing-saas static masquerade"] chain=srcnat src-address=172.30.0.0/16 action=masquerade comment="billing-saas static masquerade" };'
             f'{gateway_cleanup}'
-            f':if ([:len [/ip hotspot ip-binding find address="{ip_address}"]] = 0) do={{'
-            f' /ip hotspot ip-binding add address="{ip_address}" type=bypassed disabled={disabled} comment="{comment}" }} '
-            f'else={{ /ip hotspot ip-binding set [find address="{ip_address}"] type=bypassed disabled={disabled} comment="{comment}" }};'
+            f':do {{ /ip hotspot ip-binding remove [find address="{ip_address}"] }} on-error={{}};'
         )
+        service_type = "hotspot"
     if service_type not in {"pppoe", "hotspot"}:
         service_type = "hotspot"
     username = _rsc_escape(customer.get("username") or "")
@@ -2591,6 +2589,8 @@ def _customer_secret_script(customer):
     except (TypeError, ValueError):
         limit_bytes_total = 0
     limit_bytes_field = f' limit-bytes-total="{limit_bytes_total}"' if limit_bytes_total > 0 and service_type == "hotspot" else ""
+    address = _rsc_escape(customer.get("ip_address") or "")
+    address_field = f' address="{address}"' if address and service_type == "hotspot" else ""
     ppp_profile_script = (
         f':if ("{profile}" != "default") do={{ '
         f':if ([:len [/ppp profile find name="{profile}"]] = 0) do={{'
@@ -2614,13 +2614,15 @@ def _customer_secret_script(customer):
             f'service=pppoe profile="{profile}" disabled={disabled} comment="billing-saas-managed" }};'
         )
     return (
+        static_setup_script
+        +
         hotspot_profile_script
         +
         f':if ([:len [/ip hotspot user find name="{username}"]] = 0) do={{'
         f' /ip hotspot user add name="{username}" password="{password}" '
-        f'profile="{profile}" disabled={disabled}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }} '
+        f'profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }} '
         f'else={{ /ip hotspot user set [find name="{username}"] password="{password}" '
-        f'profile="{profile}" disabled={disabled}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }};'
+        f'profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }};'
         f':if ("{disabled}" = "no" && "{client_ip}" != "") do={{ '
         f':do {{ /ip hotspot active login user="{username}" password="{password}" ip="{client_ip}" mac-address="{client_mac}" }} '
         f'on-error={{ :log warning "Billing SaaS agent: automatic Hotspot login failed for {username}" }}; '
@@ -2870,8 +2872,6 @@ def _package_profile_script(package):
     if not name:
         return ""
     service_type = package_service_type(package)
-    if service_type == "static":
-        return ""
     rate_limit = _rsc_escape(normalize_rate_limit(package.get("speed")) or "")
     rate_limit_field = f' rate-limit="{rate_limit}"'
     session_timeout = "" if package_is_bundle(package) else _rsc_escape(routeros_duration(package_duration_delta(package)) or "")

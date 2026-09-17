@@ -1305,6 +1305,127 @@ def admin_site(request):
     return ok({"message": "Site settings updated"})
 
 
+PLATFORM_NOTIFICATION_TYPES = [
+    {
+        "key": "whatsapp_on_customer_created",
+        "name": "Customer created",
+        "description": "Sent when a PPPoE or Static customer account is created. Includes the assigned package and payable amount.",
+        "message": "Welcome to [ISP_NAME]! Your internet account has been successfully created.\n\nPackage: [PACKAGE_NAME]\nAmount Payable: KSh [PACKAGE_AMOUNT]\n\nPlease make payment to activate your internet service.\n\nThank you for choosing [ISP_NAME].",
+    },
+    {
+        "key": "sms_on_payment",
+        "name": "Package payments",
+        "description": "Sent after a customer successfully pays for their assigned internet package and the payment is confirmed.",
+        "message": "Payment received! We have successfully received your payment of KSh [AMOUNT_PAID] for the [PACKAGE_NAME] package.\n\nYour payment has been confirmed and your internet service is being activated.\n\nThank you for choosing [ISP_NAME].",
+    },
+    {
+        "key": "whatsapp_on_expiry",
+        "name": "Package expiry",
+        "description": "Sent before a customer's package expires.",
+        "message": "[ISP_NAME] Reminder: Your [PACKAGE_NAME] package will expire on [EXPIRY_DATE].\n\nPlease renew your package before the expiry date to avoid interruption of your internet service.\n\nThank you for choosing [ISP_NAME].",
+    },
+    {
+        "key": "sms_on_maintenance",
+        "name": "Maintenance notices",
+        "description": "Used to notify customers about planned service maintenance.",
+        "message": "[ISP_NAME] Maintenance Notice:\n\nWe will be performing planned maintenance on [MAINTENANCE_DATE] from [START_TIME] to [END_TIME].\n\nCustomers in [AFFECTED_AREA] may experience temporary interruptions during this period.\n\nWe apologize for any inconvenience and appreciate your understanding.\n\nFor assistance, contact [SUPPORT_CONTACT].",
+    },
+    {
+        "key": "sms_on_promotions",
+        "name": "Promotions",
+        "description": "Used for offers, discounts, new packages, and customer promotional announcements.",
+        "message": "[ISP_NAME] Offer:\n\n[PROMOTION_MESSAGE]\n\nOffer valid until [PROMOTION_EXPIRY_DATE].\n\nFor more information, contact [SUPPORT_CONTACT].",
+    },
+]
+
+
+def _platform_settings():
+    return ref("site_settings").get() or {}
+
+
+@csrf_exempt
+@api_view(["GET", "PATCH"])
+@admin_required
+def admin_communications(request):
+    settings_data = _platform_settings()
+    if method(request, "GET"):
+        toggles = {
+            item["key"]: settings_data.get(item["key"]) is not False
+            for item in PLATFORM_NOTIFICATION_TYPES
+        }
+        return ok({
+            "notification_types": [
+                {**item, "enabled": toggles[item["key"]]}
+                for item in PLATFORM_NOTIFICATION_TYPES
+            ],
+            "whatsapp_enabled": settings_data.get("whatsapp_enabled") is not False,
+            "sms_enabled": settings_data.get("sms_enabled") is not False,
+        })
+
+    data = body(request)
+    allowed = {item["key"] for item in PLATFORM_NOTIFICATION_TYPES} | {"whatsapp_enabled", "sms_enabled"}
+    updates = {field: data[field] is not False for field in allowed if field in data}
+    updates.update({"communications_updated_at": iso_now(), "updated_by": request.admin["adminId"]})
+    ref("site_settings").update(updates)
+    write_audit_log(request.admin["adminId"], request.admin["email"], "UPDATE_COMMUNICATIONS", target_type="site", request=request, metadata={"updated_fields": list(updates)})
+    return ok({"success": True, "message": "Communication settings saved", "config": updates})
+
+
+@csrf_exempt
+@api_view(["GET", "PATCH", "POST"])
+@admin_required
+def admin_integrations(request):
+    settings_data = _platform_settings()
+    if method(request, "GET"):
+        return ok({
+            "notification_provider": settings_data.get("notification_provider") or "slek",
+            "whatsapp_enabled": settings_data.get("whatsapp_enabled") is not False,
+            "apiwap_base_url": settings_data.get("apiwap_base_url") or "https://api.apiwap.com/api/v1",
+            "has_apiwap_api_key": bool(settings_data.get("apiwap_api_key")),
+            "apiwap_status": "connected" if settings_data.get("apiwap_api_key") else "not_configured",
+        })
+
+    data = body(request)
+    if method(request, "POST"):
+        provider = str(data.get("provider") or settings_data.get("notification_provider") or "apiwap").strip()
+        tenant_like = {
+            "business_name": settings_data.get("brand_name") or "Expressnet",
+            "notification_provider": provider,
+            "whatsapp_enabled": True,
+            "apiwap_base_url": data.get("apiwap_base_url") or settings_data.get("apiwap_base_url"),
+            "apiwap_api_key": data.get("apiwap_api_key") if data.get("apiwap_api_key") not in {MASKED, "********"} else settings_data.get("apiwap_api_key"),
+        }
+        phone = normalize_phone(data.get("phone") or settings_data.get("phone"))
+        if not phone:
+            return ok({"message": "Phone number is required to test the integration"}, 400)
+        result = send_whatsapp_message(phone, data.get("message") or "ApiWap test notification from Expressnet admin.", tenant_like)
+        if result.get("sent"):
+            return ok({"success": True, "message": "Integration test sent", "result": result})
+        return ok({"success": False, "message": result.get("error") or result.get("skipped") or "Integration test failed", "result": result}, 400)
+
+    updates = {
+        "notification_provider": str(data.get("notification_provider") or data.get("provider") or settings_data.get("notification_provider") or "slek").strip(),
+        "whatsapp_enabled": data.get("whatsapp_enabled") is not False,
+        "apiwap_base_url": str(data.get("apiwap_base_url") or settings_data.get("apiwap_base_url") or "https://api.apiwap.com/api/v1").strip(),
+        "integrations_updated_at": iso_now(),
+        "updated_by": request.admin["adminId"],
+    }
+    apiwap_api_key = str(data.get("apiwap_api_key") or "").strip()
+    if apiwap_api_key and apiwap_api_key not in {MASKED, "********", "••••••••"}:
+        updates["apiwap_api_key"] = apiwap_api_key
+    ref("site_settings").update(updates)
+    write_audit_log(request.admin["adminId"], request.admin["email"], "UPDATE_INTEGRATIONS", target_type="site", request=request, metadata={"updated_fields": [key for key in updates if key != "apiwap_api_key"]})
+    saved = {**settings_data, **updates}
+    return ok({
+        "success": True,
+        "message": "Integration settings saved",
+        "notification_provider": saved.get("notification_provider") or "slek",
+        "whatsapp_enabled": saved.get("whatsapp_enabled") is not False,
+        "apiwap_base_url": saved.get("apiwap_base_url") or "https://api.apiwap.com/api/v1",
+        "has_apiwap_api_key": bool(saved.get("apiwap_api_key")),
+    })
+
+
 @csrf_exempt
 @api_view(["GET", "PATCH", "POST"])
 @admin_required
