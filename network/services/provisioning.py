@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import socket
 import ssl
 import uuid
@@ -37,12 +38,33 @@ def normalize_rate_limit(speed):
     value = str(speed or "").strip()
     if not value:
         return None
-    if "/" in value:
-        return "".join(value.split())
-    amount = "".join(ch for ch in value if ch.isdigit() or ch == ".")
-    unit = "".join(ch for ch in value if ch.isalpha()).lower() or "m"
-    router_unit = "G" if unit.startswith("g") else "K" if unit.startswith("k") else "M"
-    return f"{amount}{router_unit}/{amount}{router_unit}" if amount else value.replace(" ", "")
+    value = value.replace("\\", "/")
+    # RouterOS rate-limit accepts rx/tx. Keep only the first token so user
+    # input cannot accidentally enable burst fields that exceed the package.
+
+    def normalize_side(raw):
+        part = str(raw or "").strip().lower()
+        if not part:
+            return ""
+        number = "".join(ch for ch in part if ch.isdigit() or ch == ".")
+        if not number:
+            return part.replace(" ", "")
+        unit = "".join(ch for ch in part if ch.isalpha())
+        if unit.startswith("g"):
+            router_unit = "G"
+        elif unit.startswith("k"):
+            router_unit = "K"
+        else:
+            router_unit = "M"
+        return f"{number}{router_unit}"
+
+    rate_pair = re.match(r"^\s*([0-9.]+\s*[a-zA-Z]*)\s*/\s*([0-9.]+\s*[a-zA-Z]*)", value)
+    if rate_pair:
+        parts = [normalize_side(rate_pair.group(1)), normalize_side(rate_pair.group(2))]
+        if parts[0] and parts[1]:
+            return f"{parts[0]}/{parts[1]}"
+    side = normalize_side(value)
+    return f"{side}/{side}" if side else None
 
 
 def routeros_duration(value):
@@ -1558,6 +1580,40 @@ def set_customer_enabled(tenant, username, service_type="hotspot", enabled=True)
             except Exception:
                 pass
 
+        return result
+    finally:
+        api.close()
+
+
+def disconnect_customer_session(tenant, username, service_type="hotspot"):
+    if not username:
+        return None
+    tenant_id = tenant.get("id") if isinstance(tenant, dict) else str(tenant.id)
+    tenant_radius_enabled = tenant.get("radius_enabled") if isinstance(tenant, dict) else tenant.radius_enabled
+    result = None
+    if tenant_radius_enabled and service_type in {"hotspot", "pppoe"}:
+        try:
+            from billing_api.models import Tenant as TenantModel
+            from billing_api.radius_coa import radius_disconnect_customer
+
+            tenant_obj = TenantModel.objects.get(pk=tenant_id) if isinstance(tenant, dict) else tenant
+            result = radius_disconnect_customer(tenant_obj, username)
+        except Exception:
+            result = None
+    if not has_mikrotik_credentials(tenant):
+        return result
+    api = router_connect(tenant)
+    try:
+        active_path = ("ppp", "active") if service_type == "pppoe" else ("ip", "hotspot", "active")
+        match_field = "name" if service_type == "pppoe" else "user"
+        for active in list(api.path(*active_path).select()):
+            if str(active.get(match_field) or "") != str(username) or not active.get(".id"):
+                continue
+            try:
+                api.path(*active_path).remove(active[".id"])
+                result = {"success": True, "message": "Active session disconnected"}
+            except Exception:
+                pass
         return result
     finally:
         api.close()

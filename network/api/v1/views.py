@@ -49,6 +49,7 @@ from billing_api.services import (
     verify_daraja_callback_token,
     _build_port_command_script,
     delete_router_customer,
+    disconnect_customer_session,
     captive_portal_url,
     ensure_hotspot_captive_portal,
     find_child_by_field,
@@ -2194,6 +2195,19 @@ def packages(request, package_id=None):
                 upsert_pg_package(Tenant.objects.get(pk=tenant_id), {"id": package_id, **existing, **updates, **router_updates})
             except Exception:
                 logger.warning("RADIUS package mirror failed tenant=%s package=%s", tenant_id, package_id, exc_info=True)
+        updated_package = {"id": package_id, **existing, **updates}
+        updated_service_type = package_service_type(updated_package)
+        if updated_service_type in {"hotspot", "pppoe"} and any(key in updates for key in {"name", "speed", "service_type"}):
+            package_names = {str(existing.get("name") or "").strip(), str(updated_package.get("name") or "").strip()}
+            for customer in list_children(f"tenants/{tenant_id}/customers"):
+                if str(customer.get("service_type") or "hotspot").strip().lower() != updated_service_type:
+                    continue
+                if str(customer.get("package") or "").strip() not in package_names:
+                    continue
+                try:
+                    disconnect_customer_session(request.tenant, customer.get("username"), updated_service_type)
+                except Exception:
+                    logger.warning("Failed to disconnect customer after package speed update tenant=%s customer=%s", tenant_id, customer.get("id"), exc_info=True)
         return ok({"success": True, "message": "Package and MikroTik profile updated"})
     if method(request, "DELETE") and package_id:
         existing = ref(f"tenants/{tenant_id}/packages/{package_id}").get()
