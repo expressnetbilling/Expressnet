@@ -65,6 +65,10 @@ function packageType(pkg) {
   return pkg?.service_type === 'pppoe' ? 'pppoe' : 'hotspot';
 }
 
+function packageKind(pkg) {
+  return String(pkg?.package_kind || pkg?.access_model || 'standard').trim().toLowerCase() === 'bundle' ? 'bundle' : 'standard';
+}
+
 function pathServiceType() {
   if (window.location.pathname.startsWith('/pppoe/') || window.location.pathname.startsWith('/pppoe-renew/')) return 'pppoe';
   if (window.location.pathname.startsWith('/hotspot/')) return 'hotspot';
@@ -496,22 +500,35 @@ export default function CustomerPortal() {
         ) : (
           <div className="grid gap-3">
             {packages.map((pkg) => (
-              <article key={pkg.id} className="flex min-h-[92px] items-center justify-between gap-4 rounded-lg border border-white/10 bg-[#242424] p-5 shadow-[0_10px_24px_rgba(0,0,0,0.36)]">
+              <article key={pkg.id} className="flex min-h-[92px] flex-col gap-4 rounded-lg border border-white/10 bg-[#242424] p-5 shadow-[0_10px_24px_rgba(0,0,0,0.36)] sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <h2 className="break-words text-lg font-extrabold uppercase leading-snug text-white">{pkg.name}</h2>
                     {packageType(pkg) === 'pppoe' ? <PlugZap className="hidden shrink-0 text-slate-400 sm:block" size={18} /> : <Wifi className="hidden shrink-0 text-slate-400 sm:block" size={18} />}
                   </div>
                   <p className="mt-1 text-base text-slate-300"><span className="font-bold text-white">Ksh {pkg.price}</span> for {formatDuration(pkg)}</p>
+                  {packageKind(pkg) === 'bundle' && pkg.data_limit_mb && <p className="mt-1 text-xs font-semibold text-amber-300">{Number(pkg.data_limit_mb).toLocaleString('en-KE')} MB bundle</p>}
                   {pkg.speed && <p className="mt-1 text-xs text-slate-500">{pkg.speed}</p>}
                 </div>
-                <button
-                  type="button"
-                  className="inline-flex h-11 shrink-0 items-center justify-center rounded-md bg-[#2600d8] px-6 text-base font-bold text-white shadow-[0_12px_22px_rgba(0,0,0,0.45)]"
-                  onClick={() => openPayment(pkg, packageType(pkg))}
-                >
-                  Buy
-                </button>
+                <div className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-[132px]">
+                  <button
+                    type="button"
+                    className="inline-flex h-11 shrink-0 items-center justify-center rounded-md bg-[#2600d8] px-6 text-base font-bold text-white shadow-[0_12px_22px_rgba(0,0,0,0.45)]"
+                    onClick={() => openPayment(pkg, packageType(pkg))}
+                  >
+                    Buy
+                  </button>
+                  {packageType(pkg) === 'hotspot' && (
+                    <button
+                      type="button"
+                      className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-md border border-white/15 px-4 text-sm font-bold text-white hover:bg-white/10"
+                      onClick={() => openPayment(pkg, 'tv')}
+                    >
+                      <Monitor size={16} />
+                      Buy for TV
+                    </button>
+                  )}
+                </div>
               </article>
             ))}
           </div>

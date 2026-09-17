@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, Edit2, PackagePlus, PlugZap, RefreshCw, Router, Search, Sparkles, Trash2, Wifi } from 'lucide-react';
+import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, Database, Edit2, Gauge, PackagePlus, PlugZap, RefreshCw, Router, Search, Sparkles, Trash2, Wifi } from 'lucide-react';
 import toast from 'react-hot-toast';
 import api from '../api/axios';
 import Modal from '../components/Modal';
@@ -13,6 +13,9 @@ const initialForm = {
   duration_unit: 'hours',
   price: '',
   is_active: true,
+  package_kind: 'standard',
+  data_limit_mb: '',
+  fup_speed: '',
 };
 
 const MONTH_DURATION_OPTIONS = [
@@ -34,8 +37,13 @@ function packageDuration(pkg) {
 
 function packageType(pkg) {
   const value = String(pkg?.service_type || pkg?.package_type || pkg?.type || '').trim().toLowerCase();
+  if (value === 'static') return 'static';
   if (['pppoe', 'ppoe', 'ppp', 'broadband'].includes(value)) return 'pppoe';
   return 'hotspot';
+}
+
+function packageKind(pkg) {
+  return String(pkg?.package_kind || pkg?.access_model || 'standard').trim().toLowerCase() === 'bundle' ? 'bundle' : 'standard';
 }
 
 function amountPayable(pkg) {
@@ -254,6 +262,8 @@ export default function Packages() {
       ...current,
       [name]: type === 'checkbox' ? checked : value,
       ...(name === 'service_type' && value === 'pppoe' && current.duration_unit === 'hours' ? { duration_unit: 'months' } : {}),
+      ...(name === 'service_type' && value === 'static' && current.duration_unit === 'hours' ? { duration_unit: 'months' } : {}),
+      ...(name === 'package_kind' && value !== 'bundle' ? { data_limit_mb: '', fup_speed: '' } : {}),
     }));
     setErrors((current) => ({ ...current, [event.target.name]: '' }));
   };
@@ -263,8 +273,9 @@ export default function Packages() {
     if (!form.name.trim()) nextErrors.name = 'Package name is required';
     if (!form.speed.trim()) nextErrors.speed = 'Speed is required';
     if (!form.duration_value || Number(form.duration_value) <= 0) nextErrors.duration_value = 'Duration must be greater than 0';
-    if (form.service_type === 'pppoe' && form.duration_unit === 'hours') nextErrors.duration_value = 'PPPoE packages must use days or months';
+    if (['pppoe', 'static'].includes(form.service_type) && form.duration_unit === 'hours') nextErrors.duration_value = 'Static and PPPoE packages must use days or months';
     if (!form.price || Number(form.price) <= 0) nextErrors.price = 'Price must be greater than 0';
+    if (form.package_kind === 'bundle' && (!form.data_limit_mb || Number(form.data_limit_mb) <= 0)) nextErrors.data_limit_mb = 'Bundle data limit must be greater than 0';
     setErrors(nextErrors);
     return Object.keys(nextErrors).length === 0;
   };
@@ -293,6 +304,9 @@ export default function Packages() {
       duration_unit: 'hours',
       price: '40',
       is_active: true,
+      package_kind: 'standard',
+      data_limit_mb: '',
+      fup_speed: '',
     });
     setErrors({});
     setModalOpen(true);
@@ -308,6 +322,9 @@ export default function Packages() {
       duration_unit: packageType(pkg) === 'pppoe' && pkg.duration_unit === 'hours' ? 'months' : pkg.duration_unit || 'days',
       price: String(pkg.price || ''),
       is_active: pkg.is_active !== false,
+      package_kind: packageKind(pkg),
+      data_limit_mb: pkg.data_limit_mb ? String(pkg.data_limit_mb) : '',
+      fup_speed: pkg.fup_speed || '',
     });
     setErrors({});
     setModalOpen(true);
@@ -331,6 +348,9 @@ export default function Packages() {
         price: Number(form.price),
         amount_payable: Number(form.price),
         is_active: form.is_active,
+        package_kind: form.package_kind,
+        data_limit_mb: form.package_kind === 'bundle' ? Number(form.data_limit_mb) : undefined,
+        fup_speed: form.package_kind === 'bundle' ? form.fup_speed : '',
       };
 
       if (editingPackage) {
@@ -430,6 +450,8 @@ export default function Packages() {
     const matchesSearch = text.includes(search.toLowerCase());
     if (!matchesSearch) return false;
     if (filter === 'free') return text.includes('free') || Number(pkg.price || 0) === 0;
+    if (filter === 'bundle') return packageKind(pkg) === 'bundle';
+    if (filter === 'static') return packageType(pkg) === 'static';
     if (filter === 'pppoe') return packageType(pkg) === 'pppoe';
     if (filter === 'hotspot') return packageType(pkg) === 'hotspot';
     return true;
@@ -439,6 +461,8 @@ export default function Packages() {
     all: packages.length,
     hotspot: packages.filter((pkg) => packageType(pkg) === 'hotspot').length,
     pppoe: packages.filter((pkg) => packageType(pkg) === 'pppoe').length,
+    static: packages.filter((pkg) => packageType(pkg) === 'static').length,
+    bundle: packages.filter((pkg) => packageKind(pkg) === 'bundle').length,
     free: packages.filter((pkg) => Number(pkg.price || 0) === 0 || `${pkg.name || ''}`.toLowerCase().includes('free')).length,
   };
 
@@ -495,6 +519,8 @@ export default function Packages() {
               ['all', 'All'],
               ['hotspot', 'Hotspot'],
               ['pppoe', 'PPPOE'],
+              ['static', 'Static'],
+              ['bundle', 'Bundles'],
               ['free', 'Free Trial'],
             ].map(([key, label]) => (
               <button
@@ -525,6 +551,7 @@ export default function Packages() {
                 <th className="px-4 py-3">Type</th>
                 <th className="px-4 py-3">Speed</th>
                 <th className="px-4 py-3">Duration</th>
+                <th className="px-4 py-3">Bundle</th>
                 <th className="px-4 py-3">Price</th>
                 <th className="px-4 py-3">Amount Payable</th>
                 <th className="px-4 py-3">Active</th>
@@ -534,20 +561,28 @@ export default function Packages() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td className="table-cell text-slate-500" colSpan="9">Loading packages...</td></tr>
+                <tr><td className="table-cell text-slate-500" colSpan="10">Loading packages...</td></tr>
               ) : filteredPackages.length === 0 ? (
-                <tr><td className="table-cell text-slate-500" colSpan="9">No packages found.</td></tr>
+                <tr><td className="table-cell text-slate-500" colSpan="10">No packages found.</td></tr>
               ) : filteredPackages.map((pkg, index) => (
                 <tr key={pkg.id} className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
                   <td className="table-cell font-medium text-slate-950">{pkg.name}</td>
                   <td className="table-cell">
                     <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold uppercase text-slate-700">
-                      {packageType(pkg) === 'pppoe' ? <PlugZap size={13} /> : <Wifi size={13} />}
+                      {packageType(pkg) === 'static' ? <Database size={13} /> : packageType(pkg) === 'pppoe' ? <PlugZap size={13} /> : <Wifi size={13} />}
                       {packageType(pkg)}
                     </span>
                   </td>
                   <td className="table-cell">{pkg.speed}</td>
                   <td className="table-cell">{packageDuration(pkg)}</td>
+                  <td className="table-cell">
+                    {packageKind(pkg) === 'bundle' ? (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-800">
+                        <Gauge size={13} />
+                        {Number(pkg.data_limit_mb || 0).toLocaleString('en-KE')} MB
+                      </span>
+                    ) : '-'}
+                  </td>
                   <td className="table-cell font-medium text-slate-950">KES {pkg.price}</td>
                   <td className="table-cell font-semibold text-slate-950">KES {amountPayable(pkg).toLocaleString('en-KE')}</td>
                   <td className="table-cell">
@@ -584,10 +619,11 @@ export default function Packages() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <label className="form-label" htmlFor="service_type">Package type</label>
-                <div className="grid gap-2 sm:grid-cols-2">
+                <div className="grid gap-2 sm:grid-cols-3">
               {[
                     ['hotspot', Wifi, 'Hotspot'],
                     ['pppoe', PlugZap, 'PPPoE'],
+                    ['static', Database, 'Static'],
                   ].map(([key, Icon, label]) => (
                     <label key={key} className={`flex cursor-pointer items-center gap-3 rounded-md border p-3 text-sm font-semibold ${form.service_type === key ? 'border-app-navy bg-app-navy text-white' : 'border-slate-200 bg-white text-slate-700'}`}>
                       <input className="sr-only" type="radio" name="service_type" value={key} checked={form.service_type === key} onChange={update} />
@@ -607,6 +643,26 @@ export default function Packages() {
                 <input id="speed" name="speed" className="form-input" value={form.speed} onChange={update} placeholder="10M or 10M/10M" />
                 {errors.speed && <p className="form-error">{errors.speed}</p>}
               </div>
+              <div className="sm:col-span-2">
+                <label className="form-label" htmlFor="package_kind">Package mode</label>
+                <select id="package_kind" name="package_kind" className="form-input" value={form.package_kind} onChange={update}>
+                  <option value="standard">Standard time package</option>
+                  <option value="bundle">Bundle with FUP/data limit</option>
+                </select>
+              </div>
+              {form.package_kind === 'bundle' && (
+                <>
+                  <div>
+                    <label className="form-label" htmlFor="data_limit_mb">Bundle data (MB)</label>
+                    <input id="data_limit_mb" name="data_limit_mb" type="number" min="1" step="1" className="form-input" value={form.data_limit_mb} onChange={update} placeholder="e.g. 1024" />
+                    {errors.data_limit_mb && <p className="form-error">{errors.data_limit_mb}</p>}
+                  </div>
+                  <div>
+                    <label className="form-label" htmlFor="fup_speed">FUP speed</label>
+                    <input id="fup_speed" name="fup_speed" className="form-input" value={form.fup_speed} onChange={update} placeholder="e.g. 1M/1M" />
+                  </div>
+                </>
+              )}
               <div>
                 <label className="form-label" htmlFor="duration_value">Duration</label>
                 <div className="grid grid-cols-[1fr_auto] gap-2">
@@ -621,7 +677,7 @@ export default function Packages() {
                     <input id="duration_value" name="duration_value" type="number" min="1" step="1" className="form-input" value={form.duration_value} onChange={update} />
                   )}
                   <select name="duration_unit" className="form-input" value={form.duration_unit} onChange={update}>
-                    {form.service_type !== 'pppoe' && <option value="hours">Hours</option>}
+                    {!['pppoe', 'static'].includes(form.service_type) && <option value="hours">Hours</option>}
                     <option value="days">Days</option>
                     <option value="months">Months</option>
                   </select>

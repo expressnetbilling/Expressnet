@@ -123,7 +123,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
 
   const formPackageOptions = useMemo(() => {
     const selectedService = serviceLocked || form.service_type || 'pppoe';
-    if (selectedService === 'static') return packages.filter((pkg) => (pkg.service_type || 'hotspot') === 'pppoe');
+    if (selectedService === 'static') return packages.filter((pkg) => (pkg.service_type || 'hotspot') === 'static');
     return packages.filter((pkg) => (pkg.service_type || 'hotspot') === selectedService);
   }, [form.service_type, packages, serviceLocked]);
 
@@ -322,7 +322,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
     const selectedPackage = packages.find((pkg) => pkg.name === form.package_name);
     const selectedService = serviceLocked || form.service_type || 'pppoe';
     const packageService = selectedPackage?.service_type || 'hotspot';
-    if (selectedPackage && !((selectedService === 'static' && packageService === 'pppoe') || packageService === selectedService)) nextErrors.package_name = `Select a ${selectedService === 'static' ? 'PPPoE' : selectedService.toUpperCase()} package`;
+    if (selectedPackage && packageService !== selectedService) nextErrors.package_name = `Select a ${selectedService.toUpperCase()} package`;
     if (['pppoe', 'static'].includes(selectedService)) {
       const amount = Number(form.amount_payable);
       if (!Number.isFinite(amount) || amount < 0) nextErrors.amount_payable = 'Enter a valid payable amount';

@@ -405,8 +405,8 @@ def package_expiry_date(start, package):
 
 def normalized_package_payload(data, default_service_type="hotspot", include_service_type=True):
     service_type = package_service_type(data or {})
-    if service_type not in {"hotspot", "pppoe"}:
-        service_type = default_service_type if default_service_type in {"hotspot", "pppoe"} else "hotspot"
+    if service_type not in {"hotspot", "pppoe", "static"}:
+        service_type = default_service_type if default_service_type in {"hotspot", "pppoe", "static"} else "hotspot"
     raw_unit = str((data or {}).get("duration_unit") or "").lower()
     if raw_unit.startswith("hour"):
         duration_unit = "hours"
@@ -443,11 +443,25 @@ def normalized_package_payload(data, default_service_type="hotspot", include_ser
     return payload
 
 
+def package_is_bundle(package):
+    return str((package or {}).get("package_kind") or (package or {}).get("access_model") or "").strip().lower() == "bundle"
+
+
+def package_data_limit_bytes(package):
+    try:
+        limit_mb = float((package or {}).get("data_limit_mb") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return int(limit_mb * 1024 * 1024) if limit_mb > 0 else 0
+
+
 def sync_package_profile(tenant, package):
     service_type = package_service_type(package)
-    duration_seconds = int(package_duration_delta(package).total_seconds())
-    if service_type in {"pppoe", "static"}:
+    duration_seconds = None if package_is_bundle(package) else int(package_duration_delta(package).total_seconds())
+    if service_type == "pppoe":
         return create_ppp_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
+    if service_type == "static":
+        return None
     return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
 
 
@@ -1090,7 +1104,8 @@ def customers(request, customer_id=None):
                 **synced_customer,
                 "package_name": synced_customer.get("package"),
                 "speed": (pkg or {}).get("speed"),
-                "duration_seconds": int(package_duration_delta(pkg).total_seconds()) if pkg and service_type_for_update == "hotspot" else None,
+                "duration_seconds": None if package_is_bundle(pkg) else int(package_duration_delta(pkg).total_seconds()) if pkg and service_type_for_update == "hotspot" else None,
+                "limit_bytes_total": package_data_limit_bytes(pkg),
             }
             try:
                 if has_mikrotik_credentials(tenant):
@@ -3056,8 +3071,10 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
     pg_package = InternetPackage.objects.filter(tenant_id=tenant_id, name=package_for_access).first() if package_for_access else None
     pkg = pg_package.as_dict() if pg_package else find_child_by_field(f"tenants/{tenant_id}/packages", "name", package_for_access)
     duration = package_duration_delta(pkg)
-    duration_seconds = int(duration.total_seconds())
-    expiry = package_expiry_date(utcnow(), pkg)
+    is_bundle = package_is_bundle(pkg)
+    duration_seconds = None if is_bundle else int(duration.total_seconds())
+    expiry = utcnow() + timedelta(days=3650) if is_bundle else package_expiry_date(utcnow(), pkg)
+    limit_bytes_total = package_data_limit_bytes(pkg)
     router_client_mac = normalize_mac(payment.get("router_client_mac") or payment.get("router_mac"))
     router_client_ip = str(payment.get("router_client_ip") or payment.get("ip") or "").strip()
     mac_address = normalize_mac(payment.get("mac_address") or (router_client_mac if service_type == "hotspot" else "") or (customer or {}).get("mac_address"))
@@ -3130,6 +3147,7 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
         "router_client_mac": router_client_mac,
         "router_client_ip": router_client_ip,
         "duration_seconds": duration_seconds,
+        "limit_bytes_total": limit_bytes_total,
         "expires_at": expiry.isoformat(),
         "status": "active",
         "speed": (pkg or {}).get("speed"),

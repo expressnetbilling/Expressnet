@@ -295,8 +295,8 @@ def package_expiry_date(start, package):
 
 def normalized_package_payload(data, default_service_type="hotspot", include_service_type=True):
     service_type = package_service_type(data or {})
-    if service_type not in {"hotspot", "pppoe"}:
-        service_type = default_service_type if default_service_type in {"hotspot", "pppoe"} else "hotspot"
+    if service_type not in {"hotspot", "pppoe", "static"}:
+        service_type = default_service_type if default_service_type in {"hotspot", "pppoe", "static"} else "hotspot"
     raw_unit = str((data or {}).get("duration_unit") or "").lower()
     if raw_unit.startswith("hour"):
         duration_unit = "hours"
@@ -333,11 +333,41 @@ def normalized_package_payload(data, default_service_type="hotspot", include_ser
     return payload
 
 
+def normalized_package_extras(data):
+    payload = {}
+    kind = str((data or {}).get("package_kind") or (data or {}).get("access_model") or "standard").strip().lower()
+    payload["package_kind"] = "bundle" if kind == "bundle" else "standard"
+    if payload["package_kind"] == "bundle":
+        try:
+            payload["data_limit_mb"] = max(0, float((data or {}).get("data_limit_mb") or 0))
+        except (TypeError, ValueError):
+            payload["data_limit_mb"] = 0
+        payload["fup_speed"] = normalize_rate_limit((data or {}).get("fup_speed")) or str((data or {}).get("fup_speed") or "").strip()
+    else:
+        payload["data_limit_mb"] = ""
+        payload["fup_speed"] = ""
+    return payload
+
+
+def package_is_bundle(package):
+    return str((package or {}).get("package_kind") or (package or {}).get("access_model") or "").strip().lower() == "bundle"
+
+
+def package_data_limit_bytes(package):
+    try:
+        limit_mb = float((package or {}).get("data_limit_mb") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return int(limit_mb * 1024 * 1024) if limit_mb > 0 else 0
+
+
 def sync_package_profile(tenant, package):
     service_type = package_service_type(package)
-    duration_seconds = int(package_duration_delta(package).total_seconds())
+    duration_seconds = None if package_is_bundle(package) else int(package_duration_delta(package).total_seconds())
     if service_type == "pppoe":
         return create_ppp_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
+    if service_type == "static":
+        return None
     return create_hotspot_profile(tenant, package.get("name"), package.get("speed"), duration_seconds)
 
 
@@ -532,7 +562,7 @@ def public_packages(request, tenant_id):
         return ok({"message": "Tenant is not accepting payments"}, 403)
     requested_service = str(request.GET.get("service_type") or "").strip().lower()
     packages = _public_packages_for_tenant(tenant_id, requested_service)
-    if requested_service in {"hotspot", "pppoe"} and not packages:
+    if requested_service in {"hotspot", "pppoe", "tv"} and not packages:
         packages = _public_packages_for_tenant(tenant_id)
     return ok(sorted(packages, key=lambda item: float(item.get("price") or 0)))
 
@@ -563,7 +593,7 @@ def public_pppoe_profile(request, tenant_id):
 def _public_package_payload(pkg):
     amount_payable = float(pkg.get("amount_payable") or pkg.get("price") or 0)
     return {
-        **{key: pkg.get(key) for key in ["id", "name", "speed", "duration_days", "duration_unit", "duration_value", "duration_hours", "price", "service_type"]},
+        **{key: pkg.get(key) for key in ["id", "name", "speed", "duration_days", "duration_unit", "duration_value", "duration_hours", "price", "service_type", "package_kind", "data_limit_mb", "fup_speed"]},
         "amount_payable": amount_payable,
         "service_type": package_service_type(pkg),
         "duration_label": package_duration_label(pkg),
@@ -571,6 +601,8 @@ def _public_package_payload(pkg):
 
 
 def _public_packages_for_tenant(tenant_id, requested_service=""):
+    if requested_service == "tv":
+        requested_service = "hotspot"
     return [
         _public_package_payload(pkg)
         for pkg in list_children(f"tenants/{tenant_id}/packages")
@@ -1765,7 +1797,8 @@ def public_voucher_login(request, tenant_id):
             return _html_page("Wrong credentials", f"<main><div class='alert'>Username or password is wrong, inactive, or expired.</div><p><a href='{back}'>Back to portal</a></p></main>", 401)
         return ok({"message": "Username or password is wrong, inactive, or expired"}, 401)
 
-    access_payload["duration_seconds"] = int(package_duration_delta(package).total_seconds()) if package else None
+    access_payload["duration_seconds"] = None if package_is_bundle(package) else int(package_duration_delta(package).total_seconds()) if package else None
+    access_payload["limit_bytes_total"] = package_data_limit_bytes(package)
     router_status = "radius_ready" if tenant.get("radius_enabled") else "pending"
     if tenant.get("radius_enabled"):
         try:
@@ -2069,20 +2102,19 @@ def packages(request, package_id=None):
     tenant_id = request.tenant["id"]
     if method(request, "GET") and not package_id:
         packages = list_children(f"tenants/{tenant_id}/packages")
-        packages = [package for package in packages if str(package.get("service_type") or "").lower() != "static"]
         return as_collection_response(request, packages)
     if method(request, "PATCH") and package_id:
         data = body(request)
         existing = ref(f"tenants/{tenant_id}/packages/{package_id}").get()
         if not existing:
             return ok({"message": "Package not found"}, 404)
-        updates = {key: data[key] for key in ["name", "speed", "duration_days", "duration_unit", "duration_value", "duration_hours", "price", "amount_payable", "is_active", "service_type"] if key in data}
+        updates = {key: data[key] for key in ["name", "speed", "duration_days", "duration_unit", "duration_value", "duration_hours", "price", "amount_payable", "is_active", "service_type", "package_kind", "data_limit_mb", "fup_speed"] if key in data}
         if not updates:
             return ok({"message": "No package fields provided"}, 400)
         if "service_type" in updates:
             requested_service_type = str(updates["service_type"] or "").strip().lower()
-            if requested_service_type not in {"hotspot", "pppoe"}:
-                return ok({"message": "Package type must be Hotspot or PPPoE"}, 400)
+            if requested_service_type not in {"hotspot", "pppoe", "static"}:
+                return ok({"message": "Package type must be Hotspot, PPPoE, or Static"}, 400)
             updates["service_type"] = requested_service_type
         if "speed" in updates:
             updates["speed"] = normalize_rate_limit(updates["speed"]) or str(updates["speed"] or "").strip()
@@ -2094,6 +2126,8 @@ def packages(request, package_id=None):
             updates["amount_payable"] = updates["price"]
         if "is_active" in updates:
             updates["is_active"] = bool(updates["is_active"])
+        if any(key in data for key in ["package_kind", "data_limit_mb", "fup_speed"]):
+            updates.update(normalized_package_extras({**existing, **data, **updates}))
         if any(key in data for key in ["service_type", "duration_unit", "duration_value", "duration_days", "duration_hours"]):
             updates.update(normalized_package_payload(
                 {**existing, **data, **updates},
@@ -2166,6 +2200,7 @@ def package_add(request):
     if any(not data.get(field) for field in ["name", "speed", "price"]):
         return ok({"message": "All package fields are required"}, 400)
     package_payload = normalized_package_payload(data)
+    package_payload.update(normalized_package_extras(data))
     speed = normalize_rate_limit(data["speed"]) or str(data["speed"] or "").strip()
     if find_child_by_field(f"tenants/{request.tenant['id']}/packages", "name", data["name"]):
         return ok({"message": "A package with this name already exists"}, 409)
@@ -2551,6 +2586,11 @@ def _customer_secret_script(customer):
     rate_limit_field = f' rate-limit="{rate_limit}"'
     limit_uptime = _rsc_escape(routeros_duration(customer.get("duration_seconds") or customer.get("limit_seconds")) or "")
     limit_uptime_field = f' limit-uptime="{limit_uptime}"' if limit_uptime and service_type == "hotspot" else ""
+    try:
+        limit_bytes_total = int(float(customer.get("limit_bytes_total") or customer.get("data_limit_bytes") or 0))
+    except (TypeError, ValueError):
+        limit_bytes_total = 0
+    limit_bytes_field = f' limit-bytes-total="{limit_bytes_total}"' if limit_bytes_total > 0 and service_type == "hotspot" else ""
     ppp_profile_script = (
         f':if ("{profile}" != "default") do={{ '
         f':if ([:len [/ppp profile find name="{profile}"]] = 0) do={{'
@@ -2578,9 +2618,9 @@ def _customer_secret_script(customer):
         +
         f':if ([:len [/ip hotspot user find name="{username}"]] = 0) do={{'
         f' /ip hotspot user add name="{username}" password="{password}" '
-        f'profile="{profile}" disabled={disabled}{limit_uptime_field} comment="billing-saas-managed" }} '
+        f'profile="{profile}" disabled={disabled}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }} '
         f'else={{ /ip hotspot user set [find name="{username}"] password="{password}" '
-        f'profile="{profile}" disabled={disabled}{limit_uptime_field} comment="billing-saas-managed" }};'
+        f'profile="{profile}" disabled={disabled}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }};'
         f':if ("{disabled}" = "no" && "{client_ip}" != "") do={{ '
         f':do {{ /ip hotspot active login user="{username}" password="{password}" ip="{client_ip}" mac-address="{client_mac}" }} '
         f'on-error={{ :log warning "Billing SaaS agent: automatic Hotspot login failed for {username}" }}; '
@@ -2830,9 +2870,11 @@ def _package_profile_script(package):
     if not name:
         return ""
     service_type = package_service_type(package)
+    if service_type == "static":
+        return ""
     rate_limit = _rsc_escape(normalize_rate_limit(package.get("speed")) or "")
     rate_limit_field = f' rate-limit="{rate_limit}"'
-    session_timeout = _rsc_escape(routeros_duration(package_duration_delta(package)) or "")
+    session_timeout = "" if package_is_bundle(package) else _rsc_escape(routeros_duration(package_duration_delta(package)) or "")
     session_timeout_field = f' session-timeout="{session_timeout}"' if session_timeout else ""
     if service_type == "pppoe":
         return (

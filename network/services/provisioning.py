@@ -1442,6 +1442,12 @@ def upsert_customer_access(tenant, customer, disabled=False):
             limit_uptime = routeros_duration(customer.get("duration_seconds") or customer.get("limit_seconds"))
             if limit_uptime:
                 fields["limit-uptime"] = limit_uptime
+            try:
+                limit_bytes_total = int(float(customer.get("limit_bytes_total") or customer.get("data_limit_bytes") or 0))
+            except (TypeError, ValueError):
+                limit_bytes_total = 0
+            if limit_bytes_total > 0:
+                fields["limit-bytes-total"] = str(limit_bytes_total)
         if existing and existing.get(".id"):
             router_path.update(**{".id": existing[".id"], **fields})
             if service_type == "hotspot" and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
