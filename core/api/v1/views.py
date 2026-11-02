@@ -951,10 +951,15 @@ def auth_register(request):
     existing_tenant = Tenant.objects.filter(email__iexact=email).first()
     if existing_tenant and check_password(data["password"], existing_tenant.password):
         ensure_subscription(existing_tenant, data.get("plan") or "basic")
+        verification_required = bool(getattr(settings, "TENANT_EMAIL_VERIFICATION_REQUIRED", False))
         return ok(
             {
                 "success": True,
-                "message": "This email is already registered. Check your inbox for the email verification link before signing in.",
+                "message": (
+                    "This email is already registered. Check your inbox for the email verification link before signing in."
+                    if verification_required
+                    else "This email is already registered. Email verification is temporarily disabled; you can sign in now."
+                ),
                 "tenantId": str(existing_tenant.pk),
             }
         )
@@ -1009,30 +1014,42 @@ def auth_register(request):
         logger.exception("Tenant registration failed for %s", email)
         return ok({"message": "Registration failed. Please try again or contact support."}, 500)
     tenant_data = ref(f"tenants/{tenant_ref.key}").get() or {}
-    tenant_data["email_verified"] = False
-    tenant_data["email_verification_token"] = signing.dumps(
+    verification_required = bool(getattr(settings, "TENANT_EMAIL_VERIFICATION_REQUIRED", False))
+    verification_token = signing.dumps(
         {"tenant_id": str(tenant_ref.key), "email": email},
         salt="tenant-email-verification",
-    )
+    ) if verification_required else ""
+    tenant_data["email_verified"] = not verification_required
+    tenant_data["email_verification_token"] = verification_token
     ref(f"tenants/{tenant_ref.key}").update({
-        "email_verified": False,
-        "email_verification_token": tenant_data["email_verification_token"],
+        "email_verified": not verification_required,
+        "email_verification_token": verification_token or None,
     })
     tenant_instance = Tenant.objects.filter(pk=tenant_ref.key).first()
     if tenant_instance:
+        tenant_instance.extra["email_verified"] = not verification_required
+        if verification_token:
+            tenant_instance.extra["email_verification_token"] = verification_token
+        else:
+            tenant_instance.extra.pop("email_verification_token", None)
+        tenant_instance.save(update_fields=["extra", "updated_at"])
         ensure_subscription(tenant_instance, data.get("plan") or "basic")
-    verification_token = tenant_data.get("email_verification_token") or ""
     verification_url = f"{public_base_url(request).rstrip('/')}/{settings.API_BASE_PATH}/v1/core/auth/verify-email?token={verification_token}" if verification_token else ""
     login_url = workspace_url.rstrip("/")
     send_tenant_registration_notifications_async(tenant_ref.key, tenant_data, login_url)
-    if not _send_tenant_email_verification(tenant_ref.key, tenant_data, verification_url):
+    if verification_required and not _send_tenant_email_verification(tenant_ref.key, tenant_data, verification_url):
         ref(f"tenants/{tenant_ref.key}").update({"email_verification_token": None})
         tenant_instance = Tenant.objects.filter(pk=tenant_ref.key).first()
         if tenant_instance:
             tenant_instance.extra["email_verification_token"] = ""
             tenant_instance.save(update_fields=["extra", "updated_at"])
         return ok({"message": "Your account was created, but we could not send the verification email. Please contact support to resend it."}, 502)
-    return ok({"success": True, "message": "Your account was created. Check your email and open the verification link to continue to sign in.", "tenantId": tenant_ref.key, "subdomain": tenant_data.get("subdomain"), "domain": tenant_data.get("domain"), "workspaceUrl": tenant_data.get("workspace_url")})
+    message = (
+        "Your account was created. Check your email and open the verification link to continue to sign in."
+        if verification_required
+        else "Your account was created. Email verification is temporarily disabled; you can sign in now."
+    )
+    return ok({"success": True, "message": message, "tenantId": tenant_ref.key, "subdomain": tenant_data.get("subdomain"), "domain": tenant_data.get("domain"), "workspaceUrl": tenant_data.get("workspace_url")})
 
 
 @csrf_exempt
@@ -1105,7 +1122,11 @@ def auth_login(request):
     password = str(data["password"]).strip()
 
     registered_tenant = Tenant.objects.filter(email__iexact=email).first()
-    if registered_tenant and not tenant_email_is_verified(registered_tenant):
+    if (
+        registered_tenant
+        and getattr(settings, "TENANT_EMAIL_VERIFICATION_REQUIRED", False)
+        and not tenant_email_is_verified(registered_tenant)
+    ):
         return ok({"message": "Verify your email address using the link we sent before signing in."}, 403)
 
     def complete_login(tenant, member_id=None):
