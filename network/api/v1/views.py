@@ -513,18 +513,21 @@ def public_base_url(request):
     request_url = normalize_public_url(f"{forwarded_proto}://{host}")
 
     # In local development the request host identifies the interface the user
-    # opened the app through (localhost, LAN IP, or a tunnel). Use that host so
-    # generated router commands can reach this running instance.
+    # opened the app through (localhost, LAN IP, or a tunnel). Use it so the
+    # router can reach this running instance.
     if settings.DEBUG:
         return request_url
 
-    candidates = [
-        request_url,
-        os.getenv("PUBLIC_APP_URL"),
-        getattr(settings, "PUBLIC_APP_URL", ""),
-    ]
-    if not settings.DEBUG:
-        candidates = [item for item in candidates if item and "localhost" not in item and "127.0.0.1" not in item]
+    # Routers and captive clients must use the stable public app host. A tenant
+    # subdomain can be routed separately or be unavailable to RouterOS even
+    # while the apex application host is healthy.
+    configured_public_url = normalize_public_url(
+        os.getenv("PUBLIC_APP_URL") or getattr(settings, "PUBLIC_APP_URL", "")
+    )
+    if configured_public_url and "localhost" not in configured_public_url and "127.0.0.1" not in configured_public_url:
+        return configured_public_url
+
+    candidates = [request_url]
     configured = next((item for item in candidates if item), "")
     return normalize_public_url(configured or request_url)
 

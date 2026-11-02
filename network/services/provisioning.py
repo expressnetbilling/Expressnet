@@ -422,23 +422,22 @@ def package_service_type(package):
 def captive_portal_url(tenant, base_url=None):
     """Build the URL the router should use to fetch hotspot files / redirect users to.
 
-    base_url, when provided, should be the LIVE request host (e.g. from
-    public_base_url(request).rstrip("/")) — this always wins, since it's the only
-    value guaranteed to track a rotating local ngrok tunnel or the current
-    production domain. Env vars / cached tenant fields are only used as a
-    fallback for code paths with no request in scope (e.g. background tasks).
+    Local development follows the live request host. Production uses an explicit
+    captive portal URL or the stable public app URL so router clients don't
+    depend on tenant-subdomain routing.
     """
     tenant_id = (tenant or {}).get("id")
-    if base_url:
+    configured = (
+        os.getenv("CAPTIVE_PORTAL_PUBLIC_URL")
+        or (tenant or {}).get("captive_portal_public_url")
+        or ("" if settings.DEBUG else getattr(settings, "PUBLIC_APP_URL", ""))
+        or os.getenv("SAAS_PORTAL_HOST")
+        or ""
+    )
+    if settings.DEBUG and base_url:
         base = normalize_public_url(base_url)
     else:
-        configured = (
-            os.getenv("CAPTIVE_PORTAL_PUBLIC_URL")
-            or (tenant or {}).get("captive_portal_public_url")
-            or os.getenv("SAAS_PORTAL_HOST")
-            or ""
-        )
-        base = normalize_public_url(configured) or get_public_base_url()
+        base = normalize_public_url(configured) or normalize_public_url(base_url) or get_public_base_url()
     path = urlparse(base).path.rstrip("/")
     if "{tenant_id}" in base:
         return base.replace("{tenant_id}", str(tenant_id))
