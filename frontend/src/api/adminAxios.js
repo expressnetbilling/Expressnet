@@ -1,8 +1,9 @@
 import axios from 'axios';
 import { ADMIN_API_PATH, adminLoginUrl } from '../config/adminPaths';
+import { apiBaseUrl } from '../config/apiBaseUrl';
 
 const adminApi = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
+  baseURL: apiBaseUrl(),
   timeout: 60000,
 });
 
