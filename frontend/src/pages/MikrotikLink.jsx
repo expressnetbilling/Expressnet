@@ -361,7 +361,7 @@ export default function MikrotikSettings() {
         <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-base font-bold text-slate-950">Router configurations</h2>
-            <p className="mt-1 text-sm text-slate-600">Select one service for the customer ports. Choosing PPPoE + Hotspot applies both services to every selected port.</p>
+            <p className="mt-1 text-sm text-slate-600">Select any number of customer ports, choose a service, then assign them together. PPPoE + Hotspot applies both services to each selected port.</p>
           </div>
         </div>
 
@@ -372,23 +372,6 @@ export default function MikrotikSettings() {
                 {routerStatus.message || 'Showing the last config pushed by the router during provisioning.'}
               </div>
             )}
-
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {[
-                ['Board', routerStatus.device?.board_name || provisioningState?.board || '-'],
-                ['Name', routerName || routerStatus.device?.identity || provisioningState?.identity || '-'],
-                ['RouterOS', routerStatus.device?.version || provisioningState?.version || '-'],
-                ['CPU', `${routerStatus.device?.cpu_load ?? '-'}%`],
-                ['Uptime', routerStatus.device?.uptime || '-'],
-              ].map(([label, value]) => (
-                <div key={label} className="flex min-h-16 items-center border border-slate-300 justify-center rounded-2xl shadow-2xl bg-white px-4 text-center">
-                  <div>
-                    <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
-                    <p className="mt-1 text-sm font-semibold text-slate-950">{value}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
 
             <div className="rounded-[10px] border border-slate-300 shadow-2xs bodder-white bg-white p-4 sm:p-6">
               <div className="grid gap-4 sm:grid-cols-2">
@@ -422,7 +405,7 @@ export default function MikrotikSettings() {
               </div>
 
               <div className="mt-6 flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-slate-700">Select one or more customer ports</p>
+                <p className="text-sm font-semibold text-slate-700">Select customer ports{selectedPorts.length ? ` (${selectedPorts.length} selected)` : ''}</p>
                 <button type="button" className="btn-secondary" onClick={toggleAllPorts} disabled={selectablePorts.length === 0}>
                   {allSelectablePortsSelected ? 'Clear selection' : 'Select all'}
                 </button>

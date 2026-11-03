@@ -1129,7 +1129,7 @@ def captive_portal_page(request, tenant_id):
                 <strong>Waiting for {provider_label} confirmation.</strong>
                 <p class="muted">If you have paid, keep this page open. We will show your username, password, and expiry time once confirmation arrives.</p>
               </div>
-              <script>setTimeout(function(){{window.location.href='{retry_url}';}}, 5000);</script>
+              <script>setTimeout(function(){{window.location.replace('{retry_url}');}}, 2500);</script>
             """
 
     packages = sorted(_captive_packages(tenant_id), key=lambda item: float(item.get("price") or 0))
@@ -1194,7 +1194,7 @@ def captive_portal_page(request, tenant_id):
                 <input name="phone" inputmode="tel" required placeholder="M-Pesa/phone number" autocomplete="tel">
                 <div class="modal-actions">
                   <a class="secondary close-link" href="#">Cancel</a>
-                  <button type="submit">Send prompt</button>
+                  <button type="submit">Buy</button>
                 </div>
               </form>
             </div>"""
@@ -1318,7 +1318,7 @@ def captive_portal_page(request, tenant_id):
             <input name="phone" inputmode="tel" required placeholder="M-Pesa/phone number" autocomplete="tel">
             <div class="modal-actions">
               <button class="secondary" type="button" id="pay-cancel">Cancel</button>
-              <button type="submit">Send prompt</button>
+              <button type="submit">Buy</button>
             </div>
           </form>
         </div>
@@ -1523,7 +1523,6 @@ def captive_portal_pay(request, tenant_id):
             "dst": data.get("dst") or data.get("link-orig") or "",
         }
         refresh_url = f"/api/captive/{html.escape(str(tenant_id))}?{urlencode({key: value for key, value in query.items() if value})}"
-        message = payload.get("message") or "Check your phone and enter your M-Pesa PIN to complete payment."
         provider_label = "Paystack M-Pesa" if payload.get("provider") == "paystack" else "M-Pesa"
         return _html_page(
             "Confirm payment",
@@ -1531,11 +1530,10 @@ def captive_portal_pay(request, tenant_id):
             <main>
               <div class="card connect-card">
                 <div class="spinner" aria-hidden="true"></div>
-                <strong>{html.escape(str(message))}</strong>
-                <p class="muted">Waiting for {provider_label} to confirm your payment. This page will connect your device when payment is confirmed.</p>
-                <p><a class="buy-btn" href="{refresh_url}">I have paid</a></p>
+                <strong>Prompt sent. Check your phone and enter your M-Pesa PIN.</strong>
+                <p class="muted">Waiting for {provider_label} to confirm your payment. This page will connect your device automatically when payment is confirmed.</p>
               </div>
-              <script>setTimeout(function(){{window.location.replace('{refresh_url}');}}, 2000);</script>
+              <script>setTimeout(function(){{window.location.replace('{refresh_url}');}}, 2500);</script>
             </main>
             """,
             201,
@@ -2590,6 +2588,36 @@ def router_ports(request):
     if service_type not in {"pppoe", "hotspot", "both"}:
         return ok({"message": "Port service must be PPPoE, Hotspot, or both"}, 400)
     wan_interface = str(request.tenant.get("mikrotik_wan_interface") or "ether1").strip()
+    if service_type == "both" or (_router_is_agent_linked(request.tenant) and not has_mikrotik_credentials(request.tenant)):
+        eligible_interfaces = []
+        results = []
+        for interface_name in interface_names:
+            if interface_name == wan_interface or interface_name.lower() == "ether1":
+                results.append({"interface": interface_name, "success": False, "message": f"{interface_name} looks like the WAN/uplink port. Choose a customer LAN port instead."})
+                continue
+            eligible_interfaces.append(interface_name)
+        if eligible_interfaces:
+            response = _queue_router_ports_command(request, eligible_interfaces, service_type, profile_name)
+            result_data = getattr(response, "data", {})
+            queued_ok = bool(result_data.get("success"))
+            results.extend({"interface": name, "success": queued_ok, "queued": bool(result_data.get("queued")), "message": result_data.get("message")} for name in eligible_interfaces)
+            if queued_ok:
+                request.tenant["router_port_assignments"] = result_data.get("assignments") or request.tenant.get("router_port_assignments") or {}
+        assignments = dict(request.tenant.get("router_port_assignments") or {})
+        succeeded = [item for item in results if item.get("success")]
+        failures = [item for item in results if not item.get("success")]
+        if len(interface_names) == 1:
+            item = results[0]
+            if not item["success"]:
+                return ok({"message": item.get("message") or "Unable to assign router port"}, 400)
+            return ok({"success": True, "queued": item.get("queued", False), "message": item.get("message"), "assignments": assignments})
+        return ok({
+            "success": bool(succeeded),
+            "message": f"{len(succeeded)} of {len(interface_names)} ports assigned; {len(failures)} failed.",
+            "results": results,
+            "assignments": assignments,
+        }, 200 if succeeded else 400)
+
     results = []
     for interface_name in interface_names:
         port_service = service_type
@@ -2655,31 +2683,47 @@ def router_ports(request):
     }, 200 if succeeded else 400)
 
 def _queue_router_port_command(request, interface_name, service_type, profile_name):
+    return _queue_router_ports_command(request, [interface_name], service_type, profile_name)
+
+
+def _queue_router_ports_command(request, interface_names, service_type, profile_name):
     if service_type not in {"pppoe", "hotspot", "both"}:
         return ok({"message": "Port service must be PPPoE, Hotspot, or both"}, 400)
-    if service_type in {"pppoe", "both"} and str(interface_name or "").lower().startswith(("wlan", "wifi", "wireless")):
-        service_type = "hotspot"
-        profile_name = "Expressnet-profile"
 
     tenant_id = request.tenant["id"]
     portal_url = captive_portal_url({"id": tenant_id, **request.tenant}, public_base_url(request).rstrip("/")) if service_type in {"hotspot", "both"} else None
     bridge_name = mikrotik_managed_bridge_name(request.tenant)
-    if service_type == "both":
-        script = (
-            _build_port_command_script(interface_name, "pppoe", profile_name, None, bridge_name, {"id": tenant_id, **request.tenant})
-            + _build_port_command_script(interface_name, "hotspot", "Expressnet-profile", portal_url, bridge_name, {"id": tenant_id, **request.tenant})
-        )
-    else:
-        script = _build_port_command_script(interface_name, service_type, profile_name, portal_url, bridge_name, {"id": tenant_id, **request.tenant})
+    tenant = {"id": tenant_id, **request.tenant}
+    script_parts = []
+    per_interface = {}
+    for interface_name in interface_names:
+        port_service = service_type
+        port_profile = profile_name
+        if port_service in {"pppoe", "both"} and str(interface_name or "").lower().startswith(("wlan", "wifi", "wireless")):
+            port_service = "hotspot"
+            port_profile = "Expressnet-profile"
+        if port_service == "both":
+            script_parts.extend((
+                _build_port_command_script(interface_name, "pppoe", profile_name, None, bridge_name, tenant),
+                _build_port_command_script(interface_name, "hotspot", "Expressnet-profile", portal_url, bridge_name, tenant),
+            ))
+            per_interface[interface_name] = {"service_type": "both", "profile": profile_name}
+        else:
+            script_parts.append(_build_port_command_script(interface_name, port_service, port_profile, portal_url, bridge_name, tenant))
+            per_interface[interface_name] = {"service_type": port_service, "profile": port_profile}
+    script = "".join(script_parts)
 
     commands = [c for c in (request.tenant.get("pending_router_commands") or []) if c.get("status") == "pending"][-19:]
+    command_id = secrets.token_hex(8)
     commands.append({
-        "id": secrets.token_hex(8),
-        "interface": interface_name,
+        "id": command_id,
+        "interface": interface_names[0] if len(interface_names) == 1 else None,
+        "interfaces": list(interface_names),
         "service_type": service_type,
         "profile": profile_name,
         "portal_url": portal_url,
         "bridge": bridge_name,
+        "port_assignments": per_interface,
         "script": script,
         "status": "pending",
         "created_at": iso_now(),
@@ -2688,21 +2732,22 @@ def _queue_router_port_command(request, interface_name, service_type, profile_na
     request.tenant["pending_router_commands"] = commands
 
     assignments = dict(request.tenant.get("router_port_assignments") or {})
-    assignments[interface_name] = {
-        "service_type": service_type,
-        "profile": profile_name,
-        "portal_url": portal_url,
-        "bridge": bridge_name,
-        "updated_at": iso_now(),
-        "status": "queued",
-    }
+    for interface_name, service in per_interface.items():
+        assignments[interface_name] = {
+            **service,
+            "portal_url": portal_url,
+            "bridge": bridge_name,
+            "updated_at": iso_now(),
+            "status": "queued",
+            "command_id": command_id,
+        }
     ref(f"tenants/{tenant_id}").update({"router_port_assignments": assignments})
     request.tenant["router_port_assignments"] = assignments
 
     return ok({
         "success": True,
         "queued": True,
-        "message": f"Router isn't directly reachable, so {interface_name} has been queued and will be applied automatically the next time the router checks in (usually within 30s).",
+        "message": f"{len(interface_names)} port{'s' if len(interface_names) != 1 else ''} queued together and will be applied automatically the next time the router checks in (usually within 30s).",
         "assignments": assignments,
     })
 
@@ -3872,6 +3917,13 @@ def router_provision_script(request, token):
         return HttpResponse("Not Found: Tenant account profile was not located.", status=404, content_type="text/plain")
 
     tenant = {"id": tenant_id, **tenant_data}
+    business_ssid = _rsc_escape(str(tenant_data.get("business_name") or "Expressnet")[:32])
+    wireless_provision_script = f'''
+        :log info "Billing SaaS: setting customer Wi-Fi name and removing wireless password";
+        :do {{ /interface wireless security-profiles add name="billing-saas-open" mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{ /interface wireless security-profiles set [find name="billing-saas-open"] mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }};
+        :do {{ :foreach billingWifi in=[/interface wireless find] do={{ /interface wireless set $billingWifi ssid="{business_ssid}" security-profile="billing-saas-open" disabled=no }} }} on-error={{}};
+        :do {{ :foreach billingWifi in=[/interface wifi find] do={{ /interface wifi set $billingWifi configuration.ssid="{business_ssid}" security.authentication-types="" security.passphrase="" disabled=no }} }} on-error={{}};
+        '''
     app_base_url = public_base_url(request).rstrip("/")
     portal_url = captive_portal_url(tenant, app_base_url)
     portal_host = urlparse(portal_url).netloc.split("@")[-1].split(":")[0]
@@ -4359,6 +4411,7 @@ def router_provision_script(request, token):
         {profile_and_server_report_loop}
         {snapshot_script}
         {verification_script}
+        {wireless_provision_script}
         {provisioning_callback_script}
         :do {{ /system scheduler remove [find name="billing-saas-agent"] }} on-error={{}}
         /system scheduler add name="billing-saas-agent" interval=3s on-event=":do {{ /file remove [find name=\\"billing-saas-cmd.rsc\\"] }} on-error={{}}; :do {{ /tool fetch url=\\"{agent_poll_url}\\" dst-path=billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command fetch failed\\" }}; :if ([:len [/file find name=\\"billing-saas-cmd.rsc\\"]] > 0) do={{ :do {{ /import billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command import failed\\" }} }};"
@@ -4438,12 +4491,13 @@ def router_agent_poll(request, token):
         command["delivered_at"] = delivered_at
         command["delivery_attempts"] = int(command.get("delivery_attempts") or 0) + 1
         command["ack_mode"] = "poll_delivery"
-        interface_name = command.get("interface")
-        if interface_name:
+        interface_names = command.get("interfaces") or ([command.get("interface")] if command.get("interface") else [])
+        for interface_name in interface_names:
             assignment = assignments.get(interface_name) or {}
+            port_assignment = (command.get("port_assignments") or {}).get(interface_name) or {}
             assignment.update({
-                "service_type": command.get("service_type") or assignment.get("service_type"),
-                "profile": command.get("profile") or assignment.get("profile"),
+                "service_type": port_assignment.get("service_type") or command.get("service_type") or assignment.get("service_type"),
+                "profile": port_assignment.get("profile") or command.get("profile") or assignment.get("profile"),
                 "portal_url": command.get("portal_url") or assignment.get("portal_url"),
                 "bridge": command.get("bridge") or assignment.get("bridge"),
                 "status": "delivered",
@@ -4488,14 +4542,15 @@ def router_agent_ack(request, token, command_id):
             "pending_router_commands": commands,
             "mikrotik_last_seen_at": iso_now(),
         })
-        interface_name = (applied_command or {}).get("interface")
-        if interface_name:
+        interface_names = (applied_command or {}).get("interfaces") or ([(applied_command or {}).get("interface")] if (applied_command or {}).get("interface") else [])
+        if interface_names:
             assignments = dict(tenant.get("router_port_assignments") or {})
-            assignment = assignments.get(interface_name)
-            if assignment and assignment.get("status") in {"queued", "delivered"}:
-                assignment["status"] = "applied"
-                assignment["updated_at"] = iso_now()
-                assignments[interface_name] = assignment
+            for interface_name in interface_names:
+                assignment = assignments.get(interface_name)
+                if assignment and assignment.get("status") in {"queued", "delivered"}:
+                    assignment["status"] = "applied"
+                    assignment["updated_at"] = iso_now()
+                    assignments[interface_name] = assignment
                 ref(f"tenants/{tenant_id}").update({"router_port_assignments": assignments})
         if (applied_command or {}).get("type") == "sync_packages":
             for package_id_value in ((applied_command or {}).get("package_ids") or []):

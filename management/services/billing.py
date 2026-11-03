@@ -486,6 +486,22 @@ def tenant_payout_details(tenant):
 def daraja_b2b_settlement_status(tenant):
     tenant = tenant or {}
     payout = tenant_payout_details(tenant)
+    method = selected_daraja_method(tenant)
+    if str(tenant.get("payment_provider") or "").strip().lower() in {"mpesa", "daraja"} and daraja_is_configured(_clean_daraja_config(tenant), method):
+        # Tenant-owned STK collections settle to the tenant's own shortcode.
+        return "withdrawal_ready"
+    if payout["settlement_destination_type"] == "phone":
+        if not payout["payout_phone"]:
+            return "missing_payout_destination"
+        platform_config = _clean_daraja_config(_platform_only_daraja_config())
+        has_b2c_credentials = bool(
+            (os.getenv("DARAJA_B2C_SHORTCODE") or platform_config.get("daraja_shortcode"))
+            and os.getenv("DARAJA_B2C_INITIATOR_NAME")
+            and os.getenv("DARAJA_B2C_SECURITY_CREDENTIAL")
+            and platform_config.get("daraja_consumer_key")
+            and platform_config.get("daraja_consumer_secret")
+        )
+        return "withdrawal_ready" if has_b2c_credentials else "missing_b2c_credentials"
     if payout["settlement_destination_type"] == "till":
         has_destination = bool(payout["daraja_settlement_till_number"])
     else:
@@ -496,7 +512,8 @@ def daraja_b2b_settlement_status(tenant):
         os.getenv("DARAJA_B2B_SHORTCODE")
         and os.getenv("DARAJA_B2B_INITIATOR_NAME")
         and os.getenv("DARAJA_B2B_SECURITY_CREDENTIAL")
-        and daraja_is_configured(_clean_daraja_config(_platform_only_daraja_config()), "daraja_paybill")
+        and _clean_daraja_config(_platform_only_daraja_config()).get("daraja_consumer_key")
+        and _clean_daraja_config(_platform_only_daraja_config()).get("daraja_consumer_secret")
     )
     return "withdrawal_ready" if has_b2b_credentials else "missing_b2b_credentials"
 
@@ -612,8 +629,16 @@ def get_daraja_credentials(tenant, payment_method="daraja_paybill"):
     }
 
 
-def get_daraja_access_token(tenant, payment_method="daraja_paybill"):
-    creds = get_daraja_credentials(tenant, payment_method)
+def get_daraja_access_token(tenant, payment_method="daraja_paybill", require_stk_credentials=True):
+    if require_stk_credentials:
+        creds = get_daraja_credentials(tenant, payment_method)
+    else:
+        configured = platform_daraja_config(tenant, payment_method)
+        consumer_key = str(configured.get("daraja_consumer_key") or "").strip()
+        consumer_secret = str(configured.get("daraja_consumer_secret") or "").strip()
+        if not consumer_key or not consumer_secret:
+            raise PaymentProviderError("Daraja API credentials are incomplete.", "Missing Daraja consumer key or consumer secret", 503)
+        creds = {"consumer_key": consumer_key, "consumer_secret": consumer_secret}
     response = requests.get(
         f"{daraja_base_url(tenant)}/oauth/v1/generate?grant_type=client_credentials",
         auth=(creds["consumer_key"], creds["consumer_secret"]),
@@ -844,7 +869,7 @@ def query_daraja_stk_payment(tenant, checkout_request_id, payment_method="daraja
         ) from exc
 
 
-def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None):
+def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None, originator_id=None):
     tenant = platform_daraja_config(tenant)
     shortcode = str(tenant.get("daraja_b2c_shortcode") or os.getenv("DARAJA_B2C_SHORTCODE") or tenant.get("daraja_shortcode") or "").strip()
     initiator = str(tenant.get("daraja_b2c_initiator_name") or os.getenv("DARAJA_B2C_INITIATOR_NAME") or "").strip()
@@ -863,8 +888,9 @@ def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None):
     if not base_url:
         raise RuntimeError("PUBLIC_APP_URL or DARAJA_CALLBACK_BASE_URL is required for Daraja B2C callbacks")
 
-    token = get_daraja_access_token(tenant)
+    token = get_daraja_access_token(tenant, require_stk_credentials=False)
     payload = {
+        "OriginatorConversationID": str(originator_id or f"SET{secrets.token_hex(8).upper()}")[:20],
         "InitiatorName": initiator,
         "SecurityCredential": security_credential,
         "CommandID": str(os.getenv("DARAJA_B2C_COMMAND_ID") or "BusinessPayment"),
@@ -877,7 +903,7 @@ def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None):
         "Occasion": str(payment_id)[:100],
     }
     response = requests.post(
-        f"{daraja_base_url(tenant)}/mpesa/b2c/v1/paymentrequest",
+        f"{daraja_base_url(tenant)}/mpesa/b2c/v3/paymentrequest",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json=payload,
         timeout=30,
@@ -897,6 +923,7 @@ def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None):
             data.get("ResponseDescription") or data.get("errorMessage") or f"Daraja B2C rejected request: {data}",
             502,
         )
+    data.setdefault("OriginatorConversationID", payload["OriginatorConversationID"])
     return data
 
 
@@ -909,7 +936,9 @@ def initiate_daraja_b2b_settlement(tenant, payment_id, amount, destination_type,
     security_credential = str(os.getenv("DARAJA_B2B_SECURITY_CREDENTIAL") or "").strip()
     recipient_shortcode = "".join(ch for ch in str(recipient_shortcode or "") if ch.isdigit())
     account_reference = str(account_number or "").strip()
-    destination_type = "till" if str(destination_type or "").strip().lower() == "till" else "bank"
+    destination_type = str(destination_type or "").strip().lower()
+    if destination_type not in {"bank", "till"}:
+        destination_type = "bank"
     if not all((shortcode, initiator, security_credential, recipient_shortcode)):
         raise PaymentProviderError(
             "B2B settlement is not fully configured.",
@@ -923,8 +952,8 @@ def initiate_daraja_b2b_settlement(tenant, payment_id, amount, destination_type,
     if not base_url:
         raise RuntimeError("PUBLIC_APP_URL or DARAJA_CALLBACK_BASE_URL is required for Daraja B2B callbacks")
 
-    token = get_daraja_access_token(tenant)
-    originator_id = str(originator_id or f"SET{secrets.token_hex(14).upper()}")
+    token = get_daraja_access_token(tenant, require_stk_credentials=False)
+    originator_id = str(originator_id or f"SET{secrets.token_hex(8).upper()}")[:20]
     is_till = destination_type == "till"
     payload = {
         "Initiator": initiator,

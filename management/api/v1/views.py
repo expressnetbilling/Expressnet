@@ -3069,7 +3069,8 @@ def settings_business(request):
             elif field == "daraja_settlement_till_number":
                 updates[field] = "".join(ch for ch in str(data[field] or "") if ch.isdigit())
             elif field == "settlement_destination_type":
-                updates[field] = "till" if str(data[field] or "").strip().lower() == "till" else "bank"
+                destination_type = str(data[field] or "").strip().lower()
+                updates[field] = destination_type if destination_type in {"bank", "till", "phone"} else "bank"
             elif field in {"daraja_consumer_key", "daraja_consumer_secret", "daraja_passkey"}:
                 # Blank values preserve the server-side credential. Secrets are
                 # never sent back to the browser after they have been saved.
@@ -3593,11 +3594,10 @@ def system_payment_message(tenant, context):
     brand = notification_brand(tenant)
     amount = context.get("amount_payable") or context.get("amount") or ""
     package_name = context.get("package") or ""
-    return (
-        f"Payment received! We have successfully received your payment of KSh {amount} for the {package_name} package.\n\n"
-        "Your payment has been confirmed and your internet service is being activated.\n\n"
-        f"Thank you for choosing {brand}."
-    )
+    message = f"Payment received! We have successfully received your payment of KSh {amount} for the {package_name} package.\n\n"
+    if context.get("payment_code"):
+        message += f"M-Pesa receipt: {context['payment_code']}\n\n"
+    return message + "Your payment has been confirmed and your internet service is being activated.\n\n" + f"Thank you for choosing {brand}."
 
 
 def system_expiry_message(tenant, context):
@@ -3741,6 +3741,7 @@ def notify_payment_access(tenant, payment, access):
         "username": access.get("username") or access.get("mac_address") or "",
         "password": access.get("password") or "",
         "expires_at": access.get("expiry_date") or "",
+        "payment_code": payment.get("payment_code") or payment.get("daraja_receipt_number") or "",
     }
     message = system_payment_message(tenant, notification_context)
     results = {}
@@ -4100,15 +4101,20 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         platform_fee_fixed = 0
     platform_fee = round((settlement_amount * platform_fee_percent / 100) + platform_fee_fixed, 2) if platform_collected else 0
     tenant_net_amount = max(0, round(settlement_amount - platform_fee, 2)) if platform_collected else 0
-    b2b_settlement_status = daraja_b2b_settlement_status(tenant_data)
-    b2b_destination_type = payout.get("settlement_destination_type")
-    b2b_recipient = payout.get("daraja_settlement_till_number") if b2b_destination_type == "till" else payout.get("bank_daraja_shortcode")
+    settlement_status = daraja_b2b_settlement_status(tenant_data)
+    destination_type = payout.get("settlement_destination_type")
+    settlement_provider = "daraja_b2c" if destination_type == "phone" else "daraja_b2b"
+    settlement_recipient = (
+        payout.get("payout_phone") if destination_type == "phone"
+        else payout.get("daraja_settlement_till_number") if destination_type == "till"
+        else payout.get("bank_daraja_shortcode")
+    )
     update.update({
         "settlement_gross_amount": settlement_amount,
         "settlement_fee_amount": platform_fee,
         "tenant_net_amount": tenant_net_amount,
         "tenant_payout": payout,
-        "tenant_settlement_status": ("queued" if b2b_settlement_status == "withdrawal_ready" else b2b_settlement_status) if platform_collected else "not_required",
+        "tenant_settlement_status": ("queued" if settlement_status == "withdrawal_ready" else settlement_status) if platform_collected else "not_required",
         "tenant_settlement_queued_at": iso_now() if platform_collected else "",
     })
     ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
@@ -4124,13 +4130,13 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         "settlement_status": update["tenant_settlement_status"],
         "settlement_updated_at": iso_now(),
     }
-    if platform_collected and b2b_settlement_status == "withdrawal_ready" and tenant_net_amount > 0:
-        b2b_originator_id = f"SET{secrets.token_hex(14).upper()}"
+    if platform_collected and settlement_status == "withdrawal_ready" and tenant_net_amount > 0:
+        settlement_originator_id = f"SET{secrets.token_hex(8).upper()}"
         update.update({
             "tenant_settlement_status": "initiating",
-            "tenant_settlement_provider": "daraja_b2b",
-            "tenant_settlement_originator_conversation_id": b2b_originator_id,
-            "tenant_settlement_destination_type": b2b_destination_type,
+            "tenant_settlement_provider": settlement_provider,
+            "tenant_settlement_originator_conversation_id": settlement_originator_id,
+            "tenant_settlement_destination_type": destination_type,
         })
         ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
         tenant_balance_update.update({
@@ -4139,25 +4145,35 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         })
         ref(f"tenants/{tenant_id}").update(tenant_balance_update)
         try:
-            b2b = initiate_daraja_b2b_settlement(
-                platform_daraja_config({"id": tenant_id, **tenant_data}),
-                payment_id,
-                tenant_net_amount,
-                b2b_destination_type,
-                b2b_recipient,
-                payout.get("bank_account_number"),
-                remarks=f"{tenant_data.get('business_name') or tenant_id} settlement",
-                originator_id=b2b_originator_id,
-            )
+            if settlement_provider == "daraja_b2c":
+                settlement_response = initiate_daraja_b2c(
+                    {"id": tenant_id, **tenant_data},
+                    payment_id,
+                    tenant_net_amount,
+                    settlement_recipient,
+                    remarks=f"{tenant_data.get('business_name') or tenant_id} internet payment",
+                    originator_id=settlement_originator_id,
+                )
+            else:
+                settlement_response = initiate_daraja_b2b_settlement(
+                    platform_daraja_config({"id": tenant_id, **tenant_data}),
+                    payment_id,
+                    tenant_net_amount,
+                    destination_type,
+                    settlement_recipient,
+                    payout.get("bank_account_number"),
+                    remarks=f"{tenant_data.get('business_name') or tenant_id} settlement",
+                    originator_id=settlement_originator_id,
+                )
             update.update({
                 "tenant_settlement_status": "requested",
-                "tenant_settlement_provider": "daraja_b2b",
-                "tenant_settlement_recipient_shortcode": b2b_recipient,
+                "tenant_settlement_provider": settlement_provider,
+                "tenant_settlement_recipient": settlement_recipient,
                 "tenant_settlement_requested_at": iso_now(),
-                "tenant_settlement_conversation_id": b2b.get("ConversationID"),
-                "tenant_settlement_originator_conversation_id": b2b.get("OriginatorConversationID"),
-                "tenant_settlement_response_code": b2b.get("ResponseCode"),
-                "tenant_settlement_response_description": b2b.get("ResponseDescription"),
+                "tenant_settlement_conversation_id": settlement_response.get("ConversationID"),
+                "tenant_settlement_originator_conversation_id": settlement_response.get("OriginatorConversationID") or settlement_originator_id,
+                "tenant_settlement_response_code": settlement_response.get("ResponseCode"),
+                "tenant_settlement_response_description": settlement_response.get("ResponseDescription"),
             })
             tenant_balance_update.update({
                 "settlement_pending_amount": max(0, round(current_balance, 2)),
@@ -4312,26 +4328,41 @@ def update_b2c_settlement(event, status):
     for tenant in list_children("tenants"):
         tenant_id = tenant.get("id")
         for payment in list_children(f"tenants/{tenant_id}/payments"):
+            if payment.get("tenant_settlement_provider") != "daraja_b2c":
+                continue
             matches_payment = occasion and str(payment.get("id")) == str(occasion)
             matches_originator = originator_id and payment.get("tenant_settlement_originator_conversation_id") == originator_id
             matches_conversation = conversation_id and payment.get("tenant_settlement_conversation_id") == conversation_id
             if not (matches_payment or matches_originator or matches_conversation):
                 continue
             payment_id = payment.get("id")
-            settlement_status = "paid" if status == "result" and str(result_code) == "0" else "failed"
+            if payment.get("tenant_settlement_result_at"):
+                return True
+            settlement_status = "timeout" if status == "timeout" else "paid" if str(result_code) == "0" else "failed"
+            now = iso_now()
             update = {
                 "tenant_settlement_status": settlement_status,
                 "tenant_settlement_result_code": result_code,
                 "tenant_settlement_result_desc": result_desc,
-                "tenant_settlement_result_at": iso_now(),
                 "tenant_settlement_result": result,
             }
+            if status == "timeout":
+                update["tenant_settlement_timeout_at"] = now
+            else:
+                update["tenant_settlement_result_at"] = now
             ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
-            ref(f"tenants/{tenant_id}").update({
+            tenant_update = {
                 "settlement_status": settlement_status,
-                "settlement_last_result_at": update["tenant_settlement_result_at"],
+                "settlement_last_result_at": now,
                 "settlement_last_result_desc": result_desc,
-            })
+            }
+            if settlement_status == "failed":
+                tenant_data = ref(f"tenants/{tenant_id}").get() or {}
+                tenant_update["settlement_pending_amount"] = round(
+                    float(tenant_data.get("settlement_pending_amount") or 0) + float(payment.get("tenant_net_amount") or 0),
+                    2,
+                )
+            ref(f"tenants/{tenant_id}").update(tenant_update)
             return True
     return False
 
@@ -4383,6 +4414,9 @@ def update_b2b_bank_settlement(event, callback_status):
                 "tenant_settlement_result_desc": result_desc,
                 "tenant_settlement_result": result,
             }
+            receipt = result.get("TransactionID")
+            if receipt:
+                update["tenant_settlement_receipt"] = receipt
             if callback_status == "timeout":
                 update["tenant_settlement_timeout_at"] = now
             else:
