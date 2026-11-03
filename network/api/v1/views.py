@@ -4336,11 +4336,12 @@ def router_provision_script(request, token):
     # the rest, so a single compromised customer device can't flood the router's DNS/proxy.
     hotspot_abuse_protection_script = """
         :do { /ip firewall raw remove [find comment~"Expressnet-hotspot"] } on-error={}
+        :do { /ip firewall filter remove [find comment~"Expressnet-hotspot-dns-flood-cap"] } on-error={}
         :do { /ip firewall raw add action=drop chain=prerouting dst-port=64872-64875 in-interface=$billingBridge protocol=tcp comment=Expressnet-hotspot-proxy-lockdown } on-error={}
-        :do { /ip firewall raw add action=accept chain=prerouting dst-limit=100,200,src-address/1m dst-port=53 in-interface=$billingBridge protocol=udp comment=Expressnet-hotspot-dns-flood-cap } on-error={}
-        :do { /ip firewall raw add action=drop chain=prerouting dst-port=53 in-interface=$billingBridge protocol=udp comment=Expressnet-hotspot-dns-flood-cap } on-error={}
-        :do { /ip firewall raw add action=accept chain=prerouting dst-limit=100,200,src-address/1m dst-port=53 in-interface=$billingBridge protocol=tcp comment=Expressnet-hotspot-dns-flood-cap } on-error={}
-        :do { /ip firewall raw add action=drop chain=prerouting dst-port=53 in-interface=$billingBridge protocol=tcp comment=Expressnet-hotspot-dns-flood-cap } on-error={}
+        :do { /ip firewall filter add action=accept chain=input dst-limit=100,200,src-address/1m dst-port=53 in-interface=$billingBridge protocol=udp place-before=[find comment="defconf: drop all not coming from LAN"] comment=Expressnet-hotspot-dns-flood-cap } on-error={}
+        :do { /ip firewall filter add action=drop chain=input dst-port=53 in-interface=$billingBridge protocol=udp place-before=[find comment="defconf: drop all not coming from LAN"] comment=Expressnet-hotspot-dns-flood-cap } on-error={}
+        :do { /ip firewall filter add action=accept chain=input dst-limit=100,200,src-address/1m dst-port=53 in-interface=$billingBridge protocol=tcp place-before=[find comment="defconf: drop all not coming from LAN"] comment=Expressnet-hotspot-dns-flood-cap } on-error={}
+        :do { /ip firewall filter add action=drop chain=input dst-port=53 in-interface=$billingBridge protocol=tcp place-before=[find comment="defconf: drop all not coming from LAN"] comment=Expressnet-hotspot-dns-flood-cap } on-error={}
         """
 
     script = f""":log info "Billing SaaS Step 1: provisioning token validated by Expressnet server";
@@ -4379,8 +4380,6 @@ def router_provision_script(request, token):
         :do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot dns"] }} on-error={{}}
         :do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot dhcp"] }} on-error={{}}
         :do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot web-proxy"] }} on-error={{}}
-        :do {{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=udp dst-port=53 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dns" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=udp dst-port=53 comment="billing-saas allow hotspot dns" }}
-        :do {{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=tcp dst-port=53 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dns" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=tcp dst-port=53 comment="billing-saas allow hotspot dns" }}
         :do {{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=udp dst-port=67,68 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dhcp" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }}
         :do {{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=tcp dst-port=80,443,64872-64875 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot web-proxy" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }}
         {hotspot_abuse_protection_script}
