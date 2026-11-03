@@ -57,6 +57,7 @@ urlpatterns = [
     path("captive/<str:tenant_id>/hotspot-file/<str:page>", network_views.captive_hotspot_file),
     path("captive/<str:tenant_id>/pay", network_views.captive_portal_pay),
     path("dashboard/stats", management_views.dashboard_stats),
+    path("audit/logs", management_views.tenant_audit_logs),
     path("customers", management_views.customers),
     path("customers/", management_views.customers),
     path("customers/add", management_views.customer_add),
