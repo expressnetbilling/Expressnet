@@ -1040,42 +1040,59 @@ def _remove_port_from_any_bridge(api, interface_name):
                 pass
 
 
-def _clear_wireless_password_for_hotspot(api, interface_name):
-    """Make assigned legacy WLAN interfaces open so Hotspot owns authentication."""
-    wireless_rows = []
+def _clear_wireless_password_for_hotspot(api, interface_name, tenant=None):
+    """Set the tenant SSID and make an assigned WLAN open for Hotspot auth."""
+    ssid = str((tenant or {}).get("business_name") or "Expressnet")[:32]
     try:
         wireless_rows = list(api.path("interface", "wireless").select())
     except Exception:
-        return None
+        wireless_rows = []
 
     wireless = next((item for item in wireless_rows if item.get("name") == interface_name), None)
-    if not wireless or not wireless.get(".id"):
-        return None
+    if wireless and wireless.get(".id"):
+        profile_name = "billing-saas-open"
+        try:
+            profiles_path = api.path("interface", "wireless", "security-profiles")
+            profiles = list(profiles_path.select())
+            existing = next((item for item in profiles if item.get("name") == profile_name), None)
+            fields = {
+                "name": profile_name,
+                "mode": "none",
+                "authentication-types": "",
+                "wpa-pre-shared-key": "",
+                "wpa2-pre-shared-key": "",
+                "supplicant-identity": "billing-saas",
+            }
+            if existing and existing.get(".id"):
+                profiles_path.update(**{".id": existing[".id"], **fields})
+            else:
+                profiles_path.add(**fields)
+            api.path("interface", "wireless").update(**{
+                ".id": wireless[".id"],
+                "ssid": ssid,
+                "security-profile": profile_name,
+                "disabled": "no",
+            })
+            return profile_name
+        except Exception:
+            pass
 
-    profile_name = "billing-saas-open"
+    # RouterOS 7's newer wifi package uses the /interface/wifi menu.
     try:
-        profiles = list(api.path("interface", "wireless", "security-profiles").select())
-        existing = next((item for item in profiles if item.get("name") == profile_name), None)
-        fields = {
-            "name": profile_name,
-            "mode": "none",
-            "authentication-types": "",
-            "wpa-pre-shared-key": "",
-            "wpa2-pre-shared-key": "",
-            "supplicant-identity": "billing-saas",
-        }
-        if existing and existing.get(".id"):
-            api.path("interface", "wireless", "security-profiles").update(**{".id": existing[".id"], **fields})
-        else:
-            api.path("interface", "wireless", "security-profiles").add(**fields)
+        wifi_rows = list(api.path("interface", "wifi").select())
+        wifi = next((item for item in wifi_rows if item.get("name") == interface_name), None)
+        if wifi and wifi.get(".id"):
+            api.path("interface", "wifi").update(**{
+                ".id": wifi[".id"],
+                "configuration.ssid": ssid,
+                "security.authentication-types": "",
+                "security.passphrase": "",
+                "disabled": "no",
+            })
+            return "open"
     except Exception:
         pass
-
-    try:
-        api.path("interface", "wireless").update(**{".id": wireless[".id"], "security-profile": profile_name, "disabled": "no"})
-        return profile_name
-    except Exception:
-        return None
+    return None
 
 
 def _enable_router_interface(api, interface):
@@ -1154,7 +1171,7 @@ def configure_router_port(tenant, interface_name, service_type, profile_name="de
 
         wireless_security_profile = None
         if service_type == "hotspot":
-            wireless_security_profile = _clear_wireless_password_for_hotspot(api, interface_name)
+            wireless_security_profile = _clear_wireless_password_for_hotspot(api, interface_name, tenant)
 
         bridge_note = f"Interface '{interface_name}' successfully moved into Expressnet managed bridge '{managed_bridge}'."
 
@@ -1302,6 +1319,12 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
     bridge_name = bridge_name or mikrotik_managed_bridge_name()
     portal_comment = portal_url or ""
     portal_host = urlparse(portal_url or "").netloc.split("@")[-1].split(":")[0]
+    company_ssid = _rsc_escape(str((tenant or {}).get("business_name") or "Expressnet")[:32])
+    wireless_setup = (
+        f':do {{ /interface wireless security-profiles add name="billing-saas-open" mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{ /interface wireless security-profiles set [find name="billing-saas-open"] mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }}; '
+        f':do {{ /interface wireless set [find name="{_rsc_escape(interface_name)}"] ssid="{company_ssid}" security-profile="billing-saas-open" disabled=no }} on-error={{}}; '
+        f':do {{ /interface wifi set [find name="{_rsc_escape(interface_name)}"] configuration.ssid="{company_ssid}" security.authentication-types="" security.passphrase="" disabled=no }} on-error={{}}; '
+    ) if interface_lower.startswith(("wlan", "wifi", "wireless")) else ""
 
     # --- Hotspot file writes with LOGGED errors and verification ---
     hotspot_file_writes = ""
@@ -1386,8 +1409,7 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
     hotspot_server_block = (
         f'  :do {{ /interface bridge filter remove [find comment="billing-saas pppoe-only {interface_name}"] }} on-error={{}}; '
         f'  {hotspot_setup}'
-        f'  :do {{ /interface wireless security-profiles add name="billing-saas-open" mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{ /interface wireless security-profiles set [find name="billing-saas-open"] mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }}; '
-        f'  :do {{ /interface wireless set [find name="{interface_name}"] security-profile="billing-saas-open" disabled=no }} on-error={{}}; '
+        f'  {wireless_setup}'
         f'  :local billingHs [/ip hotspot find interface="{bridge_name}"]; '
         f'  :if ([:len $billingHs] = 0) do={{ :set billingHs [/ip hotspot find name="Expressnet-hotspot"] }}; '
         f'  :if ([:len $billingHs] > 0) do={{ /ip hotspot set $billingHs name="Expressnet-hotspot" interface="{bridge_name}" address-pool=Expressnet-pool profile="Expressnet-profile" disabled=no }} else={{ /ip hotspot add name="Expressnet-hotspot" interface="{bridge_name}" address-pool=Expressnet-pool profile="Expressnet-profile" disabled=no }}; '

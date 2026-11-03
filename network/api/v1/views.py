@@ -20,7 +20,7 @@ from django.core.files.storage import FileSystemStorage
 from django.core.management import call_command
 from django.core.mail import send_mail
 from django.core.paginator import Paginator
-from django.db import close_old_connections, connection
+from django.db import close_old_connections, connection, transaction
 from django.db.utils import OperationalError
 from django.db.models import Count, Q, Sum
 from django.http import FileResponse, Http404, HttpResponse
@@ -2577,45 +2577,82 @@ def router_ports(request):
     if not has_mikrotik_credentials(request.tenant) and not _router_is_agent_linked(request.tenant):
         return ok({"message": "Run the MikroTik provisioning command before assigning router ports"}, 400)
     data = body(request)
-    interface_name = str(data.get("interface") or "").strip()
+    requested_interfaces = data.get("interfaces")
+    if requested_interfaces is None:
+        requested_interfaces = [data.get("interface")]
+    if not isinstance(requested_interfaces, list):
+        return ok({"message": "Interfaces must be a list of router port names"}, 400)
+    interface_names = list(dict.fromkeys(str(name or "").strip() for name in requested_interfaces if str(name or "").strip()))
+    if not interface_names or len(interface_names) > 32:
+        return ok({"message": "Select between 1 and 32 router ports"}, 400)
     service_type = str(data.get("service_type") or "").strip().lower()
     profile_name = str(data.get("profile") or "default").strip() or "default"
-    if not interface_name:
-        return ok({"message": "Router interface is required"}, 400)
     if service_type not in {"pppoe", "hotspot", "both"}:
         return ok({"message": "Port service must be PPPoE, Hotspot, or both"}, 400)
     wan_interface = str(request.tenant.get("mikrotik_wan_interface") or "ether1").strip()
-    if interface_name == wan_interface or interface_name.lower() == "ether1":
-        return ok({"message": f"{interface_name} looks like the WAN/uplink port. Choose a customer LAN port instead."}, 400)
-    if service_type in {"pppoe", "both"} and interface_name.lower().startswith(("wlan", "wifi", "wireless")):
-        service_type = "hotspot"
-        profile_name = "Expressnet-profile"
-    if service_type == "both" or (_router_is_agent_linked(request.tenant) and not has_mikrotik_credentials(request.tenant)):
-        return _queue_router_port_command(request, interface_name, service_type, profile_name)
-    try:
-        result = configure_router_port(request.tenant, interface_name, service_type, profile_name, base_url=public_base_url(request).rstrip("/"))
-        assignments = dict(request.tenant.get("router_port_assignments") or {})
-        assignments[interface_name] = {
-            "service_type": service_type,
-            "profile": result.get("profile") or profile_name,
-            "portal_url": result.get("portal_url"),
-            "updated_at": iso_now(),
-            "status": "applied",
-        }
-        ref(f"tenants/{request.tenant['id']}").update({"router_port_assignments": assignments})
-        return ok({"success": True, "message": f"{interface_name} assigned to {service_type.upper()}", "result": result, "assignments": assignments})
-    except (TimeoutError, OSError):
-        # Router isn't directly reachable (typical when it's behind
-        # NAT/CGNAT and no port-forward/tunnel exists for the RouterOS API
-        # port). Queue the change instead — the router's own scheduler
-        # polls for pending commands and applies them on its own outbound
-        # connection, same as provisioning does.
-        return _queue_router_port_command(request, interface_name, service_type, profile_name)
-    except Exception as exc:
-        if request.tenant.get("mikrotik_last_seen_at"):
-            return _queue_router_port_command(request, interface_name, service_type, profile_name)
-        return ok({"message": f"Unable to assign router port: {exc}"}, 400)
+    results = []
+    for interface_name in interface_names:
+        port_service = service_type
+        port_profile = profile_name
+        if interface_name == wan_interface or interface_name.lower() == "ether1":
+            results.append({"interface": interface_name, "success": False, "message": f"{interface_name} looks like the WAN/uplink port. Choose a customer LAN port instead."})
+            continue
+        if port_service in {"pppoe", "both"} and interface_name.lower().startswith(("wlan", "wifi", "wireless")):
+            port_service = "hotspot"
+            port_profile = "Expressnet-profile"
+        if port_service == "both" or (_router_is_agent_linked(request.tenant) and not has_mikrotik_credentials(request.tenant)):
+            response = _queue_router_port_command(request, interface_name, port_service, port_profile)
+            result_data = getattr(response, "data", {})
+            success = bool(result_data.get("success"))
+            results.append({"interface": interface_name, "success": success, "queued": bool(result_data.get("queued")), "message": result_data.get("message")})
+            if success:
+                request.tenant["router_port_assignments"] = result_data.get("assignments") or request.tenant.get("router_port_assignments") or {}
+            continue
+        try:
+            result = configure_router_port(request.tenant, interface_name, port_service, port_profile, base_url=public_base_url(request).rstrip("/"))
+            assignments = dict(request.tenant.get("router_port_assignments") or {})
+            assignments[interface_name] = {
+                "service_type": port_service,
+                "profile": result.get("profile") or port_profile,
+                "portal_url": result.get("portal_url"),
+                "updated_at": iso_now(),
+                "status": "applied",
+            }
+            ref(f"tenants/{request.tenant['id']}").update({"router_port_assignments": assignments})
+            request.tenant["router_port_assignments"] = assignments
+            results.append({"interface": interface_name, "success": True, "queued": False, "result": result})
+        except (TimeoutError, OSError):
+            response = _queue_router_port_command(request, interface_name, port_service, port_profile)
+            result_data = getattr(response, "data", {})
+            success = bool(result_data.get("success"))
+            results.append({"interface": interface_name, "success": success, "queued": bool(result_data.get("queued")), "message": result_data.get("message")})
+            if success:
+                request.tenant["router_port_assignments"] = result_data.get("assignments") or request.tenant.get("router_port_assignments") or {}
+        except Exception as exc:
+            if request.tenant.get("mikrotik_last_seen_at"):
+                response = _queue_router_port_command(request, interface_name, port_service, port_profile)
+                result_data = getattr(response, "data", {})
+                success = bool(result_data.get("success"))
+                results.append({"interface": interface_name, "success": success, "queued": bool(result_data.get("queued")), "message": result_data.get("message")})
+                if success:
+                    request.tenant["router_port_assignments"] = result_data.get("assignments") or request.tenant.get("router_port_assignments") or {}
+            else:
+                results.append({"interface": interface_name, "success": False, "message": f"Unable to assign router port: {exc}"})
 
+    assignments = dict(request.tenant.get("router_port_assignments") or {})
+    succeeded = [item for item in results if item.get("success")]
+    failures = [item for item in results if not item.get("success")]
+    if len(interface_names) == 1:
+        item = results[0]
+        if not item["success"]:
+            return ok({"message": item.get("message") or "Unable to assign router port"}, 400)
+        return ok({"success": True, "queued": item.get("queued", False), "message": item.get("message") or f"{item['interface']} assigned to {service_type.upper()}", "result": item.get("result"), "assignments": assignments})
+    return ok({
+        "success": bool(succeeded),
+        "message": f"{len(succeeded)} of {len(interface_names)} ports assigned; {len(failures)} failed.",
+        "results": results,
+        "assignments": assignments,
+    }, 200 if succeeded else 400)
 
 def _queue_router_port_command(request, interface_name, service_type, profile_name):
     if service_type not in {"pppoe", "hotspot", "both"}:
@@ -2648,6 +2685,7 @@ def _queue_router_port_command(request, interface_name, service_type, profile_na
         "created_at": iso_now(),
     })
     ref(f"tenants/{tenant_id}").update({"pending_router_commands": commands})
+    request.tenant["pending_router_commands"] = commands
 
     assignments = dict(request.tenant.get("router_port_assignments") or {})
     assignments[interface_name] = {
@@ -2659,6 +2697,7 @@ def _queue_router_port_command(request, interface_name, service_type, profile_na
         "status": "queued",
     }
     ref(f"tenants/{tenant_id}").update({"router_port_assignments": assignments})
+    request.tenant["router_port_assignments"] = assignments
 
     return ok({
         "success": True,
@@ -2900,6 +2939,93 @@ def _migration_export_provisioning_script(tenant):
     return script
 
 
+def _import_mikrotik_migration_customers(tenant_id, migration):
+    """Upsert readable PPPoE and Hotspot credentials into tenant customers."""
+    if not isinstance(migration, dict):
+        migration = {}
+    summary = {"created": 0, "updated": 0, "skipped": 0, "conflicts": 0}
+    tenant = Tenant.objects.filter(pk=tenant_id).first()
+    if not tenant:
+        return summary
+
+    queues = {
+        str(item.get("name") or "").strip().casefold(): item
+        for item in migration.get("simple_queues") or []
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    for queue in migration.get("simple_queues") or []:
+        if isinstance(queue, dict):
+            comment = str(queue.get("comment") or "").strip().casefold()
+            if comment:
+                queues.setdefault(comment, queue)
+    secret_sets = (
+        ("ppp_secrets", "pppoe"),
+        ("hotspot_users", "hotspot"),
+    )
+    with transaction.atomic():
+        for collection, service_type in secret_sets:
+            for item in migration.get(collection) or []:
+                if not isinstance(item, dict):
+                    summary["skipped"] += 1
+                    continue
+                username = str(item.get("name") or item.get("username") or item.get("user") or "").strip()
+                password = str(item.get("password") or "")
+                if not username or not password or password.strip() in {"*", "**", "***", "****", "*****", "******"}:
+                    summary["skipped"] += 1
+                    continue
+
+                customer = Customer.objects.filter(tenant_id=tenant_id, username__iexact=username).first()
+                if customer and str(customer.service_type or "pppoe").lower() not in {service_type, ""}:
+                    summary["conflicts"] += 1
+                    continue
+
+                queue = queues.get(username.casefold()) or {}
+                profile = str(item.get("profile") or "").strip()
+                disabled = item.get("disabled") in (True, 1) or str(item.get("disabled") or "").lower() in {"yes", "true", "1"}
+                status = "inactive" if disabled else "active"
+                if customer:
+                    customer.password = password
+                    customer.service_type = service_type
+                    customer.status = status
+                    if not customer.name:
+                        customer.name = username
+                    if profile and not customer.package:
+                        customer.package = profile
+                    customer_extra = dict(customer.extra or {})
+                    if queue.get("max_limit"):
+                        customer_extra["speed"] = queue["max_limit"]
+                    customer_extra.update({
+                        "mikrotik_profile": profile,
+                        "migration_source": "mikrotik",
+                        "migration_comment": str(item.get("comment") or ""),
+                    })
+                    customer.extra = customer_extra
+                    customer.save()
+                    summary["updated"] += 1
+                else:
+                    extra = {
+                        "mikrotik_profile": profile,
+                        "migration_source": "mikrotik",
+                        "migration_comment": str(item.get("comment") or ""),
+                    }
+                    if queue.get("max_limit"):
+                        extra["speed"] = queue["max_limit"]
+                    Customer.objects.create(
+                        tenant=tenant,
+                        name=username,
+                        username=username,
+                        password=password,
+                        package=profile,
+                        service_type=service_type,
+                        status=status,
+                        provisioning_status="imported",
+                        provisioning_message="Imported from MikroTik migration",
+                        extra=extra,
+                    )
+                    summary["created"] += 1
+    return summary
+
+
 def _router_migration_export_script(snapshot_url, callback_url):
     ppp_secret_url = f"{snapshot_url}/ppp-secret"
     hotspot_user_url = f"{snapshot_url}/hotspot-user"
@@ -2908,6 +3034,7 @@ def _router_migration_export_script(snapshot_url, callback_url):
     ppp_active_url = f"{snapshot_url}/ppp-active"
     hotspot_active_url = f"{snapshot_url}/hotspot-active"
     hotspot_host_url = f"{snapshot_url}/hotspot-host"
+    simple_queue_url = f"{snapshot_url}/simple-queue"
     return f""":log info "Billing SaaS migration: exporting existing router users, packages, and sessions";
         {_router_snapshot_fetch_script(snapshot_url)}
         :foreach p in=[/ppp profile find] do={{
@@ -2931,7 +3058,9 @@ def _router_migration_export_script(snapshot_url, callback_url):
             :do {{ :set sv [/ppp secret get $s service] }} on-error={{}}
             :do {{ :set dis [/ppp secret get $s disabled] }} on-error={{}}
             :do {{ :set c [/ppp secret get $s comment] }} on-error={{}}
-            :do {{ /tool fetch keep-result=no url=("{ppp_secret_url}?name=" . $n . "&password=" . $pw . "&profile=" . $pr . "&service=" . $sv . "&disabled=" . $dis . "&comment=" . $c) }} on-error={{ :log warning "Billing SaaS migration: PPP secret export failed" }}
+            :local record {{"name"=$n;"password"=$pw;"profile"=$pr;"service"=$sv;"disabled"=$dis;"comment"=$c}};
+            :local payload [:serialize to=json value=$record];
+            :do {{ /tool fetch keep-result=no http-method=post http-header-field="Content-Type:application/json" http-data=$payload url="{ppp_secret_url}" }} on-error={{ :log warning "Billing SaaS migration: PPP secret export failed" }}
         }}
         :foreach u in=[/ip hotspot user find] do={{
             :local n [/ip hotspot user get $u name]; :local pw ""; :local pr ""; :local dis ""; :local lim ""; :local up ""; :local bin ""; :local bout "";
@@ -2942,7 +3071,19 @@ def _router_migration_export_script(snapshot_url, callback_url):
             :do {{ :set up [/ip hotspot user get $u uptime] }} on-error={{}}
             :do {{ :set bin [/ip hotspot user get $u bytes-in] }} on-error={{}}
             :do {{ :set bout [/ip hotspot user get $u bytes-out] }} on-error={{}}
-            :do {{ /tool fetch keep-result=no url=("{hotspot_user_url}?name=" . $n . "&password=" . $pw . "&profile=" . $pr . "&disabled=" . $dis . "&limit_uptime=" . $lim . "&uptime=" . $up . "&bytes_in=" . $bin . "&bytes_out=" . $bout) }} on-error={{ :log warning "Billing SaaS migration: Hotspot user export failed" }}
+            :local record {{"name"=$n;"password"=$pw;"profile"=$pr;"disabled"=$dis;"limit_uptime"=$lim;"uptime"=$up;"bytes_in"=$bin;"bytes_out"=$bout}};
+            :local payload [:serialize to=json value=$record];
+            :do {{ /tool fetch keep-result=no http-method=post http-header-field="Content-Type:application/json" http-data=$payload url="{hotspot_user_url}" }} on-error={{ :log warning "Billing SaaS migration: Hotspot user export failed" }}
+        }}
+        :foreach q in=[/queue simple find] do={{
+            :local n [/queue simple get $q name]; :local target ""; :local max ""; :local dis ""; :local c "";
+            :do {{ :set target [/queue simple get $q target] }} on-error={{}}
+            :do {{ :set max [/queue simple get $q max-limit] }} on-error={{}}
+            :do {{ :set dis [/queue simple get $q disabled] }} on-error={{}}
+            :do {{ :set c [/queue simple get $q comment] }} on-error={{}}
+            :local record {{"name"=$n;"target"=$target;"max_limit"=$max;"disabled"=$dis;"comment"=$c}};
+            :local payload [:serialize to=json value=$record];
+            :do {{ /tool fetch keep-result=no http-method=post http-header-field="Content-Type:application/json" http-data=$payload url="{simple_queue_url}" }} on-error={{ :log warning "Billing SaaS migration: simple queue export failed" }}
         }}
         :foreach a in=[/ppp active find] do={{
             :local n [/ppp active get $a name]; :local addr ""; :local caller ""; :local up ""; :local svc "";
@@ -3420,11 +3561,15 @@ def router_provision_command(request):
     }
     token = jwt.encode(payload, _get_jwt_secret("JWT_SECRET"), algorithm="HS256")
     if migration_mode:
+        migration_snapshot = dict(request.tenant.get("mikrotik_router_snapshot") or _empty_router_snapshot())
+        migration_snapshot["migration_export"] = {}
         ref(f"tenants/{request.tenant['id']}").update({
             "provision_token_expires_at": expires_at.isoformat(),
             "mikrotik_migration_status": "pending",
             "mikrotik_migration_started_at": iso_now(),
             "mikrotik_migration_export": {},
+            "mikrotik_migration_import_summary": {},
+            "mikrotik_router_snapshot": migration_snapshot,
         })
     elif not fresh_router:
         ref(f"tenants/{request.tenant['id']}").update({
@@ -3647,6 +3792,7 @@ def _empty_router_snapshot():
             "hotspot_profiles": [],
             "ppp_secrets": [],
             "hotspot_users": [],
+            "simple_queues": [],
             "ppp_active_sessions": [],
             "hotspot_active_sessions": [],
             "hotspot_hosts": [],
@@ -3659,7 +3805,13 @@ def _router_bool(value):
 
 
 def _snapshot_item(request, keys):
-    return {key: str(request.GET.get(key) or "").strip() for key in keys}
+    source = body(request) if request.method == "POST" else request.GET
+    return {key: str(source.get(key) or "").strip() for key in keys}
+
+
+def _snapshot_bool(request, key):
+    source = body(request) if request.method == "POST" else request.GET
+    return _router_bool(source.get(key))
 
 
 def _append_unique(items, item, key="name"):
@@ -4395,9 +4547,21 @@ def router_provision_complete(request, token):
         or ""
     ).split(",")[0].strip()
     if migration_mode:
+        tenant_data = ref(f"tenants/{tenant_id}").get() or {}
+        try:
+            migration_import = _import_mikrotik_migration_customers(
+                tenant_id,
+                tenant_data.get("mikrotik_migration_export") or (tenant_data.get("mikrotik_router_snapshot") or {}).get("migration_export") or {},
+            )
+            import_status = "imported"
+        except Exception:
+            logger.exception("MikroTik migration customer import failed tenant=%s", tenant_id)
+            migration_import = {"created": 0, "updated": 0, "skipped": 0, "conflicts": 0, "error": "Customer credential import failed"}
+            import_status = "import_failed"
         updates = {
-            "mikrotik_migration_status": "exported",
+            "mikrotik_migration_status": import_status,
             "mikrotik_migration_completed_at": iso_now(),
+            "mikrotik_migration_import_summary": migration_import,
             "mikrotik_last_seen_at": iso_now(),
             "mikrotik_last_seen_ip": client_ip,
             "mikrotik_detected_identity": str(request.GET.get("identity") or "").strip(),
@@ -4482,7 +4646,7 @@ def router_provision_complete(request, token):
 
 
 @csrf_exempt
-@api_view(["GET"])
+@api_view(["GET", "POST"])
 def router_provision_snapshot(request, token, section):
     try:
         payload = jwt.decode(token, _get_jwt_secret("JWT_SECRET"), algorithms=["HS256"])
@@ -4518,6 +4682,7 @@ def router_provision_snapshot(request, token, section):
     migration_export.setdefault("hotspot_profiles", [])
     migration_export.setdefault("ppp_secrets", [])
     migration_export.setdefault("hotspot_users", [])
+    migration_export.setdefault("simple_queues", [])
     migration_export.setdefault("ppp_active_sessions", [])
     migration_export.setdefault("hotspot_active_sessions", [])
     migration_export.setdefault("hotspot_hosts", [])
@@ -4528,23 +4693,23 @@ def router_provision_snapshot(request, token, section):
         snapshot["device"] = _snapshot_item(request, ["board_name", "version", "uptime", "cpu_load", "free_memory", "total_memory", "architecture"])
     elif section == "interface":
         item = _snapshot_item(request, ["name", "type", "mac_address"])
-        item["running"] = _router_bool(request.GET.get("running"))
-        item["disabled"] = _router_bool(request.GET.get("disabled"))
+        item["running"] = _snapshot_bool(request, "running")
+        item["disabled"] = _snapshot_bool(request, "disabled")
         snapshot["interfaces"] = _append_unique(snapshot["interfaces"], item)
     elif section == "bridge-port":
         item = _snapshot_item(request, ["name", "interface", "bridge"])
-        item["disabled"] = _router_bool(request.GET.get("disabled"))
+        item["disabled"] = _snapshot_bool(request, "disabled")
         snapshot["bridge_ports"] = _append_unique(snapshot["bridge_ports"], item)
     elif section == "address":
         item = _snapshot_item(request, ["name", "address", "interface"])
-        item["disabled"] = _router_bool(request.GET.get("disabled"))
+        item["disabled"] = _snapshot_bool(request, "disabled")
         snapshot["addresses"] = _append_unique(snapshot["addresses"], item)
     elif section == "pool":
         item = _snapshot_item(request, ["name", "ranges"])
         snapshot["pools"] = _append_unique(snapshot["pools"], item)
     elif section == "dhcp-server":
         item = _snapshot_item(request, ["name", "interface", "address_pool"])
-        item["disabled"] = _router_bool(request.GET.get("disabled"))
+        item["disabled"] = _snapshot_bool(request, "disabled")
         snapshot["dhcp_servers"] = _append_unique(snapshot["dhcp_servers"], item)
     elif section == "pppoe-profile":
         item = _snapshot_item(request, ["name", "rate_limit"])
@@ -4564,13 +4729,18 @@ def router_provision_snapshot(request, token, section):
         snapshot["profiles"]["hotspot"] = _append_unique(snapshot["profiles"]["hotspot"], item)
     elif section == "ppp-secret":
         item = _snapshot_item(request, ["name", "password", "profile", "service", "comment"])
-        item["disabled"] = _router_bool(request.GET.get("disabled"))
+        item["disabled"] = _snapshot_bool(request, "disabled")
         migration_export["ppp_secrets"] = _append_unique(migration_export["ppp_secrets"], item)
         migration_export["exported_at"] = iso_now()
     elif section == "hotspot-user":
         item = _snapshot_item(request, ["name", "password", "profile", "limit_uptime", "uptime", "bytes_in", "bytes_out"])
-        item["disabled"] = _router_bool(request.GET.get("disabled"))
+        item["disabled"] = _snapshot_bool(request, "disabled")
         migration_export["hotspot_users"] = _append_unique(migration_export["hotspot_users"], item)
+        migration_export["exported_at"] = iso_now()
+    elif section == "simple-queue":
+        item = _snapshot_item(request, ["name", "target", "max_limit", "comment"])
+        item["disabled"] = _snapshot_bool(request, "disabled")
+        migration_export["simple_queues"] = _append_unique(migration_export["simple_queues"], item)
         migration_export["exported_at"] = iso_now()
     elif section == "ppp-active":
         item = _snapshot_item(request, ["name", "address", "caller_id", "uptime", "service"])
@@ -4612,6 +4782,7 @@ def router_provision_snapshot(request, token, section):
         "migration-hotspot-profile",
         "ppp-secret",
         "hotspot-user",
+        "simple-queue",
         "ppp-active",
         "hotspot-active",
         "hotspot-host",
@@ -4725,6 +4896,8 @@ def settings_mikrotik(request):
             "mikrotik_detected_board": request.tenant.get("mikrotik_detected_board", ""),
             "linked_routers": linked_routers,
             "router_port_assignments": request.tenant.get("router_port_assignments") or {},
+            "mikrotik_migration_status": request.tenant.get("mikrotik_migration_status", ""),
+            "mikrotik_migration_import_summary": request.tenant.get("mikrotik_migration_import_summary") or {},
         })
     data = body(request)
     updates = {}

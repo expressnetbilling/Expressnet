@@ -34,6 +34,7 @@ export default function MikrotikSettings() {
   const [loading, setLoading] = useState(true);
   const [provision, setProvision] = useState(null);
   const [routerStatus, setRouterStatus] = useState(null);
+  const [migrationSummary, setMigrationSummary] = useState(null);
   const [pullingStatus, setPullingStatus] = useState(false);
   const [assigning, setAssigning] = useState(false);
   const [activeStep, setActiveStep] = useState('link');
@@ -93,6 +94,7 @@ export default function MikrotikSettings() {
         // the previously linked router's snapshot or status in this screen.
         setProvisioningState({ status: '', provisionedAt: '', lastSeenAt: '', lastSeenIp: '', identity: '', version: '', board: '' });
         setRouterStatus(null);
+        setMigrationSummary(null);
         setRouterName('');
         setActiveStep('link');
         return;
@@ -106,6 +108,7 @@ export default function MikrotikSettings() {
         version: data.mikrotik_detected_version || '',
         board: data.mikrotik_detected_board || '',
       };
+      setMigrationSummary(data.mikrotik_migration_import_summary || null);
       setRouterName(data.mikrotik_name || data.router_name || data.mikrotik_detected_identity || '');
       setProvisioningState({
         ...nextProvisioningState,
@@ -232,35 +235,53 @@ export default function MikrotikSettings() {
     }
     setAssigning(true);
     const profile = selectedService === 'hotspot' ? 'billing-saas-captive' : 'default';
-    const failedPorts = [];
-    let assignedCount = 0;
-    for (const portName of selectedPorts) {
+    try {
+      let data;
       try {
-        await api.post('/router/ports', {
-          interface: portName,
+        ({ data } = await api.post('/router/ports', {
+          interfaces: selectedPorts,
           service_type: selectedService,
           profile,
-        });
-        assignedCount += 1;
-      } catch {
-        failedPorts.push(portName);
+        }));
+      } catch (error) {
+        data = error.response?.data;
+        if (!data?.results) throw error;
       }
+      const failedPorts = (data.results || [])
+        .filter((item) => !item.success)
+        .map((item) => item.interface);
+      const assignedCount = selectedPorts.length - failedPorts.length;
+      setSelectedPorts(failedPorts);
+      if (assignedCount > 0) {
+        toast.success(`${assignedCount} port${assignedCount === 1 ? '' : 's'} assigned to ${serviceLabel(selectedService)}`);
+        await pullRouterStatus({ silent: true });
+      }
+      if (failedPorts.length > 0) {
+        toast.error(`Could not assign ${failedPorts.map(portLabel).join(', ')}. They remain selected so you can retry.`);
+      }
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Could not assign the selected ports');
+    } finally {
+      setAssigning(false);
     }
-    setSelectedPorts(failedPorts);
-    if (assignedCount > 0) {
-      toast.success(`${assignedCount} port${assignedCount === 1 ? '' : 's'} queued for ${serviceLabel(selectedService)}`);
-      await pullRouterStatus({ silent: true });
-    }
-    if (failedPorts.length > 0) {
-      toast.error(`Could not assign ${failedPorts.map(portLabel).join(', ')}. They remain selected so you can retry.`);
-    }
-    setAssigning(false);
   };
 
   if (loading) return <p className="text-sm font-medium text-slate-600">Loading MikroTik configuration...</p>;
 
   return (
     <div className="space-y-3 text-[13px] font-normal tracking-[0.005em]">
+      {migrationSummary && Object.keys(migrationSummary).length > 0 && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-950">
+          <p className="font-semibold">{migrationSummary.error ? 'Router migration import failed' : 'Router migration imported into Customers'}</p>
+          <p className="mt-1 text-xs">
+            {migrationSummary.error
+              ? migrationSummary.error
+              : (migrationSummary.created || 0) + ' new, ' + (migrationSummary.updated || 0) + ' updated'
+                + (migrationSummary.skipped ? ', ' + migrationSummary.skipped + ' skipped because a readable username/password was unavailable' : '')
+                + (migrationSummary.conflicts ? ', ' + migrationSummary.conflicts + ' username conflicts to review' : '') + '.'}
+          </p>
+        </div>
+      )}
       {showProvisioning && (
         <section id="link-mikrotik" className={`surface-card p-3 sm:p-4 ${activeStep === 'link' ? '' : 'hidden'}`}>
           <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -294,7 +315,7 @@ export default function MikrotikSettings() {
             />
             <span>
               <span className="block text-sm font-normal text-[var(--app-text)]">Migrate existing router data</span>
-              <span className="mt-0.5 block text-xs text-[var(--app-muted)]">Export PPPoE users, Hotspot users, profiles, and sessions before provisioning.</span>
+              <span className="mt-0.5 block text-xs text-[var(--app-muted)]">Capture PPPoE and Hotspot accounts, profiles, simple queue limits, and active sessions before provisioning.</span>
             </span>
           </label>
           <div className="mt-3 overflow-hidden rounded-lg border border-[var(--app-border)] bg-[var(--app-panel)] text-[var(--app-text)]">
@@ -313,7 +334,7 @@ export default function MikrotikSettings() {
               onFocus={(event) => event.target.select()}
             />
             {provision?.mode === 'migration' && (
-              <p className="px-3 pb-3 text-xs font-normal text-[var(--app-muted)]">Migration export only. Turn this off to provision the router.</p>
+              <p className="px-3 pb-3 text-xs font-normal text-[var(--app-muted)]">The router sends its existing accounts to Expressnet. Credentials with readable passwords are added to Customers; turn this off to provision the router.</p>
             )}
             <div className="grid gap-2 border-t border-[var(--app-border)] bg-[var(--app-panel-muted)] px-3 py-2 sm:grid-cols-[1fr_auto] sm:items-center">
               <div className="min-w-0">
