@@ -3867,6 +3867,14 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
     is_bundle = package_is_bundle(pkg)
     duration_seconds = None if is_bundle else int(duration.total_seconds())
     expiry = utcnow() + timedelta(days=3650) if is_bundle else package_expiry_date(utcnow(), pkg)
+    if payment.get("status") == "success":
+        existing_expiry = payment.get("access_expires_at") or (customer or {}).get("expiry_date")
+        parsed_expiry = parse_datetime(str(existing_expiry or ""))
+        if parsed_expiry:
+            if timezone.is_naive(parsed_expiry):
+                parsed_expiry = timezone.make_aware(parsed_expiry, timezone.get_current_timezone())
+            if parsed_expiry > utcnow():
+                expiry = parsed_expiry
     limit_bytes_total = package_data_limit_bytes(pkg)
     router_client_mac = normalize_mac(payment.get("router_client_mac") or payment.get("router_mac"))
     router_client_ip = str(payment.get("router_client_ip") or payment.get("ip") or "").strip()
@@ -3910,6 +3918,7 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
         )
     except Exception as exc:
         logger.warning("Paid access SQL customer sync failed tenant=%s payment=%s username=%s error=%s", tenant_id, payment_id, username, exc, exc_info=True)
+    radius_access_ready = False
     if tenant.get("radius_enabled") and service_type in {"hotspot", "pppoe"}:
         try:
             from billing_api.radius_provisioning import sync_radius_customer, upsert_pg_customer
@@ -3917,6 +3926,7 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
             tenant_obj = tenant_obj or Tenant.objects.get(pk=tenant_id)
             pg_customer = sql_customer or upsert_pg_customer(tenant_obj, {"name": customer_name, "phone": phone, "username": username, "password": password, "package": package_for_access, "service_type": service_type, "status": "active", "expiry_date": expiry.isoformat(), "last_payment_id": payment_id, "last_payment_code": payment_code})
             sync_radius_customer(tenant_obj, pg_customer or {"username": username, "password": password})
+            radius_access_ready = True
             logger.info(
                 "Paid access prepared for RADIUS tenant=%s payment=%s username=%s service=%s package=%s expires_at=%s",
                 tenant_id,
@@ -3980,7 +3990,7 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
             "payment_ids": [payment_id],
         })
         router_access_status = "queued"
-    elif tenant.get("radius_enabled") and service_type in {"hotspot", "pppoe"}:
+    elif tenant.get("radius_enabled") and radius_access_ready and service_type in {"hotspot", "pppoe"}:
         router_access_status = "radius_ready"
         router_access_error = None
         logger.info(
@@ -3991,7 +4001,7 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
         )
     else:
         router_access_status = "pending"
-        router_access_error = "No linked MikroTik router"
+        router_access_error = "Customer access could not be synchronized to the router or RADIUS service"
     payment_access_updates = {
         "customer_id": customer_id,
         "access_username": username,
@@ -4048,7 +4058,8 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         logger.warning("Daraja callback payment not found tenant=%s payment=%s receipt=%s", tenant_id, payment_id, receipt)
         return False
     if payment.get("status") == "success":
-        if not payment.get("access_username"):
+        access_status = str(payment.get("access_status") or "").lower()
+        if not payment.get("access_username") or access_status in {"", "pending", "activation_pending", "activation_failed"}:
             tenant_data = ref(f"tenants/{tenant_id}").get() or {}
             activate_paid_access({"id": tenant_id, **tenant_data}, payment_id, {**payment, **callback_metadata}, phone or payment.get("phone"), receipt or payment.get("payment_code") or payment_id)
         return True

@@ -969,7 +969,8 @@ def _update_linked_router(tenant_id, tenant_data, allow_new=False, **updates):
 def _refresh_captive_daraja_payment(tenant_id, tenant, payment_id, payment):
     if not payment_id or not payment:
         return payment
-    if payment.get("status") == "success" and payment.get("access_username"):
+    access_status = str(payment.get("access_status") or "").lower()
+    if payment.get("status") == "success" and payment.get("access_username") and access_status not in {"", "pending", "activation_pending", "activation_failed"}:
         return payment
     if payment.get("status") != "success":
         checkout_request_id = payment.get("daraja_checkout_request_id") or payment.get("checkout_request_id")
@@ -1005,7 +1006,11 @@ def _refresh_captive_daraja_payment(tenant_id, tenant, payment_id, payment):
                 "callback_result_desc": result.get("ResultDesc") or "M-Pesa payment was not successful",
             })
     refreshed = ref(f"tenants/{tenant_id}/payments/{payment_id}").get() or payment
-    if refreshed.get("status") == "success" and not refreshed.get("access_username"):
+    refreshed_access_status = str(refreshed.get("access_status") or "").lower()
+    if refreshed.get("status") == "success" and (
+        not refreshed.get("access_username")
+        or refreshed_access_status in {"", "pending", "activation_pending", "activation_failed"}
+    ):
         from management.api.v1.views import activate_paid_access
 
         try:
@@ -1092,8 +1097,9 @@ def captive_portal_page(request, tenant_id):
             username = payment.get("access_username") or payment.get("username") or ""
             password = payment.get("access_password") or ""
             expires_at = payment.get("access_expires_at") or payment.get("expiry_date") or ""
+            access_status = str(payment.get("access_status") or "").lower()
             login_action = link_login or (f"http://{router_ip}/login" if router_ip else "")
-            if not username or not password:
+            if not username or not password or access_status not in {"active", "radius_ready"}:
                 retry_query = dict(request.GET.items())
                 retry_url = f"/api/captive/{html.escape(str(tenant_id))}?{urlencode(retry_query)}" if retry_query else f"/api/captive/{html.escape(str(tenant_id))}"
                 access_error = payment.get("access_error")
@@ -3506,6 +3512,8 @@ def _radius_server_config(tenant, wg_config=None, base_url=""):
         ("radius_fallback_ip",),
         "142.93.39.55",
     )
+    if _is_non_public_ip(fallback_ip):
+        fallback_ip = str(wg_config.get("tunnel_ip") or "").split("/", 1)[0] if wg_config.get("ready") else ""
     server_ip = _config_value(
         tenant,
         ("RADIUS_SERVER_IP", "RADIUS_SERVER_HOST", "RADIUS_HOST_IP"),
@@ -3522,9 +3530,19 @@ def _radius_server_config(tenant, wg_config=None, base_url=""):
         source_ip = source_ip or str((tenant or {}).get("wg_tunnel_ip") or os.getenv("WG_ROUTER_TUNNEL_IP") or os.getenv("WIREGUARD_ROUTER_TUNNEL_IP") or _default_wireguard_router_tunnel_ip(tenant)).split("/", 1)[0]
     auth_port = _config_value(tenant, ("RADIUS_AUTH_PORT",), ("radius_auth_port",), "1812")
     acct_port = _config_value(tenant, ("RADIUS_ACCT_PORT",), ("radius_acct_port",), "1813")
-    private_without_tunnel = _is_non_public_ip(server_ip) and not wg_config.get("ready")
+    if _is_non_public_ip(server_ip):
+        tunnel_ip = str(wg_config.get("tunnel_ip") or "").split("/", 1)[0]
+        if wg_config.get("ready") and tunnel_ip:
+            if str(server_ip).split("/", 1)[0] != tunnel_ip:
+                logger.warning("Ignoring private RADIUS host %s; using the configured WireGuard RADIUS address", server_ip)
+            server_ip = tunnel_ip
+        else:
+            logger.warning("Ignoring private RADIUS host %s because no WireGuard route is ready", server_ip)
+            server_ip = ""
+    private_without_tunnel = False
     return {
         "server_ip": server_ip,
+        "fallback_ip": fallback_ip,
         "source_ip": source_ip,
         "auth_port": auth_port,
         "acct_port": acct_port,
@@ -4007,7 +4025,7 @@ def router_provision_script(request, token):
     wg_router_tunnel_ip = str(tenant.get("wg_tunnel_ip") or os.getenv("WG_ROUTER_TUNNEL_IP") or os.getenv("WIREGUARD_ROUTER_TUNNEL_IP") or _default_wireguard_router_tunnel_ip(tenant)).strip()
     wg_router_api_ip = wg_router_tunnel_ip.split("/", 1)[0]
     wg_router_private_key = str(tenant.get("wg_private_key") or "").strip()
-    callback_url = f"{callback_base_url}?vpn={'1' if vpn_peer_enabled else '0'}&vpn_peer={'1' if vpn_peer_enabled else '0'}&radius={'1' if radius_enabled_for_router else '0'}&hotspot=1"
+    callback_url = f"{callback_base_url}?vpn={'1' if vpn_peer_enabled else '0'}&vpn_peer={'1' if vpn_peer_enabled else '0'}&hotspot=1"
     callback_join = "&" if "?" in callback_url else "?"
     bridge_name = mikrotik_managed_bridge_name(tenant)
     wan_interface = str(os.getenv("MIKROTIK_WAN_INTERFACE") or tenant.get("mikrotik_wan_interface") or "ether1").strip()
@@ -4032,7 +4050,7 @@ def router_provision_script(request, token):
     pppoe_service_name = "Expressnet-pppoe"
     wireguard_name = "Expressnet-wireguard"
     radius_comment = "Expressnet radius"
-    radius_fallback_ip = str(os.getenv("RADIUS_FALLBACK_IP") or tenant.get("radius_fallback_ip") or "142.93.39.55").strip()
+    radius_fallback_ip = str(radius_config.get("fallback_ip") or "142.93.39.55").strip()
 
     vpn_private_key_set = (
         f':do {{ /interface wireguard set [find name="{wireguard_name}"] private-key="{_rsc_escape(wg_router_private_key)}" }} on-error={{}}\n'
@@ -4109,12 +4127,19 @@ def router_provision_script(request, token):
     radius_script = f"""
         :log info "Expressnet: configuring RADIUS client for Hotspot and PPPoE";
         :do {{ /radius remove [find comment="{radius_comment}"] }} on-error={{}}
-        :do {{ /radius add service=ppp,hotspot address={_rsc_escape(radius_config["server_ip"])} secret="{_rsc_escape(radius_shared_secret)}" timeout=3s comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: primary RADIUS setup failed"; :error "Primary RADIUS setup failed" }}
+        :do {{ /radius add service=ppp,hotspot address={_rsc_escape(radius_config["server_ip"])} secret="{_rsc_escape(radius_shared_secret)}" timeout=3s comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: primary RADIUS setup failed; continuing with local customer access" }}
         :do {{ /radius add service=ppp,hotspot address={_rsc_escape(radius_fallback_ip)} secret="{_rsc_escape(radius_shared_secret)}" realm={_rsc_escape(wg_router_api_ip)} timeout=3s comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: fallback RADIUS setup failed" }}
-        :if ([:len [/radius find comment="{radius_comment}"]] = 0) do={{ :log error "Expressnet: RADIUS client missing after configuration"; :error "RADIUS client missing after configuration" }}
-        :do {{ /radius incoming set accept=yes port=1700 }} on-error={{ :log warning "Expressnet: RADIUS incoming setup failed" }}
-        /ppp aaa set use-radius=yes interim-update=1h;
-        :log info "Expressnet: RADIUS client configured";
+        :if ([:len [/radius find comment="{radius_comment}"]] = 0) do={{
+            :set billingRadiusFlag "no";
+            /ppp aaa set use-radius=no accounting=no;
+            :do {{ /ip hotspot profile set [find name="Expressnet-profile"] use-radius=no radius-accounting=no }} on-error={{}}
+            :log warning "Expressnet: online service unavailable; local customer access remains enabled"
+        }} else={{
+            :set billingRadiusFlag "yes";
+            :do {{ /radius incoming set accept=yes port=1700 }} on-error={{ :log warning "Expressnet: RADIUS incoming setup failed" }}
+            /ppp aaa set use-radius=yes interim-update=1h;
+            :log info "Expressnet: RADIUS client configured"
+        }};
         """
     if not radius_enabled_for_router:
         radius_script = """
@@ -4151,7 +4176,7 @@ def router_provision_script(request, token):
 
     provisioning_callback_script = f""":local billingWgPub "";
         :do {{ :set billingWgPub [/interface wireguard get [find name={wireguard_name}] public-key] }} on-error={{}}
-        :do {{ /tool fetch keep-result=no url=("{callback_url}{callback_join}wg_public_key=" . $billingWgPub . "&wg_tunnel_ip={_rsc_escape(wg_router_api_ip)}&bridge={_rsc_escape(bridge_name)}&mode={'wireguard' if vpn_interface_enabled else 'agent'}") }} on-error={{ :log warning "Billing SaaS provisioning callback failed" }}"""
+        :do {{ /tool fetch keep-result=no url=("{callback_url}{callback_join}radius=" . $billingRadiusFlag . "&wg_public_key=" . $billingWgPub . "&wg_tunnel_ip={_rsc_escape(wg_router_api_ip)}&bridge={_rsc_escape(bridge_name)}&mode={'wireguard' if vpn_interface_enabled else 'agent'}") }} on-error={{ :log warning "Billing SaaS provisioning callback failed" }}"""
     vpn_health_script = f"""
         :log info "Billing SaaS Step 5: verifying VPN connectivity";
         :local billingVpnPing 0;
@@ -4164,7 +4189,7 @@ def router_provision_script(request, token):
         vpn_health_script = ':log info "Billing SaaS Step 5: VPN health check skipped; local agent mode is active";'
     verification_script = """
         :log info ("Expressnet verify: /radius count=" . [:len [/radius find comment="Expressnet radius"]]);
-        :if ([:len [/radius find comment="Expressnet radius"]] = 0) do={ :log error "Expressnet verify failed: /radius print has no Expressnet radius client"; :error "RADIUS client missing" }
+        :if ([:len [/radius find comment="Expressnet radius"]] = 0) do={ :log warning "Expressnet: remote login is unavailable; local customer accounts will continue to work" }
         :log info ("Expressnet verify: hotspot profile use-radius=" . [/ip hotspot profile get [find name=Expressnet-profile] use-radius]);
         :if ([/ip hotspot profile get [find name=Expressnet-profile] use-radius] != "yes") do={ :log warning "Expressnet verify warning: /ip hotspot profile use-radius is not yes; continuing with local synced Hotspot users until RADIUS is confirmed" }
         :log info ("Billing SaaS verify: /ip hotspot host count=" . [:len [/ip hotspot host find]]);
@@ -4183,7 +4208,7 @@ def router_provision_script(request, token):
         :log info ("Billing SaaS verify: /ip hotspot active count=" . [:len [/ip hotspot active find]]);
         """
     radius_verify_script = (
-        ':if ([:len [/ip hotspot profile find name=Expressnet-profile use-radius=yes]] = 0) do={ :log warning "Expressnet: hotspot profile use-radius=yes was not confirmed; local synced users may be used until RADIUS is reachable" } else={ :log info "Expressnet: hotspot profile use-radius=yes confirmed" }'
+        ':if ($billingRadiusFlag = "yes") do={ :if ([:len [/ip hotspot profile find name=Expressnet-profile use-radius=yes]] = 0) do={ :log warning "Expressnet: online login is unavailable; local synced customer accounts remain enabled" } else={ :log info "Expressnet: online login is configured" } } else={ :log info "Expressnet: local customer login is active" }'
         if radius_enabled_for_router
         else ':log info "Billing SaaS: local Hotspot profile does not use RADIUS because local agent mode is active";'
     )
@@ -4344,6 +4369,7 @@ def router_provision_script(request, token):
         }}
         :log info "Billing SaaS Step 2: creating bridge, DHCP, IP pool, firewall, and NAT";
         :local billingBridge "{_rsc_escape(bridge_name)}";
+        :local billingRadiusFlag "{hotspot_radius_flags}";
         :do {{ /interface bridge add name=$billingBridge comment="Created by Expressnet" }} on-error={{ /interface bridge set [find name=$billingBridge] comment="Created by Expressnet" }}
         :do {{ /interface list member remove [find interface=$billingBridge] }} on-error={{}}
         :do {{ /interface list add name=EXPRESSNET-CUSTOMER comment="Expressnet customer-only interfaces" }} on-error={{}}
@@ -4396,7 +4422,7 @@ def router_provision_script(request, token):
         :log info "Billing SaaS Step 6: configuring RADIUS client";
         {radius_script}
         :log info "Billing SaaS Step 7: enabling and verifying Hotspot RADIUS authentication";
-        :foreach hp in=[/ip hotspot profile find name={hotspot_profile_name}] do={{ :do {{ /ip hotspot profile set $hp use-radius={hotspot_radius_flags} radius-accounting={hotspot_radius_flags} }} on-error={{ :log warning "Expressnet: hotspot radius flag update failed" }} }}
+        :foreach hp in=[/ip hotspot profile find name={hotspot_profile_name}] do={{ :do {{ /ip hotspot profile set $hp use-radius=$billingRadiusFlag radius-accounting=$billingRadiusFlag }} on-error={{ :log warning "Expressnet: hotspot radius flag update failed" }} }}
         {radius_verify_script}
         :foreach hs in=[/ip hotspot find interface=$billingBridge] do={{ :do {{ /ip hotspot set $hs profile={hotspot_profile_name} disabled=no }} on-error={{ :log warning "Expressnet: hotspot server radius profile update failed" }} }}
         :log info "Billing SaaS: Hotspot server is active on the billing bridge.";
@@ -4460,7 +4486,24 @@ def router_agent_poll(request, token):
     })
 
     all_commands = tenant.get("pending_router_commands") or []
-    commands = [c for c in all_commands if c.get("status") == "pending"]
+    now = timezone.now()
+    commands = []
+    for command in all_commands:
+        if command.get("status") == "pending":
+            commands.append(command)
+            continue
+        # Customer and package sync scripts are idempotent; retry when the
+        # router could not reach the acknowledgement endpoint after applying.
+        if command.get("status") != "delivered" or command.get("type") not in {"sync_secrets", "sync_packages"}:
+            continue
+        try:
+            delivered_at = datetime.fromisoformat(str(command.get("delivered_at") or "").replace("Z", "+00:00"))
+            if timezone.is_naive(delivered_at):
+                delivered_at = timezone.make_aware(delivered_at, timezone.get_current_timezone())
+            if (now - delivered_at).total_seconds() >= 20:
+                commands.append(command)
+        except (TypeError, ValueError):
+            commands.append(command)
     base_url = public_base_url(request).rstrip("/")
     if not commands:
         return HttpResponse(':log info "Billing SaaS agent: no pending commands";\n', content_type="text/plain")
@@ -4680,7 +4723,7 @@ def router_provision_complete(request, token):
     try:
         from billing_api.radius_provisioning import ensure_nas_client
         tenant_obj = Tenant.objects.filter(pk=tenant_id).first()
-        if tenant_obj and wg_tunnel_ip:
+        if tenant_obj and wg_tunnel_ip and updates.get("radius_enabled"):
             pending_secret = (tenant_obj.extra or {}).get("radius_shared_secret_pending")
             if pending_secret:
                 from billing_api.models import RadiusNasClient
@@ -4693,10 +4736,8 @@ def router_provision_complete(request, token):
                     },
                 )
                 if created:
-                    updates["radius_enabled"] = True
                     updates["radius_nas_configured"] = True
                     ref(f"tenants/{tenant_id}").update({
-                        "radius_enabled": True,
                         "radius_nas_configured": True,
                     })
     except Exception:
