@@ -25,7 +25,7 @@ from django.core.mail import EmailMultiAlternatives, send_mail
 from django.core.paginator import Paginator
 from django.core import signing
 from django.db import IntegrityError, close_old_connections, connection
-from django.db.utils import OperationalError
+from django.db.utils import DatabaseError, OperationalError
 from django.db.models import Count, Sum, Q
 from django.db.models.functions import Lower, Trim, Substr
 from django.http import FileResponse, Http404, HttpResponse
@@ -1334,11 +1334,16 @@ def admin_tenants(request, tenant_id=None, child=None):
     if tenant_id and child == "packages":
         return ok(list_children(f"tenants/{tenant_id}/packages"))
     if tenant_id and child == "audit" and method(request, "GET"):
-        records = AdminAuditLog.objects.filter(
-            Q(tenant_id=str(tenant_id))
-            | Q(target_type="tenant", target_id=str(tenant_id))
-            | Q(metadata__tenantId=str(tenant_id))
-        ).order_by("-timestamp")[:500]
+        tenant_filter = Q(tenant_id=str(tenant_id)) | Q(target_type="tenant", target_id=str(tenant_id))
+        try:
+            records = list(
+                AdminAuditLog.objects.filter(
+                    tenant_filter | Q(metadata__tenantId=str(tenant_id))
+                ).order_by("-timestamp")[:500]
+            )
+        except DatabaseError:
+            logger.exception("Tenant audit metadata query failed tenant=%s; using indexed audit fields", tenant_id)
+            records = list(AdminAuditLog.objects.filter(tenant_filter).order_by("-timestamp")[:500])
         return ok([item.as_dict() for item in records])
     if tenant_id and child == "overview" and method(request, "GET"):
         if not Tenant.objects.filter(pk=tenant_id).exists():
