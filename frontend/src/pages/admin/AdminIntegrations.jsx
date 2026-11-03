@@ -8,14 +8,11 @@ const initialState = {
   collection_provider: 'daraja',
   apiwap_configured: false,
   slek_configured: false,
-  paystack_configured: false,
-  paystack_currency: 'KES',
 };
 
 const providerOptions = {
   payments: [
     { id: 'daraja', name: 'Daraja', region: 'M-Pesa', description: 'Accept customer payments through Safaricom Daraja.' },
-    { id: 'paystack', name: 'Paystack', region: 'Global', description: 'Accept card and supported local payment methods through Paystack.' },
   ],
   communications: [
     { id: 'apiwap', name: 'ApiWap', region: 'WhatsApp', description: 'Send WhatsApp messages through the ApiWap gateway.' },
@@ -23,7 +20,7 @@ const providerOptions = {
   ],
 };
 
-function ProviderDialog({ kind, selected, configured, currency, saving, onSelect, onClose, onSave }) {
+function ProviderDialog({ kind, selected, configured, saving, onSelect, onClose, onSave }) {
   const isPayments = kind === 'payments';
   const options = providerOptions[kind];
   return (
@@ -35,7 +32,7 @@ function ProviderDialog({ kind, selected, configured, currency, saving, onSelect
           const ready = configured[option.id];
           return <button key={option.id} type="button" onClick={() => onSelect(option.id)} className={`admin-provider-option flex w-full items-center gap-3 rounded-xl border p-4 text-left transition ${active ? 'is-selected' : ''}`}>
             <span className={`admin-provider-icon flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${active ? 'is-selected' : ''}`}>{isPayments ? <CreditCard size={20} /> : <MessageCircle size={20} />}</span>
-            <span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="admin-heading text-sm font-semibold">{option.name}</span><span className="admin-muted text-[10px]">{option.region}</span></span><span className="admin-muted mt-1 block text-xs">{option.description}</span><span className={`mt-2 inline-flex rounded-full px-2 py-1 text-[9px] font-semibold ${ready ? 'bg-emerald-500/15 text-emerald-500' : 'bg-slate-500/15 text-slate-400'}`}>{ready ? 'Environment configured' : 'Check environment config'}</span>{isPayments && option.id === 'paystack' && active && <span className="admin-muted mt-2 block text-[10px]">Configured currency: {currency || 'KES'}</span>}</span>
+            <span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="admin-heading text-sm font-semibold">{option.name}</span><span className="admin-muted text-[10px]">{option.region}</span></span><span className="admin-muted mt-1 block text-xs">{option.description}</span><span className={`mt-2 inline-flex rounded-full px-2 py-1 text-[9px] font-semibold ${ready ? 'bg-emerald-500/15 text-emerald-500' : 'bg-slate-500/15 text-slate-400'}`}>{ready ? 'Environment configured' : 'Check environment config'}</span></span>
             <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${active ? 'admin-provider-check' : 'border-slate-400/50'}`}>{active && <Check size={13} />}</span>
           </button>;
         })}</div>
@@ -68,8 +65,6 @@ export default function AdminIntegrations() {
         collection_provider: data.collection_provider || 'daraja',
         apiwap_configured: Boolean(data.apiwap_configured ?? data.has_apiwap_api_key),
         slek_configured: Boolean(data.slek_configured),
-        paystack_configured: Boolean(data.has_paystack_secret_key),
-        paystack_currency: data.paystack_currency || 'KES',
       };
       setSettings(next);
       setDraft(next);
@@ -89,7 +84,7 @@ export default function AdminIntegrations() {
         notification_provider: draft.notification_provider,
         collection_provider: draft.collection_provider,
       });
-      const next = { ...draft, paystack_configured: Boolean(data.has_paystack_secret_key), paystack_currency: data.paystack_currency || draft.paystack_currency };
+      const next = { ...draft, collection_provider: 'daraja' };
       setSettings(next);
       setDraft(next);
       toast.success(data.message || 'Integration provider saved');
@@ -103,17 +98,17 @@ export default function AdminIntegrations() {
 
   if (loading) return <div className="grid gap-4 sm:grid-cols-2"><div className="h-32 animate-pulse rounded-2xl bg-white/5" /><div className="h-32 animate-pulse rounded-2xl bg-white/5" /></div>;
 
-  const paymentName = settings.collection_provider === 'paystack' ? 'Paystack' : 'Daraja';
+  const paymentName = 'Daraja';
   const communicationName = settings.notification_provider === 'apiwap' ? 'ApiWap' : 'Slek';
-  const configuration = { daraja: true, paystack: settings.paystack_configured, apiwap: settings.apiwap_configured, slek: settings.slek_configured };
+  const configuration = { daraja: true, apiwap: settings.apiwap_configured, slek: settings.slek_configured };
 
   return <div className="space-y-6">
     <div><p className="admin-accent-label text-[10px] font-bold uppercase tracking-[0.18em]">Platform services</p><h2 className="admin-heading mt-1 text-2xl font-bold tracking-tight">Integrations</h2><p className="admin-muted mt-1 text-sm">Choose which platform providers handle payments and communications.</p></div>
     <section><div className="mb-3"><h3 className="admin-heading text-sm font-bold">Core integrations</h3><p className="admin-muted mt-1 text-xs">Select a provider to view or change the active integration.</p></div><div className="grid gap-4 md:grid-cols-2">
-      <IntegrationCard title="Customer payments" description="Payment collection across customer checkout." provider={paymentName} region={settings.collection_provider === 'daraja' ? 'M-Pesa' : (settings.paystack_currency || 'Global')} icon={CreditCard} onClick={() => { setDraft(settings); setDialog('payments'); }} />
+      <IntegrationCard title="Customer payments" description="Payment collection across customer checkout." provider={paymentName} region="M-Pesa" icon={CreditCard} onClick={() => { setDraft(settings); setDialog('payments'); }} />
       <IntegrationCard title="Customer communications" description="WhatsApp messages sent by platform workflows." provider={communicationName} region="WhatsApp" icon={MessageCircle} onClick={() => { setDraft(settings); setDialog('communications'); }} />
     </div></section>
     <p className="admin-muted text-xs">Provider keys and API endpoints are read from the server environment. This page only selects the active provider.</p>
-    {dialog && <ProviderDialog kind={dialog} selected={dialog === 'payments' ? draft.collection_provider : draft.notification_provider} configured={configuration} currency={settings.paystack_currency} saving={saving} onSelect={(id) => setDraft((current) => ({ ...current, [dialog === 'payments' ? 'collection_provider' : 'notification_provider']: id }))} onClose={() => setDialog(null)} onSave={save} />}
+    {dialog && <ProviderDialog kind={dialog} selected={dialog === 'payments' ? 'daraja' : draft.notification_provider} configured={configuration} saving={saving} onSelect={(id) => setDraft((current) => ({ ...current, [dialog === 'payments' ? 'collection_provider' : 'notification_provider']: id }))} onClose={() => setDialog(null)} onSave={save} />}
   </div>;
 }

@@ -127,8 +127,8 @@ export default function CustomerPortal() {
           publicApi.get(packageUrl),
         ]);
         setTenant(tenantRes.data);
-        const methods = Array.isArray(tenantRes.data?.payment_methods) ? tenantRes.data.payment_methods : [];
-        setPaymentMethod(tenantRes.data?.collection_provider === 'paystack' ? 'paystack' : preferredDarajaMethod(methods));
+        const methods = Array.isArray(tenantRes.data?.payment_methods) ? tenantRes.data.payment_methods.filter((method) => method !== 'paystack') : [];
+        setPaymentMethod(preferredDarajaMethod(methods));
         let loadedPackages = responseItems(packagesRes.data);
         if (routeServiceType && loadedPackages.length === 0) {
           const fallbackRes = await publicApi.get(`/public/${tenantId}/packages`);
@@ -332,8 +332,7 @@ export default function CustomerPortal() {
         router_mac: routerContext.mac,
         link_login: routerContext.linkLogin,
         dst: routerContext.dst,
-        provider: paymentMethod === 'paystack' ? 'paystack' : undefined,
-        payment_method: paymentMethod === 'paystack' ? undefined : paymentMethod,
+        payment_method: paymentMethod,
       });
       toast.success(data.message || 'Check your phone for the payment prompt');
       if (data.paymentId) {

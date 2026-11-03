@@ -15,6 +15,7 @@ function formatKES(value) {
 
 export default function BillingPayment() {
   const [subscription, setSubscription] = useState(null);
+  const [destination, setDestination] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ reference: '', method: 'manual', notes: '' });
@@ -24,6 +25,7 @@ export default function BillingPayment() {
     try {
       const { data } = await api.get('/subscription/status');
       setSubscription(data.subscription);
+      setDestination(data.payment_destination || null);
       if (!data.payment_required && data.subscription?.status === 'active') {
         toast.success('Subscription is active');
       }
@@ -40,19 +42,6 @@ export default function BillingPayment() {
 
   const submit = async (event) => {
     event.preventDefault();
-    if (form.method === 'paystack') {
-      setSaving(true);
-      try {
-        const { data } = await api.post('/subscription/status', { method: 'paystack' });
-        if (!data.authorizationUrl) throw new Error(data.message || 'Paystack checkout URL was not returned');
-        window.location.href = data.authorizationUrl;
-      } catch (error) {
-        toast.error(error.response?.data?.message || error.message || 'Could not start Paystack checkout');
-      } finally {
-        setSaving(false);
-      }
-      return;
-    }
     if (!form.reference.trim()) {
       toast.error('Enter your payment reference');
       return;
@@ -106,6 +95,17 @@ export default function BillingPayment() {
             </div>
           </div>
         )}
+        {!loading && <p className="theme-muted mt-3 text-xs">System fee: {subscription?.system_fee_percent ?? 0}% of this month&apos;s successful internet sales ({formatKES(subscription?.system_fee_sales_basis)}).</p>}
+        {!loading && destination && <div className="theme-card-muted mt-5 rounded-lg border p-4">
+          <h2 className="theme-text text-sm font-semibold">Bank account for subscription payments</h2>
+          <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+            {destination.bank_name && <div><dt className="theme-muted text-xs">Bank</dt><dd className="theme-text mt-1 font-medium">{destination.bank_name}</dd></div>}
+            {destination.account_name && <div><dt className="theme-muted text-xs">Account name</dt><dd className="theme-text mt-1 font-medium">{destination.account_name}</dd></div>}
+            {destination.account_number && <div><dt className="theme-muted text-xs">Account number</dt><dd className="theme-text mt-1 font-medium">{destination.account_number}</dd></div>}
+            {destination.branch && <div><dt className="theme-muted text-xs">Branch</dt><dd className="theme-text mt-1 font-medium">{destination.branch}</dd></div>}
+          </dl>
+          {destination.instructions && <p className="theme-muted mt-3 whitespace-pre-line text-xs">{destination.instructions}</p>}
+        </div>}
         {!loading && subscription?.status === 'active' && (
           <button type="button" className="btn-primary mt-5" onClick={() => window.location.assign('/dashboard')}>
             Continue to Dashboard
@@ -121,7 +121,6 @@ export default function BillingPayment() {
             <select className="form-input" value={form.method} onChange={(event) => setForm((current) => ({ ...current, method: event.target.value }))}>
               <option value="manual">Manual</option>
               <option value="mpesa">M-Pesa</option>
-              <option value="paystack">Paystack</option>
               <option value="bank">Bank</option>
             </select>
           </label>

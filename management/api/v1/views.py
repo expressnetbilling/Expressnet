@@ -58,10 +58,11 @@ from billing_api.services import (
     paystack_signature_valid,
     initiate_daraja_b2c,
     initiate_daraja_b2b_settlement,
-    platform_daraja_config,
+    tenant_payment_collection_config,
     query_daraja_stk_payment,
     tenant_payout_details,
     daraja_b2b_settlement_status,
+    tenant_settlement_daraja_config,
     make_daraja_callback_token,
     verify_daraja_callback_token,
     make_payment_access_token,
@@ -150,6 +151,7 @@ PAYMENT_SETTING_FIELDS = {
     "business_number",
     "payout_phone",
     "bank_account_number",
+    "bank_name",
     "bank_code",
     "bank_daraja_shortcode",
     "daraja_settlement_till_number",
@@ -161,7 +163,6 @@ PAYMENT_SETTING_FIELDS = {
     "daraja_till_number",
     "daraja_shortcode_type",
     "daraja_environment",
-    "paystack_bearer",
     "payment_customer_email",
 }
 
@@ -664,16 +665,13 @@ def tenant_theme_payload(tenant):
         "business_number": tenant.get("business_number") or "",
         "payout_phone": tenant.get("payout_phone") or tenant.get("phone") or "",
         "bank_code": tenant.get("bank_code") or "",
+        "bank_name": tenant.get("bank_name") or "",
         "bank_daraja_shortcode": tenant.get("bank_daraja_shortcode") or "",
         "daraja_settlement_till_number": tenant.get("daraja_settlement_till_number") or "",
         "settlement_destination_type": tenant.get("settlement_destination_type") or ("till" if tenant.get("daraja_settlement_till_number") else "bank"),
         "bank_account_number": tenant.get("bank_account_number") or "",
-        "payment_methods": tenant.get("payment_methods") if isinstance(tenant.get("payment_methods"), list) else ["daraja_paybill"],
-        "paystack_bearer": tenant.get("paystack_bearer") or "account",
-        "bank_account_status": "withdrawal_ready" if (tenant.get("bank_code") and tenant.get("bank_account_number")) or tenant_payout_details(tenant).get("payout_phone") else "missing_payout_details",
+        "payment_methods": [method for method in (tenant.get("payment_methods") if isinstance(tenant.get("payment_methods"), list) else ["daraja_paybill"]) if method != "paystack"] or ["daraja_paybill"],
         "daraja_b2b_settlement_status": daraja_b2b_settlement_status(tenant),
-        "paystack_payout_model": "pooled_withdrawals",
-        "paystack_manual_payouts_enabled": str(os.getenv("PAYSTACK_MANUAL_PAYOUTS_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"},
         "has_daraja_consumer_key": bool(tenant.get("daraja_consumer_key")),
         "has_daraja_consumer_secret": bool(tenant.get("daraja_consumer_secret")),
         "daraja_shortcode": tenant.get("daraja_shortcode") or "",
@@ -681,7 +679,7 @@ def tenant_theme_payload(tenant):
         "daraja_till_number": tenant.get("daraja_till_number") or "",
         "daraja_shortcode_type": tenant.get("daraja_shortcode_type") or "CustomerPayBillOnline",
         "daraja_environment": tenant.get("daraja_environment") or "production",
-        "settlement_status": "withdrawal_ready" if (tenant.get("bank_code") and tenant.get("bank_account_number")) or tenant_payout_details(tenant).get("payout_phone") else "missing_payout_details",
+        "settlement_status": daraja_b2b_settlement_status(tenant),
         "settlement_pending_amount": float(tenant.get("settlement_pending_amount") or 0),
     }
 
@@ -694,15 +692,11 @@ def public_tenant(request, tenant_id):
     if not tenant:
         return ok({"message": "Tenant not found"}, 404)
     payment_methods = tenant.get("payment_methods") if isinstance(tenant.get("payment_methods"), list) else []
-    platform_collection_provider = str((ref("site_settings").get() or {}).get("collection_provider") or "daraja")
-    effective_collection_provider = selected_collection_provider(tenant, platform_default=platform_collection_provider)
     public_payment_methods = [
         str(method).strip().lower()
         for method in payment_methods
-        if str(method).strip().lower() in {"daraja_paybill", "daraja_buygoods", "paystack"}
+        if str(method).strip().lower() in {"daraja_paybill", "daraja_buygoods"}
     ] or [selected_daraja_method(tenant)]
-    if effective_collection_provider == "paystack" and "paystack" not in public_payment_methods:
-        public_payment_methods = ["paystack"]
     return ok({
         "id": tenant_id,
         "business_name": tenant.get("business_name"),
@@ -710,7 +704,7 @@ def public_tenant(request, tenant_id):
         "status": tenant.get("status"),
         "logo_url": tenant.get("logo_url") or "",
         "payment_methods": public_payment_methods,
-        "collection_provider": effective_collection_provider,
+        "collection_provider": "daraja",
     })
 
 
@@ -790,28 +784,13 @@ def _public_pay_impl(request, tenant_id):
             return ok({"message": "Enter a valid TV MAC address"}, 400)
     access_username = mac_address if service_type == "tv" else ((customer or {}).get("username") or username or to_access_username(phone))
     pending_access_password = str((customer or {}).get("password") or secrets.token_hex(3).upper())
-    platform_provider = str((ref("site_settings").get() or {}).get("collection_provider") or "daraja")
-    requested_provider = selected_collection_provider(
-        tenant,
-        data.get("provider") or data.get("payment_provider"),
-        platform_provider,
-    )
-    if requested_provider == "paystack":
-        paystack_enabled = str(os.getenv("PAYSTACK_MANUAL_PAYOUTS_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
-        if paystack_enabled:
-            return _public_paystack_impl(request, tenant_id, tenant, pkg, data, phone, service_type, customer, access_username, pending_access_password, mac_address, router_ip, router_client_ip, router_client_mac, router_mac, link_login, dst, amount_payable)
-        # Paystack pooled checkout is intentionally disabled; fall back to Daraja
-        # when credentials are available so customers can still buy packages.
-        daraja_method = selected_daraja_method(tenant, data.get("payment_method"))
-        fallback_config = platform_daraja_config(tenant, daraja_method)
-        if not daraja_is_configured(fallback_config, daraja_method):
-            logger.warning("Public checkout unavailable tenant=%s: Paystack payouts disabled and Daraja not configured", tenant_id)
-            return ok({"success": False, "message": "Online payment is not configured for this service. Please contact the provider."}, 503)
-    else:
-        daraja_method = selected_daraja_method(tenant, data.get("payment_method"))
-    daraja_config = platform_daraja_config(tenant, daraja_method)
-    daraja_source = daraja_config.get("daraja_credential_source") or "platform"
-    collection_account = "tenant_daraja" if daraja_source == "tenant" else "platform_daraja"
+    daraja_method = selected_daraja_method(tenant, data.get("payment_method"))
+    try:
+        daraja_config = tenant_payment_collection_config(tenant, daraja_method)
+    except PaymentProviderError as exc:
+        return ok({"success": False, "message": exc.public_message}, exc.status_code)
+    daraja_source = "platform"
+    collection_account = "platform_daraja"
     payment_ref = ref(f"tenants/{tenant_id}/payments").push(
         {
             "customer_id": customer.get("id") if customer else None,
@@ -2257,13 +2236,18 @@ def payments(request):
             payments_data = filtered
         return as_collection_response(request, payments_data)
     data = body(request)
+    if str(data.get("provider") or data.get("payment_provider") or "").strip().lower() == "paystack":
+        return ok({"message": "Paystack is unavailable. Use the configured M-Pesa settlement method."}, 410)
     if not data.get("phone"):
         return ok({"message": "Customer phone is required"}, 400)
     phone = normalize_phone(data["phone"])
     daraja_method = selected_daraja_method(request.tenant, data.get("payment_method"))
-    daraja_config = platform_daraja_config(request.tenant, daraja_method)
-    daraja_source = daraja_config.get("daraja_credential_source") or "platform"
-    collection_account = "tenant_daraja" if daraja_source == "tenant" else "platform_daraja"
+    try:
+        daraja_config = tenant_payment_collection_config(request.tenant, daraja_method)
+    except PaymentProviderError as exc:
+        return ok({"success": False, "message": exc.public_message}, exc.status_code)
+    daraja_source = "platform"
+    collection_account = "platform_daraja"
     payment_ref = ref(f"tenants/{request.tenant['id']}/payments").push(
         {
             "customer_id": data.get("customer_id"),
@@ -2988,6 +2972,7 @@ def settings_business(request):
         "business_number",
         "payout_phone",
         "bank_code",
+        "bank_name",
         "bank_daraja_shortcode",
         "daraja_settlement_till_number",
         "settlement_destination_type",
@@ -3001,7 +2986,6 @@ def settings_business(request):
         "daraja_till_number",
         "daraja_shortcode_type",
         "daraja_environment",
-        "paystack_bearer",
         "payment_customer_email",
     ]
     updates = {}
@@ -3051,13 +3035,11 @@ def settings_business(request):
                         value = "daraja_paybill"
                     elif value in {"buygoods", "buy_goods", "mpesa_buygoods"}:
                         value = "daraja_buygoods"
-                    if value in {"daraja_paybill", "daraja_buygoods", "paystack"}:
+                    if value in {"daraja_paybill", "daraja_buygoods"}:
                         normalized_methods.append(value)
                 updates[field] = normalized_methods or ["daraja_paybill"]
             elif field == "payment_provider":
-                updates[field] = str(data[field] or "daraja").lower()
-            elif field == "paystack_bearer":
-                updates[field] = "subaccount" if str(data[field]).lower() == "subaccount" else "account"
+                updates[field] = "mpesa"
             elif field == "daraja_shortcode_type":
                 value = str(data[field] or "").strip()
                 updates[field] = value if value in {"CustomerPayBillOnline", "CustomerBuyGoodsOnline"} else "CustomerPayBillOnline"
@@ -3066,6 +3048,9 @@ def settings_business(request):
                 updates[field] = "sandbox" if value == "sandbox" else "production"
             elif field == "bank_daraja_shortcode":
                 updates[field] = "".join(ch for ch in str(data[field] or "") if ch.isdigit())
+            elif field == "bank_code":
+                updates[field] = str(data[field] or "").strip()
+                updates["bank_daraja_shortcode"] = updates[field]
             elif field == "daraja_settlement_till_number":
                 updates[field] = "".join(ch for ch in str(data[field] or "") if ch.isdigit())
             elif field == "settlement_destination_type":
@@ -3087,15 +3072,9 @@ def settings_business(request):
     updates["business_settings_updated_at"] = iso_now()
 
     merged = {**request.tenant, **updates}
-    updates.setdefault("payment_provider", "mpesa")
-    updates["settlement_status"] = "withdrawal_ready" if (
-        (merged.get("bank_code") and merged.get("bank_account_number"))
-        or tenant_payout_details(merged).get("payout_phone")
-    ) else "missing_payout_details"
+    updates["payment_provider"] = "mpesa"
+    updates["settlement_status"] = daraja_b2b_settlement_status(merged)
 
-    merged = {**request.tenant, **updates}
-    if not ("paystack_settlement_status" in updates and updates["paystack_settlement_status"] == "not_configured"):
-        updates["paystack_settlement_status"] = merged.get("paystack_settlement_status") or ("ready" if merged.get("paystack_subaccount_code") else "not_configured")
     merged = {**request.tenant, **updates}
 
     tenant_record = Tenant.objects.get(pk=tenant_id)
@@ -3111,13 +3090,22 @@ def settings_business(request):
 @api_view(["GET"])
 @tenant_required
 def payment_banks(request):
-    try:
-        return ok({"results": list_paystack_banks("kenya")})
-    except PaymentProviderError as exc:
-        return ok({"message": exc.public_message}, exc.status_code)
-    except Exception:
-        logger.exception("Could not load Kenyan banks for payment settings")
-        return ok({"message": "Could not load the bank list. Try again shortly."}, 502)
+    # Daraja B2B uses bank M-Pesa Paybill shortcodes, not Paystack bank codes.
+    return ok({"results": [
+        {"code": "522522", "name": "KCB Bank", "daraja_shortcode": "522522"},
+        {"code": "247247", "name": "Equity Bank", "daraja_shortcode": "247247"},
+        {"code": "400200", "name": "Co-operative Bank", "daraja_shortcode": "400200"},
+        {"code": "880100", "name": "NCBA Bank", "daraja_shortcode": "880100"},
+        {"code": "303030", "name": "Absa Bank Kenya", "daraja_shortcode": "303030"},
+        {"code": "329329", "name": "Standard Chartered Bank", "daraja_shortcode": "329329"},
+        {"code": "600100", "name": "Stanbic Bank Kenya", "daraja_shortcode": "600100"},
+        {"code": "222111", "name": "Family Bank", "daraja_shortcode": "222111"},
+        {"code": "542542", "name": "I&M Bank", "daraja_shortcode": "542542"},
+        {"code": "516600", "name": "Diamond Trust Bank", "daraja_shortcode": "516600"},
+        {"code": "700201", "name": "Ecobank Kenya", "daraja_shortcode": "700201"},
+        {"code": "985050", "name": "Gulf African Bank", "daraja_shortcode": "985050"},
+        {"code": "", "name": "Other bank (enter its Paybill)", "daraja_shortcode": ""},
+    ]})
 
 
 @csrf_exempt
@@ -4114,6 +4102,10 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
     tenant_net_amount = max(0, round(settlement_amount - platform_fee, 2)) if platform_collected else 0
     settlement_status = daraja_b2b_settlement_status(tenant_data)
     destination_type = payout.get("settlement_destination_type")
+    if destination_type == "bank" and not payout.get("bank_daraja_shortcode"):
+        tenant_settlement_status = "missing_b2b_destination"
+    else:
+        tenant_settlement_status = settlement_status
     settlement_provider = "daraja_b2c" if destination_type == "phone" else "daraja_b2b"
     settlement_recipient = (
         payout.get("payout_phone") if destination_type == "phone"
@@ -4125,7 +4117,7 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         "settlement_fee_amount": platform_fee,
         "tenant_net_amount": tenant_net_amount,
         "tenant_payout": payout,
-        "tenant_settlement_status": ("queued" if settlement_status == "withdrawal_ready" else settlement_status) if platform_collected else "not_required",
+        "tenant_settlement_status": ("queued" if tenant_settlement_status == "withdrawal_ready" else tenant_settlement_status) if platform_collected else "not_required",
         "tenant_settlement_queued_at": iso_now() if platform_collected else "",
     })
     ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
@@ -4141,7 +4133,7 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         "settlement_status": update["tenant_settlement_status"],
         "settlement_updated_at": iso_now(),
     }
-    if platform_collected and settlement_status == "withdrawal_ready" and tenant_net_amount > 0:
+    if platform_collected and tenant_settlement_status == "withdrawal_ready" and tenant_net_amount > 0:
         settlement_originator_id = f"SET{secrets.token_hex(8).upper()}"
         update.update({
             "tenant_settlement_status": "initiating",
@@ -4167,7 +4159,7 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
                 )
             else:
                 settlement_response = initiate_daraja_b2b_settlement(
-                    platform_daraja_config({"id": tenant_id, **tenant_data}),
+                    tenant_settlement_daraja_config({"id": tenant_id, **tenant_data}),
                     payment_id,
                     tenant_net_amount,
                     destination_type,

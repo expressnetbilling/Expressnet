@@ -43,7 +43,7 @@ from billing_api.services import (
     selected_daraja_method,
     selected_collection_provider,
     initiate_daraja_payment,
-    platform_daraja_config,
+    tenant_payment_collection_config,
     query_daraja_stk_payment,
     tenant_payout_details,
     make_daraja_callback_token,
@@ -1086,10 +1086,7 @@ def captive_portal_page(request, tenant_id):
     if payment_id:
         if payment_id:
             payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get()
-        if payment and payment.get("provider") == "paystack":
-            payment = _refresh_captive_paystack_payment(tenant_id, {"id": tenant_id, **tenant}, payment_id, payment)
-        else:
-            payment = _refresh_captive_daraja_payment(tenant_id, {"id": tenant_id, **tenant}, payment_id, payment)
+        payment = _refresh_captive_daraja_payment(tenant_id, {"id": tenant_id, **tenant}, payment_id, payment)
         if payment and payment.get("status") == "success":
             router_ip = _router_ip_from_captive_data(request.GET, tenant, payment)
             link_login = sanitize_router_login_url(payment.get("link_login") or request.GET.get("link_login") or request.GET.get("link-login") or "")
@@ -1128,7 +1125,7 @@ def captive_portal_page(request, tenant_id):
         else:
             retry_query = dict(request.GET.items())
             retry_url = f"/api/captive/{html.escape(str(tenant_id))}?{urlencode(retry_query)}" if retry_query else f"/api/captive/{html.escape(str(tenant_id))}"
-            provider_label = "Paystack M-Pesa" if payment and payment.get("provider") == "paystack" else "M-Pesa"
+            provider_label = "M-Pesa"
             payment_notice = f"""
               <div class="card connect-card">
                 <div class="spinner" aria-hidden="true"></div>
@@ -1519,7 +1516,7 @@ def captive_portal_pay(request, tenant_id):
         if data.get("ip"):
             back = f"{back}?ip={html.escape(str(data.get('ip')))}"
         return _html_page("Payment unavailable", f"<main><div class='alert'>{html.escape(str(payload.get('message') or payload.get('error') or 'Could not start payment'))}</div><p><a href='{back}'>Back to packages</a></p></main>", response.status_code)
-    if payload.get("provider") in {"paystack", "mpesa"}:
+    if payload.get("provider") == "mpesa":
         query = {
             "payment_id": payload.get("paymentId"),
             "ip": data.get("ip") or data.get("router_ip") or "",
@@ -1529,7 +1526,7 @@ def captive_portal_pay(request, tenant_id):
             "dst": data.get("dst") or data.get("link-orig") or "",
         }
         refresh_url = f"/api/captive/{html.escape(str(tenant_id))}?{urlencode({key: value for key, value in query.items() if value})}"
-        provider_label = "Paystack M-Pesa" if payload.get("provider") == "paystack" else "M-Pesa"
+        provider_label = "M-Pesa"
         return _html_page(
             "Confirm payment",
             f"""
@@ -1635,23 +1632,13 @@ def _public_pay_impl(request, tenant_id, data=None):
             return ok({"message": "Enter a valid TV MAC address"}, 400)
     access_username = mac_address if service_type == "tv" else ((customer or {}).get("username") or username or "".join(ch for ch in str(phone or "") if ch.isdigit()))
     pending_access_password = str((customer or {}).get("password") or secrets.token_hex(3).upper())
-    configured_provider = selected_collection_provider(
-        tenant,
-        data.get("provider") or data.get("payment_provider"),
-        (ref("site_settings").get() or {}).get("collection_provider"),
-    )
-    if configured_provider == "paystack":
-        paystack_enabled = str(os.getenv("PAYSTACK_MANUAL_PAYOUTS_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
-        if paystack_enabled:
-            from management.api.v1.views import _public_paystack_impl
-            return _public_paystack_impl(request, tenant_id, tenant, pkg, data, phone, service_type, customer, access_username, pending_access_password, mac_address, router_ip, router_client_ip, router_client_mac, router_mac, link_login, dst, amount_payable)
-        # Keep captive checkout working when pooled Paystack payouts are disabled.
-        # The shared Daraja config prefers tenant credentials when configured and
-        # otherwise uses the platform credentials.
     daraja_method = selected_daraja_method(tenant, data.get("payment_method"))
-    daraja_config = platform_daraja_config(tenant, daraja_method)
-    daraja_source = daraja_config.get("daraja_credential_source") or "platform"
-    collection_account = "tenant_daraja" if daraja_source == "tenant" else "platform_daraja"
+    try:
+        daraja_config = tenant_payment_collection_config(tenant, daraja_method)
+    except PaymentProviderError as exc:
+        return ok({"success": False, "message": exc.public_message}, exc.status_code)
+    daraja_source = "platform"
+    collection_account = "platform_daraja"
     payment_ref = ref(f"tenants/{tenant_id}/payments").push(
         {
             "customer_id": customer.get("id") if customer else None,
