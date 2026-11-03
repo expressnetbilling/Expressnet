@@ -62,26 +62,11 @@ export default function Payments() {
   const [modalOpen, setModalOpen] = useState(false);
   const [draft, setDraft] = useState(blankPayment);
   const [paymentSettings, setPaymentSettings] = useState({
-    methods: ['daraja_paybill'],
-    businessNumber: '',
     bankName: '',
-    payoutPhone: '',
     bankCode: '',
     bankAccount: '',
     bankDarajaShortcode: '',
-    settlementDestinationType: 'bank',
-    darajaSettlementTillNumber: '',
-    consumerKey: '',
-    consumerSecret: '',
-    hasConsumerKey: false,
-    hasConsumerSecret: false,
-    shortcode: '',
-    passkey: '',
-    hasPasskey: false,
-    tillNumber: '',
-    environment: 'production',
   });
-  const [selectedMethod, setSelectedMethod] = useState('daraja_paybill');
   const [kenyanBanks, setKenyanBanks] = useState([]);
   const [savingMethods, setSavingMethods] = useState(false);
   const [methodsOpen, setMethodsOpen] = useState(false);
@@ -89,14 +74,8 @@ export default function Payments() {
   const [verificationCode, setVerificationCode] = useState('');
   const [passwordFallback, setPasswordFallback] = useState(false);
   const [paymentChangeId, setPaymentChangeId] = useState('');
-  const [settlementStatus, setSettlementStatus] = useState('not_created');
   const [page, setPage] = useState(1);
   const pageSize = 10;
-  const onlineMethod = (method) => {
-    if (method === 'paybill') return 'daraja_paybill';
-    if (method === 'buygoods') return 'daraja_buygoods';
-    return method;
-  };
 
   async function loadPayments() {
     setLoading(true);
@@ -119,37 +98,14 @@ export default function Payments() {
     });
     api.get('/settings/business').then(({ data }) => {
       setPaymentSettings({
-      methods: data.payment_methods || ['daraja_paybill'],
-      businessNumber: data.business_number || '',
-      bankName: data.bank_name || '',
-      payoutPhone: data.payout_phone || '',
-      bankCode: data.bank_daraja_shortcode || '',
-      bankAccount: data.bank_account_number || '',
-      bankDarajaShortcode: data.bank_daraja_shortcode || '',
-      settlementDestinationType: data.settlement_destination_type || 'bank',
-      darajaSettlementTillNumber: data.daraja_settlement_till_number || '',
-      consumerKey: '',
-      consumerSecret: '',
-      hasConsumerKey: Boolean(data.has_daraja_consumer_key),
-      hasConsumerSecret: Boolean(data.has_daraja_consumer_secret),
-      shortcode: data.daraja_shortcode || '',
-      passkey: '',
-      hasPasskey: Boolean(data.has_daraja_passkey),
-      tillNumber: data.daraja_till_number || '',
-      environment: data.daraja_environment || 'production',
+        bankName: data.bank_name || '',
+        bankCode: data.bank_code || data.bank_daraja_shortcode || '',
+        bankAccount: data.bank_account_number || '',
+        bankDarajaShortcode: data.bank_daraja_shortcode || '',
       });
-      const method = onlineMethod((data.payment_methods || [])[0]);
-      const normalizedMethod = ['daraja_paybill', 'daraja_buygoods'].includes(method) ? method : 'daraja_paybill';
-      setSelectedMethod(normalizedMethod);
-      setSettlementStatus(data.daraja_b2b_settlement_status || 'missing_b2b_destination');
     }).catch(() => {});
   }, []);
 
-  const selectMethod = (method) => {
-    const normalized = onlineMethod(method);
-    setSelectedMethod(normalized);
-    setPaymentSettings((current) => ({ ...current, methods: [normalized] }));
-  };
   const savePaymentMethods = async () => {
     setSavingMethods(true);
     try {
@@ -175,23 +131,11 @@ export default function Payments() {
     setSavingMethods(true);
     try {
       const payload = {
-        payment_methods: paymentSettings.methods.map(onlineMethod),
-        business_number: paymentSettings.businessNumber,
-        payout_phone: paymentSettings.payoutPhone,
         bank_code: paymentSettings.bankCode,
         bank_name: paymentSettings.bankName,
         bank_account_number: paymentSettings.bankAccount,
         bank_daraja_shortcode: paymentSettings.bankDarajaShortcode,
         settlement_destination_type: 'bank',
-        daraja_settlement_till_number: paymentSettings.darajaSettlementTillNumber,
-        ...(paymentSettings.consumerKey ? { daraja_consumer_key: paymentSettings.consumerKey } : {}),
-        ...(paymentSettings.consumerSecret ? { daraja_consumer_secret: paymentSettings.consumerSecret } : {}),
-        daraja_shortcode: paymentSettings.shortcode,
-        ...(paymentSettings.passkey ? { daraja_passkey: paymentSettings.passkey } : {}),
-        daraja_till_number: paymentSettings.tillNumber,
-        daraja_environment: paymentSettings.environment,
-        daraja_shortcode_type: onlineMethod(selectedMethod) === 'daraja_buygoods' ? 'CustomerBuyGoodsOnline' : 'CustomerPayBillOnline',
-        payment_provider: 'mpesa',
       };
       if (passwordFallback) {
         payload.current_password = verificationCode.trim();
@@ -200,7 +144,6 @@ export default function Payments() {
         payload.payment_change_code = verificationCode.trim();
       }
       const { data } = await api.patch('/settings/business', payload);
-      setSettlementStatus(data.config?.daraja_b2b_settlement_status || 'missing_b2b_destination');
       toast.success('Payment settings saved');
       setVerificationOpen(false);
       setMethodsOpen(false);
@@ -286,23 +229,14 @@ export default function Payments() {
 
       {methodsOpen && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"><section className="theme-card max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border p-5 shadow-xl">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div><h2 className="page-title text-base">Payment methods</h2><p className="page-subtitle">Choose how customers pay. Saved Daraja credentials are used automatically when available.</p></div>
+          <div><h2 className="page-title text-base">Bank account</h2></div>
           <button type="button" className="btn-secondary" onClick={() => setMethodsOpen(false)}>Close</button>
         </div>
-        <select className="form-input mt-4" value={selectedMethod} onChange={(e) => selectMethod(e.target.value)}><option value="daraja_paybill">M-Pesa Paybill</option><option value="daraja_buygoods">M-Pesa Buy Goods</option></select>
-        {selectedMethod === 'daraja_paybill' && <div className="mt-4 grid gap-3 sm:grid-cols-2"><input className="form-input" placeholder="Consumer key" value={paymentSettings.consumerKey} onChange={(e) => setPaymentSettings((c) => ({ ...c, consumerKey: e.target.value }))} /><input className="form-input" type="password" placeholder="Consumer secret" value={paymentSettings.consumerSecret} onChange={(e) => setPaymentSettings((c) => ({ ...c, consumerSecret: e.target.value }))} /><input className="form-input" placeholder="M-Pesa shortcode" value={paymentSettings.shortcode} onChange={(e) => setPaymentSettings((c) => ({ ...c, shortcode: e.target.value }))} /><input className="form-input" value="CustomerPayBillOnline" readOnly /><input className="form-input" type="password" placeholder="M-Pesa passkey" value={paymentSettings.passkey} onChange={(e) => setPaymentSettings((c) => ({ ...c, passkey: e.target.value }))} /><select className="form-input" value={paymentSettings.environment} onChange={(e) => setPaymentSettings((c) => ({ ...c, environment: e.target.value }))}><option value="production">Production</option><option value="sandbox">Sandbox</option></select></div>}
-        {selectedMethod === 'daraja_buygoods' && <div className="mt-4 grid gap-3 sm:grid-cols-2"><input className="form-input" placeholder="Consumer key" value={paymentSettings.consumerKey} onChange={(e) => setPaymentSettings((c) => ({ ...c, consumerKey: e.target.value }))} /><input className="form-input" type="password" placeholder="Consumer secret" value={paymentSettings.consumerSecret} onChange={(e) => setPaymentSettings((c) => ({ ...c, consumerSecret: e.target.value }))} /><input className="form-input" type="password" placeholder="Passkey" value={paymentSettings.passkey} onChange={(e) => setPaymentSettings((c) => ({ ...c, passkey: e.target.value }))} /><input className="form-input" placeholder="M-Pesa shortcode" value={paymentSettings.shortcode} onChange={(e) => setPaymentSettings((c) => ({ ...c, shortcode: e.target.value }))} /><input className="form-input" value="CustomerBuyGoodsOnline" readOnly /><input className="form-input" placeholder="Buy Goods till number" value={paymentSettings.tillNumber} onChange={(e) => setPaymentSettings((c) => ({ ...c, tillNumber: e.target.value }))} /><select className="form-input" value={paymentSettings.environment} onChange={(e) => setPaymentSettings((c) => ({ ...c, environment: e.target.value }))}><option value="production">Production</option><option value="sandbox">Sandbox</option></select></div>}
-        <div className="mt-4 rounded-md border border-[var(--app-border)] p-3">
-          <h3 className="text-sm font-semibold">Automatic bank settlement</h3>
-          <p className="mt-1 text-xs text-[var(--app-muted)]">After M-Pesa collection, the platform sends your share to this bank account through Daraja B2B.</p>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            <label className="form-label">Bank<select className="form-input" value={paymentSettings.bankName} onChange={(e) => { const bank = kenyanBanks.find((item) => item.name === e.target.value); setPaymentSettings((c) => ({ ...c, bankCode: bank?.code || '', bankName: bank?.name === 'Other bank (enter its Paybill)' ? '' : (bank?.name || ''), bankDarajaShortcode: bank?.daraja_shortcode || '' })); }}>{paymentSettings.bankName && !kenyanBanks.some((bank) => bank.name === paymentSettings.bankName) && <option value={paymentSettings.bankName}>{paymentSettings.bankName}</option>}<option value="">Select a bank</option>{kenyanBanks.map((bank) => <option key={`${bank.code}-${bank.name}`} value={bank.name}>{bank.name}</option>)}</select></label>
-            <label className="form-label">Bank account number<input className="form-input" value={paymentSettings.bankAccount} onChange={(e) => setPaymentSettings((c) => ({ ...c, bankAccount: e.target.value }))} placeholder="Enter account number" /></label>
-            <label className="form-label">Bank M-Pesa Paybill<input className="form-input" inputMode="numeric" value={paymentSettings.bankDarajaShortcode} onChange={(e) => setPaymentSettings((c) => ({ ...c, bankDarajaShortcode: e.target.value, bankCode: e.target.value }))} placeholder="Auto-filled from selected bank" /></label>
-          </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <label className="form-label">Bank<select className="form-input" value={paymentSettings.bankName} onChange={(e) => { const bank = kenyanBanks.find((item) => item.name === e.target.value); setPaymentSettings((c) => ({ ...c, bankCode: bank?.code || '', bankName: bank?.name || '', bankDarajaShortcode: bank?.daraja_shortcode || '' })); }}><option value="">Select a bank</option>{kenyanBanks.filter((bank) => bank.daraja_shortcode).map((bank) => <option key={`${bank.code}-${bank.name}`} value={bank.name}>{bank.name}</option>)}</select></label>
+          <label className="form-label">Bank account number<input className="form-input" value={paymentSettings.bankAccount} onChange={(e) => setPaymentSettings((c) => ({ ...c, bankAccount: e.target.value }))} placeholder="Enter account number" /></label>
         </div>
         <div className="mt-5 flex justify-end"><button type="button" className="btn-primary" onClick={savePaymentMethods} disabled={savingMethods}>{savingMethods ? 'Saving...' : 'Save payment methods'}</button></div>
-        <p className={`mt-3 text-xs font-semibold ${['active', 'ready', 'withdrawal_ready'].includes(settlementStatus) ? 'text-emerald-600' : 'text-amber-600'}`}>Bank settlement: {['active', 'ready', 'withdrawal_ready'].includes(settlementStatus) ? 'Ready for automatic transfers' : settlementStatus.replaceAll('_', ' ')}</p>
       </section></div>}
 
       {verificationOpen && <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/50 p-4" role="presentation"><section role="dialog" aria-modal="true" aria-labelledby="payment-verification-title" className="theme-card w-full max-w-md rounded-lg border p-5 shadow-xl">
