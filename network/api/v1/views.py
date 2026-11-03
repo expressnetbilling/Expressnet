@@ -2898,10 +2898,10 @@ def _customer_secret_script(customer):
         f'profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }} '
         f'else={{ /ip hotspot user set [find name="{username}"] password="{password}" '
         f'profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }};'
-        f':if ("{disabled}" = "no" && "{client_ip}" != "") do={{ '
+        f':if ("{disabled}" = "no" && "{client_ip}" != "" && [:len [/ip hotspot host find address="{client_ip}"]] > 0) do={{ '
         f':do {{ /ip hotspot active login user="{username}" password="{password}" ip="{client_ip}" mac-address="{client_mac}" }} '
         f'on-error={{ :log warning "Billing SaaS agent: automatic Hotspot login failed for {username}" }}; '
-        f'}};'
+        f'}} else={{ :log info "Billing SaaS agent: skipped automatic Hotspot login because client {username} is not currently connected" }};'
     )
 
 
