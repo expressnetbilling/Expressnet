@@ -1635,8 +1635,13 @@ def _public_pay_impl(request, tenant_id, data=None):
         (ref("site_settings").get() or {}).get("collection_provider"),
     )
     if configured_provider == "paystack":
-        from management.api.v1.views import _public_paystack_impl
-        return _public_paystack_impl(request, tenant_id, tenant, pkg, data, phone, service_type, customer, access_username, pending_access_password, mac_address, router_ip, router_client_ip, router_client_mac, router_mac, link_login, dst, amount_payable)
+        paystack_enabled = str(os.getenv("PAYSTACK_MANUAL_PAYOUTS_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        if paystack_enabled:
+            from management.api.v1.views import _public_paystack_impl
+            return _public_paystack_impl(request, tenant_id, tenant, pkg, data, phone, service_type, customer, access_username, pending_access_password, mac_address, router_ip, router_client_ip, router_client_mac, router_mac, link_login, dst, amount_payable)
+        # Keep captive checkout working when pooled Paystack payouts are disabled.
+        # The shared Daraja config prefers tenant credentials when configured and
+        # otherwise uses the platform credentials.
     daraja_method = selected_daraja_method(tenant, data.get("payment_method"))
     daraja_config = platform_daraja_config(tenant, daraja_method)
     daraja_source = daraja_config.get("daraja_credential_source") or "platform"
