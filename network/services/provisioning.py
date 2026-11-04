@@ -1453,7 +1453,10 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
     return (
         f':do {{ /interface enable [find name="{interface_name}"] }} on-error={{ :log warning "Billing SaaS: failed to enable interface {interface_name}" }}; '
         f'{outbound_access_script}'
-        f'/interface bridge port remove [find interface="{interface_name}"]; '
+        # A newly discovered customer port is commonly not in any bridge yet.
+        # RouterOS raises "no such item" for a bare remove in that case, which
+        # aborts the agent command before it can acknowledge the assignment.
+        f':do {{ /interface bridge port remove [find interface="{interface_name}"] }} on-error={{}}; '
         f':if ([:len [/interface bridge find name="{bridge_name}"]] = 0) do={{ /interface bridge add name="{bridge_name}" comment="Created by Expressnet" }}; '
         f':do {{ /ip pool add name=Expressnet-pool ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }} on-error={{ /ip pool set [find name=Expressnet-pool] ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }}; '
         f':do {{ /ip address add address={_rsc_escape(lan_cidr)} interface="{bridge_name}" comment="Added by Expressnet" }} on-error={{ /ip address set [find interface="{bridge_name}" comment="Added by Expressnet"] address={_rsc_escape(lan_cidr)} interface="{bridge_name}" }}; '

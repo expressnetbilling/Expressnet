@@ -2686,6 +2686,20 @@ def _queue_router_port_command(request, interface_name, service_type, profile_na
     return _queue_router_ports_command(request, [interface_name], service_type, profile_name)
 
 
+def _repair_legacy_router_port_script(script):
+    """Make port removal safe in commands queued before the RouterOS fix.
+
+    The command payload is persisted before the router polls.  Repairing it
+    when it is delivered lets existing "Pending confirmation" assignments
+    retry successfully without asking the tenant to select every port again.
+    """
+    return re.sub(
+        r'/interface bridge port remove \[find interface="([^"\\]+)"\];',
+        r':do { /interface bridge port remove [find interface="\1"] } on-error={};',
+        str(script or ""),
+    )
+
+
 def _queue_router_ports_command(request, interface_names, service_type, profile_name):
     if service_type not in {"pppoe", "hotspot", "both"}:
         return ok({"message": "Port service must be PPPoE, Hotspot, or both"}, 400)
@@ -4525,6 +4539,8 @@ def router_agent_poll(request, token):
     for command in commands:
         command_id = command.get("id") or secrets.token_hex(8)
         script = str(command.get("script") or "").strip()
+        if command.get("type") == "configure_ports":
+            script = _repair_legacy_router_port_script(script)
         if not script:
             lines.append(f':log warning "Billing SaaS agent: command {command_id} had no script";')
             continue
