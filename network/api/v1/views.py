@@ -3624,6 +3624,10 @@ def router_provision_command(request):
         "tenant_id": request.tenant["id"],
         "fresh_router": fresh_router,
         "migration_mode": migration_mode,
+        # Keep the operator's provisioning-time label with this command.  A
+        # callback can arrive after another router is being linked, so reading
+        # only the tenant-wide name at that time can label the wrong router.
+        "router_name": requested_router_name or str(request.tenant.get("mikrotik_name") or request.tenant.get("router_name") or "").strip()[:120],
         "exp": expires_at,
     }
     token = jwt.encode(payload, _get_jwt_secret("JWT_SECRET"), algorithm="HS256")
@@ -4658,6 +4662,7 @@ def router_provision_complete(request, token):
     tenant_id = str(payload.get("tenant_id") or "")
     fresh_router = bool(payload.get("fresh_router"))
     migration_mode = payload.get("migration_mode") or str(request.GET.get("mode") or "").lower() == "migration"
+    provisioned_router_name = str(payload.get("router_name") or "").strip()[:120]
     client_ip = (
         request.META.get("HTTP_NGROK_AGENT_IPS")
         or request.META.get("HTTP_X_FORWARDED_FOR")
@@ -4686,6 +4691,9 @@ def router_provision_complete(request, token):
             "mikrotik_detected_version": str(request.GET.get("version") or "").strip(),
             "mikrotik_detected_board": str(request.GET.get("board") or "").strip(),
         }
+        if provisioned_router_name:
+            updates["mikrotik_name"] = provisioned_router_name
+            updates["router_name"] = provisioned_router_name
         ref(f"tenants/{tenant_id}").update(updates)
         tenant_data = ref(f"tenants/{tenant_id}").get() or {}
         _update_linked_router(tenant_id, {**tenant_data, **updates}, allow_new=fresh_router, status="migration_exported")
@@ -4704,6 +4712,9 @@ def router_provision_complete(request, token):
         "radius_enabled": str(request.GET.get("radius") or "").lower() in {"1", "true", "yes"},
         "radius_nas_configured": str(request.GET.get("radius") or "").lower() in {"1", "true", "yes"},
     }
+    if provisioned_router_name:
+        updates["mikrotik_name"] = provisioned_router_name
+        updates["router_name"] = provisioned_router_name
     wg_public_key = str(request.GET.get("wg_public_key") or "").strip().replace(" ", "+")
     wg_tunnel_ip = str(request.GET.get("wg_tunnel_ip") or "").strip()
     bridge = str(request.GET.get("bridge") or "").strip()

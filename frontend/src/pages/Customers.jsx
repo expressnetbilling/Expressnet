@@ -221,7 +221,11 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
       const linkedRouters = mikrotikRes.data?.linked_routers || {};
       setMikrotikRouters(Object.entries(linkedRouters).map(([id, router]) => ({
         id,
-        label: router.name || router.mikrotik_name || router.router_name || router.label || router.identity || router.board_name || `MikroTik ${id}`,
+        // The provisioning-time name is the primary label.  Keep the router
+        // identity visible too, since it is useful when several devices have
+        // similar names.
+        label: router.name || router.mikrotik_name || router.router_name || (id === 'primary' ? (mikrotikRes.data?.mikrotik_name || mikrotikRes.data?.router_name) : '') || router.label || router.identity || router.board_name || `MikroTik ${id}`,
+        identity: router.identity || '',
         host: router.last_seen_ip || mikrotikRes.data?.mikrotik_host || '',
       })));
       try {
@@ -934,7 +938,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
               {!isHotspotOnlyPage && (
                 <>
                   <div>
-                    <label className="form-label" htmlFor="technician">Technician who attended</label>
+                    <label className="form-label" htmlFor="technician">Technician who attended <span className="font-normal text-slate-500">(optional)</span></label>
                     <select id="technician" name="technician" className="form-input" value={form.technician} onChange={update}>
                       <option value="">No technician assigned</option>
                       {staff.map((member) => (
@@ -945,8 +949,8 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                     </select>
                   </div>
                   <div>
-                    <label className="form-label" htmlFor="router_serial_number">Router serial number</label>
-                    <input id="router_serial_number" name="router_serial_number" className="form-input" value={form.router_serial_number} onChange={update} />
+                    <label className="form-label" htmlFor="router_serial_number">Router serial number <span className="font-normal text-slate-500">(optional)</span></label>
+                    <input id="router_serial_number" name="router_serial_number" className="form-input" value={form.router_serial_number} onChange={update} placeholder="Leave blank if not recorded" />
                   </div>
                 </>
               )}
@@ -956,7 +960,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                   <option value="">Select linked MikroTik</option>
                   {mikrotikRouters.map((router) => (
                     <option key={router.id} value={router.id}>
-                      {router.label}{router.host ? ` - ${router.host}` : ''}
+                      {router.label}{router.identity && router.identity !== router.label ? ` (${router.identity})` : ''}{router.host ? ` - ${router.host}` : ''}
                     </option>
                   ))}
                 </select>
