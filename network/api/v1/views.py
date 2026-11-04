@@ -2694,6 +2694,11 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
     tenant = {"id": tenant_id, **request.tenant}
     lan_config = _router_lan_config(request.tenant)
     wan_interface = str(request.tenant.get("mikrotik_wan_interface") or "ether1").strip()
+    radius_enabled = _radius_server_config(
+        request.tenant,
+        _wireguard_server_config(request.tenant, public_base_url(request)),
+        public_base_url(request),
+    ).get("ready", False)
     script_parts = []
     per_interface = {}
     for interface_name in interface_names:
@@ -2704,12 +2709,12 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
             port_profile = "Expressnet-profile"
         if port_service == "both":
             script_parts.extend((
-                _build_port_command_script(interface_name, "pppoe", profile_name, None, bridge_name, tenant, lan_config, wan_interface),
-                _build_port_command_script(interface_name, "hotspot", "Expressnet-profile", portal_url, bridge_name, tenant, lan_config, wan_interface),
+                _build_port_command_script(interface_name, "pppoe", profile_name, None, bridge_name, tenant, lan_config, wan_interface, radius_enabled),
+                _build_port_command_script(interface_name, "hotspot", "Expressnet-profile", portal_url, bridge_name, tenant, lan_config, wan_interface, radius_enabled),
             ))
             per_interface[interface_name] = {"service_type": "both", "profile": profile_name}
         else:
-            script_parts.append(_build_port_command_script(interface_name, port_service, port_profile, portal_url, bridge_name, tenant, lan_config, wan_interface))
+            script_parts.append(_build_port_command_script(interface_name, port_service, port_profile, portal_url, bridge_name, tenant, lan_config, wan_interface, radius_enabled))
             per_interface[interface_name] = {"service_type": port_service, "profile": port_profile}
     script = "".join(script_parts)
 
@@ -3498,48 +3503,50 @@ def _wireguard_server_config(tenant, base_url=""):
 
 def _radius_server_config(tenant, wg_config=None, base_url=""):
     wg_config = wg_config or _wireguard_server_config(tenant, base_url)
-    fallback_ip = _config_value(
-        tenant,
-        ("RADIUS_FALLBACK_IP",),
-        ("radius_fallback_ip",),
-        "142.93.39.55",
-    )
-    if _is_non_public_ip(fallback_ip):
-        fallback_ip = str(wg_config.get("tunnel_ip") or "").split("/", 1)[0] if wg_config.get("ready") else ""
+    # Do not silently point routers at an old or guessed RADIUS address. A
+    # Hotspot profile with use-radius=yes blocks normal local authentication
+    # while RouterOS waits for that server, which looks like a broken portal.
+    # RADIUS is therefore opt-in and needs an explicit platform/tenant host.
     server_ip = _config_value(
         tenant,
         ("RADIUS_SERVER_IP", "RADIUS_SERVER_HOST", "RADIUS_HOST_IP"),
         ("radius_server_ip", "radius_server_host", "radius_host_ip"),
-        fallback_ip,
+        "",
     )
     source_ip = _config_value(
         tenant,
         ("RADIUS_SOURCE_IP", "RADIUS_CLIENT_SOURCE_IP"),
         ("radius_source_ip", "radius_client_source_ip"),
     )
-    if not server_ip and wg_config.get("ready"):
-        server_ip = wg_config.get("tunnel_ip") or ""
-        source_ip = source_ip or str((tenant or {}).get("wg_tunnel_ip") or os.getenv("WG_ROUTER_TUNNEL_IP") or os.getenv("WIREGUARD_ROUTER_TUNNEL_IP") or _default_wireguard_router_tunnel_ip(tenant)).split("/", 1)[0]
     auth_port = _config_value(tenant, ("RADIUS_AUTH_PORT",), ("radius_auth_port",), "1812")
     acct_port = _config_value(tenant, ("RADIUS_ACCT_PORT",), ("radius_acct_port",), "1813")
+    private_without_tunnel = False
     if _is_non_public_ip(server_ip):
         tunnel_ip = str(wg_config.get("tunnel_ip") or "").split("/", 1)[0]
         if wg_config.get("ready") and tunnel_ip:
             if str(server_ip).split("/", 1)[0] != tunnel_ip:
-                logger.warning("Ignoring private RADIUS host %s; using the configured WireGuard RADIUS address", server_ip)
-            server_ip = tunnel_ip
+                logger.warning("Ignoring private RADIUS host %s because it does not match the configured WireGuard RADIUS address", server_ip)
+                server_ip = ""
+                private_without_tunnel = True
+            else:
+                source_ip = source_ip or str((tenant or {}).get("wg_tunnel_ip") or os.getenv("WG_ROUTER_TUNNEL_IP") or os.getenv("WIREGUARD_ROUTER_TUNNEL_IP") or _default_wireguard_router_tunnel_ip(tenant)).split("/", 1)[0]
         else:
             logger.warning("Ignoring private RADIUS host %s because no WireGuard route is ready", server_ip)
             server_ip = ""
-    private_without_tunnel = False
+            private_without_tunnel = True
     return {
         "server_ip": server_ip,
-        "fallback_ip": fallback_ip,
         "source_ip": source_ip,
         "auth_port": auth_port,
         "acct_port": acct_port,
         "ready": bool(server_ip) and not private_without_tunnel,
-        "disabled_reason": "private RADIUS address requires a ready WireGuard tunnel" if private_without_tunnel else "",
+        "disabled_reason": (
+            "private RADIUS address requires a ready WireGuard tunnel"
+            if private_without_tunnel
+            else "RADIUS_SERVER_IP is not configured"
+            if not server_ip
+            else ""
+        ),
         "mode": "wireguard" if wg_config.get("ready") and server_ip == wg_config.get("tunnel_ip") else "direct",
     }
 
@@ -4051,7 +4058,6 @@ def router_provision_script(request, token):
     pppoe_service_name = "Expressnet-pppoe"
     wireguard_name = "Expressnet-wireguard"
     radius_comment = "Expressnet radius"
-    radius_fallback_ip = str(radius_config.get("fallback_ip") or "142.93.39.55").strip()
 
     vpn_private_key_set = (
         f':do {{ /interface wireguard set [find name="{wireguard_name}"] private-key="{_rsc_escape(wg_router_private_key)}" }} on-error={{}}\n'
@@ -4128,8 +4134,7 @@ def router_provision_script(request, token):
     radius_script = f"""
         :log info "Expressnet: configuring RADIUS client for Hotspot and PPPoE";
         :do {{ /radius remove [find comment="{radius_comment}"] }} on-error={{}}
-        :do {{ /radius add service=ppp,hotspot address={_rsc_escape(radius_config["server_ip"])} secret="{_rsc_escape(radius_shared_secret)}" timeout=3s comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: primary RADIUS setup failed; continuing with local customer access" }}
-        :do {{ /radius add service=ppp,hotspot address={_rsc_escape(radius_fallback_ip)} secret="{_rsc_escape(radius_shared_secret)}" realm={_rsc_escape(wg_router_api_ip)} timeout=3s comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: fallback RADIUS setup failed" }}
+        :do {{ /radius add service=ppp,hotspot address={_rsc_escape(radius_config["server_ip"])} secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=3s comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: RADIUS setup failed; continuing with local customer access" }}
         :if ([:len [/radius find comment="{radius_comment}"]] = 0) do={{
             :set billingRadiusFlag "no";
             /ppp aaa set use-radius=no accounting=no;
@@ -4745,27 +4750,37 @@ def router_provision_complete(request, token):
             "script": ':log info "Billing SaaS agent: pulling router configuration after provisioning";',
         }, tenant_data)
 
-    # Create RADIUS NAS client record if we have a pending secret and tunnel IP
+    # Register the NAS only after the router has applied the same shared secret
+    # that was embedded in its provisioning script. For WireGuard this is the
+    # tunnel address; for an explicitly configured public RADIUS server it is
+    # the public router address observed by this callback.
     try:
-        from billing_api.radius_provisioning import ensure_nas_client
         tenant_obj = Tenant.objects.filter(pk=tenant_id).first()
-        if tenant_obj and wg_tunnel_ip and updates.get("radius_enabled"):
+        current_tenant = ref(f"tenants/{tenant_id}").get() or {}
+        current_wg = _wireguard_server_config(current_tenant, public_base_url(request))
+        current_radius = _radius_server_config(current_tenant, current_wg, public_base_url(request))
+        nas_ip = wg_tunnel_ip if current_radius.get("mode") == "wireguard" else client_ip
+        try:
+            nas_ip = str(ipaddress.ip_address(str(nas_ip or "").strip()))
+        except ValueError:
+            nas_ip = ""
+        if tenant_obj and nas_ip and current_radius.get("ready") and updates.get("radius_enabled"):
             pending_secret = (tenant_obj.extra or {}).get("radius_shared_secret_pending")
             if pending_secret:
                 from billing_api.models import RadiusNasClient
-                nas_client, created = RadiusNasClient.objects.get_or_create(
+                RadiusNasClient.objects.update_or_create(
                     tenant=tenant_obj,
-                    nas_ip=wg_tunnel_ip,
+                    nas_ip=nas_ip,
                     defaults={
                         "shared_secret": pending_secret,
                         "identifier": str(request.GET.get("identity") or "").strip(),
                     },
                 )
-                if created:
-                    updates["radius_nas_configured"] = True
-                    ref(f"tenants/{tenant_id}").update({
-                        "radius_nas_configured": True,
-                    })
+                updates["radius_nas_configured"] = True
+                ref(f"tenants/{tenant_id}").update({
+                    "radius_nas_configured": True,
+                    "radius_nas_ip": nas_ip,
+                })
     except Exception:
         pass
 

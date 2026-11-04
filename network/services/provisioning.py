@@ -32,6 +32,22 @@ def has_mikrotik_credentials(tenant):
     return bool(tenant.get("mikrotik_host") and tenant.get("mikrotik_user") and tenant.get("mikrotik_pass"))
 
 
+def radius_client_enabled(tenant):
+    """Return true only when a RADIUS server was explicitly configured."""
+    tenant = tenant or {}
+    extra = tenant.get("extra") if isinstance(tenant, dict) else getattr(tenant, "extra", {})
+    extra = extra or {}
+    configured_host = (
+        os.getenv("RADIUS_SERVER_IP")
+        or os.getenv("RADIUS_SERVER_HOST")
+        or os.getenv("RADIUS_HOST_IP")
+        or (tenant.get("radius_server_ip") if isinstance(tenant, dict) else "")
+        or extra.get("radius_server_ip")
+    )
+    requested = tenant.get("radius_enabled") if isinstance(tenant, dict) else getattr(tenant, "radius_enabled", False)
+    return bool(configured_host and requested)
+
+
 def normalize_rate_limit(speed):
     value = str(speed or "").strip()
     if not value:
@@ -795,13 +811,14 @@ def walled_garden_hosts(tenant, portal_host=None):
     return unique
 
 
-def ensure_hotspot_captive_portal(tenant, base_url=None):
+def ensure_hotspot_captive_portal(tenant, base_url=None, radius_enabled=None):
     if not has_mikrotik_credentials(tenant):
         return None
 
     portal_url = captive_portal_url(tenant, base_url)
     portal_host = captive_portal_host(tenant, base_url)
     profile_name = "Expressnet-profile"
+    use_radius = radius_client_enabled(tenant) if radius_enabled is None else bool(radius_enabled)
     api = router_connect(tenant)
     try:
         try:
@@ -823,8 +840,8 @@ def ensure_hotspot_captive_portal(tenant, base_url=None):
                 "hotspot-address": "192.168.88.1",
                 "dns-name": "hot.spot",
                 "login-by": "cookie,http-pap,trial,mac-cookie",
-                "use-radius": "yes",
-                "radius-accounting": "yes",
+                "use-radius": "yes" if use_radius else "no",
+                "radius-accounting": "yes" if use_radius else "no",
                 "html-directory": "Expressnet-hotspot",
                 "comment": f"Expressnet captive portal: {portal_url}",
             },
@@ -1194,7 +1211,7 @@ def configure_router_port(tenant, interface_name, service_type, profile_name="de
             api.path("interface", "pppoe-server", "server").add(**fields)
             return {"created": True, "service_type": service_type, "interface": interface_name, "bound_interface": bind_interface, "note": bridge_note}
 
-        captive = ensure_hotspot_captive_portal(tenant, base_url) or {}
+        captive = ensure_hotspot_captive_portal(tenant, base_url, radius_enabled=radius_client_enabled(tenant)) or {}
         _clear_bridge_port_pppoe_only(api, interface_name)
         hotspot_profile = captive.get("profile") or "Expressnet-profile"
         api.path("interface").update(**{".id": interface[".id"], "comment": f"billing-saas:hotspot:portal={captive.get('portal_url') or ''}".strip()})
@@ -1310,7 +1327,7 @@ def _rsc_escape(value):
     return str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
 
 
-def _build_port_command_script(interface_name, service_type, profile_name, portal_url, bridge_name=None, tenant=None, lan_config=None, wan_interface="ether1"):
+def _build_port_command_script(interface_name, service_type, profile_name, portal_url, bridge_name=None, tenant=None, lan_config=None, wan_interface="ether1", radius_enabled=False):
     interface_lower = str(interface_name or "").lower()
     service_type = str(service_type or "").lower().strip()
     if service_type == "pppoe" and interface_lower.startswith(("wlan", "wifi", "wireless")):
@@ -1323,6 +1340,7 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
     lan_network = str(lan_config.get("lan_network") or "192.168.88.0/24")
     dhcp_pool = str(lan_config.get("dhcp_pool") or "192.168.88.2-192.168.88.254")
     wan_interface = _rsc_escape(wan_interface or "ether1")
+    radius_flag = "yes" if radius_enabled else "no"
     portal_comment = portal_url or ""
     portal_host = urlparse(portal_url or "").netloc.split("@")[-1].split(":")[0]
     company_ssid = _rsc_escape(str((tenant or {}).get("business_name") or "Expressnet")[:32])
@@ -1377,8 +1395,8 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=53 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dns" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=53 comment="billing-saas allow hotspot dns" }}; '
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=67,68 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dhcp" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }}; '
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=80,443,64872-64875 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot web-proxy" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }}; '
-            f':do {{ /ip hotspot profile add name="Expressnet-profile" hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius=yes html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }} '
-            f'on-error={{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius=yes html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }}; '
+            f':do {{ /ip hotspot profile add name="Expressnet-profile" hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius={radius_flag} radius-accounting={radius_flag} html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }} '
+            f'on-error={{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius={radius_flag} radius-accounting={radius_flag} html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }}; '
             f':do {{ /ip firewall nat remove [find comment="billing-saas hotspot masquerade"] }} on-error={{}}; '
             f':do {{ /ip firewall nat add chain=srcnat src-address={_rsc_escape(lan_network)} action=masquerade comment="billing-saas hotspot masquerade" }} on-error={{ :log warning "Billing SaaS: failed to add hotspot masquerade" }}; '
             + "".join(
