@@ -2693,6 +2693,7 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
     bridge_name = mikrotik_managed_bridge_name(request.tenant)
     tenant = {"id": tenant_id, **request.tenant}
     lan_config = _router_lan_config(request.tenant)
+    wan_interface = str(request.tenant.get("mikrotik_wan_interface") or "ether1").strip()
     script_parts = []
     per_interface = {}
     for interface_name in interface_names:
@@ -2703,12 +2704,12 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
             port_profile = "Expressnet-profile"
         if port_service == "both":
             script_parts.extend((
-                _build_port_command_script(interface_name, "pppoe", profile_name, None, bridge_name, tenant, lan_config),
-                _build_port_command_script(interface_name, "hotspot", "Expressnet-profile", portal_url, bridge_name, tenant, lan_config),
+                _build_port_command_script(interface_name, "pppoe", profile_name, None, bridge_name, tenant, lan_config, wan_interface),
+                _build_port_command_script(interface_name, "hotspot", "Expressnet-profile", portal_url, bridge_name, tenant, lan_config, wan_interface),
             ))
             per_interface[interface_name] = {"service_type": "both", "profile": profile_name}
         else:
-            script_parts.append(_build_port_command_script(interface_name, port_service, port_profile, portal_url, bridge_name, tenant, lan_config))
+            script_parts.append(_build_port_command_script(interface_name, port_service, port_profile, portal_url, bridge_name, tenant, lan_config, wan_interface))
             per_interface[interface_name] = {"service_type": port_service, "profile": port_profile}
     script = "".join(script_parts)
 
@@ -2901,8 +2902,10 @@ def _customer_secret_script(customer):
         f'else={{ /ip hotspot user set [find name="{username}"] password="{password}" '
         f'profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }};'
         f':if ("{disabled}" = "no" && "{client_ip}" != "" && [:len [/ip hotspot host find address="{client_ip}"]] > 0) do={{ '
-        f':do {{ /ip hotspot active login user="{username}" password="{password}" ip="{client_ip}" mac-address="{client_mac}" }} '
-        f'on-error={{ :log warning "Billing SaaS agent: automatic Hotspot login failed for {username}" }}; '
+        f':local billingHostId [:pick [/ip hotspot host find address="{client_ip}"] 0]; '
+        f':local billingHostMac ""; '
+        f':do {{ :set billingHostMac [/ip hotspot host get $billingHostId mac-address] }} on-error={{}}; '
+        f':if ([:len $billingHostMac] > 0) do={{ :do {{ /ip hotspot active login user="{username}" password="{password}" ip="{client_ip}" mac-address=$billingHostMac }} on-error={{ :log warning "Billing SaaS agent: automatic Hotspot login failed for {username}" }} }}; '
         f'}} else={{ :log info "Billing SaaS agent: skipped automatic Hotspot login because client {username} is not currently connected" }};'
     )
 
@@ -3448,7 +3451,7 @@ def _is_non_public_ip(value):
 def _wireguard_server_config(tenant, base_url=""):
     public_key = _config_value(
         tenant,
-        ("WG_SERVER_PUBLIC_KEY", "WIREGUARD_SERVER_PUBLIC_KEY", "VPN_SERVER_PUBLIC_KEY"),
+        ("WG_SERVER_PUBLIC_KEY", "WG_PUBLIC_KEY", "WIREGUARD_SERVER_PUBLIC_KEY", "WIREGUARD_PUBLIC_KEY", "VPN_SERVER_PUBLIC_KEY"),
         ("wg_server_public_key", "wireguard_server_public_key", "vpn_server_public_key"),
     )
     endpoint = _config_value(
@@ -3883,7 +3886,11 @@ def _router_snapshot_fetch_script(snapshot_url):
         :local billingSnapshot "{snapshot_url}";
         :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/marker") }} on-error={{}}
         :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/device?board_name=" . [/system resource get board-name] . "&version=" . [/system resource get version] . "&uptime=" . [/system resource get uptime] . "&cpu_load=" . [/system resource get cpu-load] . "&free_memory=" . [/system resource get free-memory] . "&total_memory=" . [/system resource get total-memory] . "&architecture=" . [/system resource get architecture-name]) }} on-error={{ :log warning "Billing SaaS device snapshot failed" }}
-        :foreach i in=[/interface find] do={{ :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/interface?name=" . [/interface get $i name] . "&type=" . [/interface get $i type] . "&running=" . [/interface get $i running] . "&disabled=" . [/interface get $i disabled] . "&mac_address=" . [/interface get $i mac-address]) }} on-error={{}} }}
+        :foreach i in=[/interface find] do={{
+            :local billingInterfaceMac "";
+            :do {{ :set billingInterfaceMac [/interface get $i mac-address] }} on-error={{}};
+            :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/interface?name=" . [/interface get $i name] . "&type=" . [/interface get $i type] . "&running=" . [/interface get $i running] . "&disabled=" . [/interface get $i disabled] . "&mac_address=" . $billingInterfaceMac) }} on-error={{}}
+        }}
         :foreach p in=[/interface bridge port find] do={{ :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/bridge-port?name=" . [/interface bridge port get $p interface] . "&interface=" . [/interface bridge port get $p interface] . "&bridge=" . [/interface bridge port get $p bridge] . "&disabled=" . [/interface bridge port get $p disabled]) }} on-error={{}} }}
         :foreach a in=[/ip address find] do={{ :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/address?name=" . [/ip address get $a address] . "&address=" . [/ip address get $a address] . "&interface=" . [/ip address get $a interface] . "&disabled=" . [/ip address get $a disabled]) }} on-error={{}} }}
         :foreach p in=[/ip pool find] do={{ :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/pool?name=" . [/ip pool get $p name] . "&ranges=" . [/ip pool get $p ranges]) }} on-error={{}} }}

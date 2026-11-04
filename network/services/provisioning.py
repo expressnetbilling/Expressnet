@@ -1310,7 +1310,7 @@ def _rsc_escape(value):
     return str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
 
 
-def _build_port_command_script(interface_name, service_type, profile_name, portal_url, bridge_name=None, tenant=None, lan_config=None):
+def _build_port_command_script(interface_name, service_type, profile_name, portal_url, bridge_name=None, tenant=None, lan_config=None, wan_interface="ether1"):
     interface_lower = str(interface_name or "").lower()
     service_type = str(service_type or "").lower().strip()
     if service_type == "pppoe" and interface_lower.startswith(("wlan", "wifi", "wireless")):
@@ -1322,6 +1322,7 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
     lan_gateway = str(lan_config.get("lan_gateway") or "192.168.88.1")
     lan_network = str(lan_config.get("lan_network") or "192.168.88.0/24")
     dhcp_pool = str(lan_config.get("dhcp_pool") or "192.168.88.2-192.168.88.254")
+    wan_interface = _rsc_escape(wan_interface or "ether1")
     portal_comment = portal_url or ""
     portal_host = urlparse(portal_url or "").netloc.split("@")[-1].split(":")[0]
     company_ssid = _rsc_escape(str((tenant or {}).get("business_name") or "Expressnet")[:32])
@@ -1423,9 +1424,17 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
     )
 
     cleanup_block = ':log info "Billing SaaS: preserving existing PPP secrets and Hotspot users"; '
+    outbound_access_script = (
+        f':do {{ /ip dhcp-client add interface="{wan_interface}" add-default-route=yes use-peer-dns=no disabled=no comment="billing-saas wan" }} '
+        f'on-error={{ :do {{ /ip dhcp-client set [find interface="{wan_interface}"] add-default-route=yes use-peer-dns=no disabled=no comment="billing-saas wan" }} on-error={{}} }}; '
+        f':do {{ /ip dns set servers=8.8.8.8,1.1.1.1 allow-remote-requests=yes }} on-error={{}}; '
+        f':do {{ /ip firewall nat remove [find comment="billing-saas masquerade"] }} on-error={{}}; '
+        f':do {{ /ip firewall nat add chain=srcnat action=masquerade out-interface="{wan_interface}" comment="billing-saas masquerade" }} on-error={{ :log warning "Billing SaaS: WAN masquerade setup failed" }}; '
+    )
 
     return (
         f':do {{ /interface enable [find name="{interface_name}"] }} on-error={{ :log warning "Billing SaaS: failed to enable interface {interface_name}" }}; '
+        f'{outbound_access_script}'
         f'/interface bridge port remove [find interface="{interface_name}"]; '
         f':if ([:len [/interface bridge find name="{bridge_name}"]] = 0) do={{ /interface bridge add name="{bridge_name}" comment="Created by Expressnet" }}; '
         f':do {{ /ip pool add name=Expressnet-pool ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }} on-error={{ /ip pool set [find name=Expressnet-pool] ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }}; '
