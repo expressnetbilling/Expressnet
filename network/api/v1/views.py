@@ -3992,7 +3992,12 @@ def router_provision_script(request, token):
     ]
     customer_secret_script = "".join(_customer_secret_script(customer) for customer in tenant_customers)
     migration_customer_script = _migration_export_provisioning_script(tenant)
-    snapshot_script = _router_snapshot_fetch_script(snapshot_url)
+    # Full router inventory reporting makes dozens of HTTP requests while the
+    # router is still applying its network configuration. On smaller RouterOS
+    # devices this can interrupt provisioning and surface misleading host
+    # resolution errors. The normal provisioning callback records the needed
+    # state, so defer inventory collection until the router is linked.
+    snapshot_script = ''
 
     wg_config = _wireguard_server_config(tenant, app_base_url)
     radius_config = _radius_server_config(tenant, wg_config, app_base_url)
@@ -4424,14 +4429,12 @@ def router_provision_script(request, token):
         :local billingHsFileCount [:len [/file find name~"hotspot"]];
         :do {{ /tool fetch keep-result=no url=("{snapshot_url}/hotspot-files-check?count=" . $billingHsFileCount) }} on-error={{ :log warning "Billing SaaS: hotspot file count report failed" }}
         :log info "Billing SaaS Step 9: running health checks and returning provisioning report";
-        {interface_report_loop}
-        {profile_and_server_report_loop}
         {snapshot_script}
         {verification_script}
         {wireless_provision_script}
         {provisioning_callback_script}
         :do {{ /system scheduler remove [find name="billing-saas-agent"] }} on-error={{}}
-        /system scheduler add name="billing-saas-agent" interval=3s on-event=":do {{ /file remove [find name=\\"billing-saas-cmd.rsc\\"] }} on-error={{}}; :do {{ /tool fetch url=\\"{agent_poll_url}\\" dst-path=billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command fetch failed\\" }}; :if ([:len [/file find name=\\"billing-saas-cmd.rsc\\"]] > 0) do={{ :do {{ /import billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command import failed\\" }} }};"
+        /system scheduler add name="billing-saas-agent" interval=30s on-event=":do {{ /file remove [find name=\\"billing-saas-cmd.rsc\\"] }} on-error={{}}; :do {{ /tool fetch url=\\"{agent_poll_url}\\" dst-path=billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command fetch failed\\" }}; :if ([:len [/file find name=\\"billing-saas-cmd.rsc\\"]] > 0) do={{ :do {{ /import billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command import failed\\" }} }};"
         :log info "Billing SaaS provisioning complete. No customer ports were moved; assign Hotspot or PPPoE ports from the dashboard.";
         :put "Configuration completed successfully. No customer ports were moved; assign Hotspot or PPPoE ports from the dashboard.";
         """
