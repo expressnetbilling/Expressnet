@@ -4499,9 +4499,11 @@ def router_agent_poll(request, token):
         if command.get("status") == "pending":
             commands.append(command)
             continue
-        # Customer and package sync scripts are idempotent; retry when the
-        # router could not reach the acknowledgement endpoint after applying.
-        if command.get("status") != "delivered" or command.get("type") not in {"sync_secrets", "sync_packages"}:
+        # These agent commands are idempotent.  Retry a command that was
+        # delivered but was never acknowledged: a RouterOS inventory fetch
+        # (or a brief WAN interruption) must not leave a configured port
+        # permanently labelled as "Pending confirmation" in the dashboard.
+        if command.get("status") != "delivered" or command.get("type") not in {"sync_secrets", "sync_packages", "configure_ports", "pull_configuration"}:
             continue
         try:
             delivered_at = datetime.fromisoformat(str(command.get("delivered_at") or "").replace("Z", "+00:00"))
@@ -4546,9 +4548,19 @@ def router_agent_poll(request, token):
                 f':do {{ /tool fetch keep-result=no url=("{snapshot_base}/hotspot-files-check?count=" . $billingHsFileCount) }} on-error={{}}; '
             )
         lines.append(f':log info "Billing SaaS agent: running command {command_id} ({command.get("type") or "router"})";')
+        # Acknowledge the applied command before optional inventory reporting.
+        # Snapshot calls make many HTTP requests and can fail independently;
+        # they must never keep a successfully configured bridge port in the
+        # dashboard's "Pending confirmation" state.
         lines.append(
-            f':do {{ {script}; {post_script}/tool fetch keep-result=no url="{base_url}/api/router/agent/{token}/ack/{command_id}" }} '
-            f'on-error={{ :log warning "Billing SaaS agent: command {command_id} failed" }}'
+            f':do {{ '
+            f':local billingCommandOk true; '
+            f':do {{ {script} }} on-error={{ :set billingCommandOk false; :log warning "Billing SaaS agent: command {command_id} failed" }}; '
+            f':if ($billingCommandOk) do={{ '
+            f':do {{ /tool fetch keep-result=no url="{base_url}/api/router/agent/{token}/ack/{command_id}" }} on-error={{ :log warning "Billing SaaS agent: command {command_id} acknowledgement failed" }}; '
+            f':do {{ {post_script} }} on-error={{ :log warning "Billing SaaS agent: command {command_id} post-check failed" }}; '
+            f'}} '
+            f'}}'
         )
     assignments = dict(tenant.get("router_port_assignments") or {})
     for command in all_commands:
