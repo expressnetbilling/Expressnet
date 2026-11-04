@@ -3035,7 +3035,7 @@ def settings_business(request):
                         value = "daraja_paybill"
                     elif value in {"buygoods", "buy_goods", "mpesa_buygoods"}:
                         value = "daraja_buygoods"
-                    if value in {"daraja_paybill", "daraja_buygoods"}:
+                    if value in {"daraja_paybill", "daraja_buygoods", "till", "bank", "phone"}:
                         normalized_methods.append(value)
                 updates[field] = normalized_methods or ["daraja_paybill"]
             elif field == "payment_provider":
