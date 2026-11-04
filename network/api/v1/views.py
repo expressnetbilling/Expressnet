@@ -2692,6 +2692,7 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
     portal_url = captive_portal_url({"id": tenant_id, **request.tenant}, public_base_url(request).rstrip("/")) if service_type in {"hotspot", "both"} else None
     bridge_name = mikrotik_managed_bridge_name(request.tenant)
     tenant = {"id": tenant_id, **request.tenant}
+    lan_config = _router_lan_config(request.tenant)
     script_parts = []
     per_interface = {}
     for interface_name in interface_names:
@@ -2702,12 +2703,12 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
             port_profile = "Expressnet-profile"
         if port_service == "both":
             script_parts.extend((
-                _build_port_command_script(interface_name, "pppoe", profile_name, None, bridge_name, tenant),
-                _build_port_command_script(interface_name, "hotspot", "Expressnet-profile", portal_url, bridge_name, tenant),
+                _build_port_command_script(interface_name, "pppoe", profile_name, None, bridge_name, tenant, lan_config),
+                _build_port_command_script(interface_name, "hotspot", "Expressnet-profile", portal_url, bridge_name, tenant, lan_config),
             ))
             per_interface[interface_name] = {"service_type": "both", "profile": profile_name}
         else:
-            script_parts.append(_build_port_command_script(interface_name, port_service, port_profile, portal_url, bridge_name, tenant))
+            script_parts.append(_build_port_command_script(interface_name, port_service, port_profile, portal_url, bridge_name, tenant, lan_config))
             per_interface[interface_name] = {"service_type": port_service, "profile": port_profile}
     script = "".join(script_parts)
 
@@ -2715,6 +2716,7 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
     command_id = secrets.token_hex(8)
     commands.append({
         "id": command_id,
+        "type": "configure_ports",
         "interface": interface_names[0] if len(interface_names) == 1 else None,
         "interfaces": list(interface_names),
         "service_type": service_type,
@@ -4512,6 +4514,12 @@ def router_agent_poll(request, token):
             post_script = (
                 f':foreach p in=[/ppp profile find] do={{ :do {{ /tool fetch keep-result=no url=("{snapshot_base}/pppoe-profile?name=" . [/ppp profile get $p name] . "&rate_limit=" . [/ppp profile get $p rate-limit]) }} on-error={{}} }}; '
                 f':foreach p in=[/ip hotspot user profile find] do={{ :do {{ /tool fetch keep-result=no url=("{snapshot_base}/hotspot-profile?name=" . [/ip hotspot user profile get $p name] . "&rate_limit=" . [/ip hotspot user profile get $p rate-limit]) }} on-error={{}} }}; '
+                f':local billingHsFileCount [:len [/file find name~"hotspot"]]; '
+                f':do {{ /tool fetch keep-result=no url=("{snapshot_base}/hotspot-files-check?count=" . $billingHsFileCount) }} on-error={{}}; '
+            )
+        elif command.get("type") == "configure_ports":
+            snapshot_base = f"{base_url}/api/router/provision/{token}/snapshot"
+            post_script = _router_snapshot_fetch_script(snapshot_base) + (
                 f':local billingHsFileCount [:len [/file find name~"hotspot"]]; '
                 f':do {{ /tool fetch keep-result=no url=("{snapshot_base}/hotspot-files-check?count=" . $billingHsFileCount) }} on-error={{}}; '
             )

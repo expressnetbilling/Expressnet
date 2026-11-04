@@ -1310,13 +1310,18 @@ def _rsc_escape(value):
     return str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
 
 
-def _build_port_command_script(interface_name, service_type, profile_name, portal_url, bridge_name=None, tenant=None):
+def _build_port_command_script(interface_name, service_type, profile_name, portal_url, bridge_name=None, tenant=None, lan_config=None):
     interface_lower = str(interface_name or "").lower()
     service_type = str(service_type or "").lower().strip()
     if service_type == "pppoe" and interface_lower.startswith(("wlan", "wifi", "wireless")):
         service_type = "hotspot"
         portal_url = portal_url or captive_portal_url(tenant)
     bridge_name = bridge_name or mikrotik_managed_bridge_name()
+    lan_config = lan_config or {}
+    lan_cidr = str(lan_config.get("lan_cidr") or "192.168.88.1/24")
+    lan_gateway = str(lan_config.get("lan_gateway") or "192.168.88.1")
+    lan_network = str(lan_config.get("lan_network") or "192.168.88.0/24")
+    dhcp_pool = str(lan_config.get("dhcp_pool") or "192.168.88.2-192.168.88.254")
     portal_comment = portal_url or ""
     portal_host = urlparse(portal_url or "").netloc.split("@")[-1].split(":")[0]
     company_ssid = _rsc_escape(str((tenant or {}).get("business_name") or "Expressnet")[:32])
@@ -1371,10 +1376,10 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=53 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dns" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=53 comment="billing-saas allow hotspot dns" }}; '
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=67,68 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dhcp" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }}; '
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=80,443,64872-64875 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot web-proxy" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }}; '
-            f':do {{ /ip hotspot profile add name="Expressnet-profile" hotspot-address=192.168.88.1 dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius=yes html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }} '
-            f'on-error={{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address=192.168.88.1 dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius=yes html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }}; '
+            f':do {{ /ip hotspot profile add name="Expressnet-profile" hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius=yes html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }} '
+            f'on-error={{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius=yes html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }}; '
             f':do {{ /ip firewall nat remove [find comment="billing-saas hotspot masquerade"] }} on-error={{}}; '
-            f':do {{ /ip firewall nat add chain=srcnat src-address=192.168.88.0/24 action=masquerade comment="billing-saas hotspot masquerade" }} on-error={{ :log warning "Billing SaaS: failed to add hotspot masquerade" }}; '
+            f':do {{ /ip firewall nat add chain=srcnat src-address={_rsc_escape(lan_network)} action=masquerade comment="billing-saas hotspot masquerade" }} on-error={{ :log warning "Billing SaaS: failed to add hotspot masquerade" }}; '
             + "".join(
                 f':do {{ /ip hotspot walled-garden add action=allow dst-host="{_rsc_escape(h)}" comment="billing-saas captive portal access" }} on-error={{ :log warning "Billing SaaS: walled-garden add failed" }}; '
                 for h in walled_garden_hosts(tenant, portal_host)
@@ -1423,10 +1428,10 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
         f':do {{ /interface enable [find name="{interface_name}"] }} on-error={{ :log warning "Billing SaaS: failed to enable interface {interface_name}" }}; '
         f'/interface bridge port remove [find interface="{interface_name}"]; '
         f':if ([:len [/interface bridge find name="{bridge_name}"]] = 0) do={{ /interface bridge add name="{bridge_name}" comment="Created by Expressnet" }}; '
-        f':do {{ /ip pool add name=Expressnet-pool ranges=192.168.88.2-192.168.88.254 comment="IP Pool created by Expressnet" }} on-error={{ /ip pool set [find name=Expressnet-pool] ranges=192.168.88.2-192.168.88.254 comment="IP Pool created by Expressnet" }}; '
-        f':do {{ /ip address add address=192.168.88.1/24 interface="{bridge_name}" comment="Added by Expressnet" }} on-error={{ /ip address set [find interface="{bridge_name}" comment="Added by Expressnet"] address=192.168.88.1/24 interface="{bridge_name}" }}; '
+        f':do {{ /ip pool add name=Expressnet-pool ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }} on-error={{ /ip pool set [find name=Expressnet-pool] ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }}; '
+        f':do {{ /ip address add address={_rsc_escape(lan_cidr)} interface="{bridge_name}" comment="Added by Expressnet" }} on-error={{ /ip address set [find interface="{bridge_name}" comment="Added by Expressnet"] address={_rsc_escape(lan_cidr)} interface="{bridge_name}" }}; '
         f':do {{ /ip dhcp-server add name=Expressnet-dhcp interface="{bridge_name}" address-pool=Expressnet-pool lease-time=4h disabled=no }} on-error={{ /ip dhcp-server set [find name=Expressnet-dhcp] interface="{bridge_name}" address-pool=Expressnet-pool lease-time=4h disabled=no }}; '
-        f':do {{ /ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=192.168.88.1 }} on-error={{ /ip dhcp-server network set [find address=192.168.88.0/24] gateway=192.168.88.1 dns-server=192.168.88.1 }}; '
+        f':do {{ /ip dhcp-server network add address={_rsc_escape(lan_network)} gateway={_rsc_escape(lan_gateway)} dns-server={_rsc_escape(lan_gateway)} }} on-error={{ /ip dhcp-server network set [find address={_rsc_escape(lan_network)}] gateway={_rsc_escape(lan_gateway)} dns-server={_rsc_escape(lan_gateway)} }}; '
         f'{customer_bridge_isolation}'
         f'/interface bridge port add bridge="{bridge_name}" interface="{interface_name}"; '
         f':do {{ /interface bridge port set [find interface="{interface_name}"] disabled=no }} on-error={{}}; '

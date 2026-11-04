@@ -413,7 +413,9 @@ export default function MikrotikSettings() {
               <div className="mt-3 grid gap-4 sm:grid-cols-2">
                 {(routerStatus.interfaces || []).map((item) => {
                   const selected = selectedPorts.includes(item.name);
-                  const assigned = routerStatus.assignments?.[item.name];
+                  const assignment = routerStatus.assignments?.[item.name];
+                  const assigned = assignment?.status === 'applied' && item.bridge === assignment.bridge ? assignment : null;
+                  const pendingAssignment = assignment && !assigned;
                   const blocked = item.customer_assignable === false;
                   return (
                     <button
@@ -423,7 +425,7 @@ export default function MikrotikSettings() {
                       style={selected ? { borderColor: 'var(--app-accent)', background: 'var(--app-accent)', color: 'var(--app-accent-contrast)' } : assigned ? { borderColor: 'var(--app-accent)', background: 'var(--app-accent-muted)' } : undefined}
                       onClick={() => togglePort(item.name)}
                       disabled={blocked}
-                      title={blocked ? `${portLabel(item.name)} is ${item.assignment_warning || 'not assignable'}` : assigned ? `${portLabel(item.name)} assigned to ${serviceLabel(assigned.service_type)}` : portLabel(item.name)}
+                      title={blocked ? `${portLabel(item.name)} is ${item.assignment_warning || 'not assignable'}` : assigned ? `${portLabel(item.name)} assigned to ${serviceLabel(assigned.service_type)}` : pendingAssignment ? `${portLabel(item.name)} assignment is pending router confirmation` : portLabel(item.name)}
                       aria-pressed={selected}
                     >
                       <span className="flex items-center justify-center gap-2">
@@ -438,6 +440,11 @@ export default function MikrotikSettings() {
                       {assigned && (
                         <span className="mt-1 block text-[11px] font-bold uppercase text-[var(--app-accent)]">
                           {serviceLabel(assigned.service_type)} assigned
+                        </span>
+                      )}
+                      {pendingAssignment && (
+                        <span className="mt-1 block text-[11px] font-bold uppercase text-amber-600">
+                          Pending confirmation
                         </span>
                       )}
                     </button>
