@@ -30,3 +30,10 @@ python manage.py migrate_schemas --tenant
 
 See [docs/tenant_runbook.md](docs/tenant_runbook.md) for onboarding, local
 subdomain testing, and per-tenant backup/restore commands.
+
+## Central RADIUS
+
+The RADIUS server is a separate Docker service on a public-IPv4 VPS. It shares
+the production database with Expressnet, allowing router NAS records and
+shared secrets to be registered automatically after provisioning. See
+[docs/radius-vps.md](docs/radius-vps.md).

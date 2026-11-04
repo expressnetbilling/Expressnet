@@ -1,0 +1,43 @@
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    DJANGO_SETTINGS_MODULE: billing_saas_django.Settings.production
+
+services:
+  # Keep the public web/API service on Railway. This definition is useful for
+  # local staging or a future move to a container host.
+  web:
+    <<: *app
+    profiles: ["app"]
+    command: >-
+      sh -c "python manage.py collectstatic --noinput --settings=billing_saas_django.Settings.production &&
+      python manage.py migrate --settings=billing_saas_django.Settings.production &&
+      gunicorn billing_saas_django.wsgi --bind 0.0.0.0:8000 --workers 4 --worker-class gthread --threads 4 --timeout 30"
+    ports:
+      - "8000:8000"
+
+  worker:
+    <<: *app
+    profiles: ["app"]
+    command: celery -A billing_saas_django worker -l info --concurrency=1
+
+  beat:
+    <<: *app
+    profiles: ["app"]
+    command: celery -A billing_saas_django beat -l info
+
+  # Deploy this service on the Ubuntu VPS. It is the one public, central
+  # RADIUS endpoint used by every tenant router; do not create one per tenant.
+  radius:
+    <<: *app
+    command: >-
+      python manage.py runradius --settings=billing_saas_django.Settings.production
+      --host 0.0.0.0 --auth-port 1812 --acct-port 1813
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
