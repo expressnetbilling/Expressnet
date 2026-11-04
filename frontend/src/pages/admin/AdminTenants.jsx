@@ -65,7 +65,7 @@ function getExpiryDays(tenant) {
 }
 
 function getTenantRevenue(tenant) {
-  return tenant.subscription?.amount || tenant.subscription?.price || tenant.monthly_revenue || tenant.revenue || 0;
+  return tenant.monthly_revenue ?? tenant.revenue ?? 0;
 }
 
 function getUserCount(tenant) {

@@ -14,6 +14,7 @@ import AdminSystem from './pages/admin/AdminSystem';
 import AdminSettings from './pages/admin/AdminSettings';
 import AdminTenantDetail from './pages/admin/AdminTenantDetail';
 import AdminTenants from './pages/admin/AdminTenants';
+import AdminPayments from './pages/admin/AdminPayments';
 import TenantAuditLog from './pages/TenantAuditLog';
 import BusinessSettings from './pages/BusinessSettings';
 import BillingPayment from './pages/BillingPayment';
@@ -144,6 +145,7 @@ export default function App() {
           <Route path="dashboard" element={<AdminDashboard />} />
           <Route path="tenants" element={<AdminTenants />} />
           <Route path="tenants/:id" element={<AdminTenantDetail />} />
+          <Route path="payments" element={<AdminPayments />} />
           <Route path="communications" element={<AdminCommunications />} />
           <Route path="integrations" element={<AdminIntegrations />} />
           <Route path="system" element={<AdminSystem />} />

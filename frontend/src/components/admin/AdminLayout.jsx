@@ -1,6 +1,6 @@
 import {
   Activity, ArrowRight, Building2, Command, FileClock, LayoutDashboard, LogOut, Settings2,
-  Menu, MessageSquareText, PlugZap, Search,
+  CreditCard, Menu, MessageSquareText, PlugZap, Search,
   Wifi, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -12,6 +12,7 @@ const sections = [
   { label: 'Overview', links: [{ to: adminPath('dashboard'), label: 'Dashboard', icon: LayoutDashboard }] },
   { label: 'Accounts', links: [
     { to: adminPath('tenants'), label: 'Tenants', icon: Building2 },
+    { to: adminPath('payments'), label: 'Payments', icon: CreditCard },
   ] },
   { label: 'Operations', links: [
     { to: adminPath('communications'), label: 'Communications', icon: MessageSquareText },

@@ -69,7 +69,7 @@ export default function Login() {
       <section className="theme-card w-full max-w-md rounded-2xl border p-7 shadow-2xl sm:p-10" style={{ borderColor: 'var(--app-border)', boxShadow: '0 24px 70px rgb(0 0 0 / 28%)' }}>
         <div className="mb-9">
           <p className="text-sm font-semibold uppercase tracking-wide text-app-accent">{tenantTheme.business_name || 'Expressnetbilling'}</p>
-          <h1 className="theme-text mt-2 text-2xl font-bold">Sign in to your tenant account</h1>
+          <h1 className="theme-text mt-2 text-2xl font-bold">Sign in to your account</h1>
           {emailVerified && <p className="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-500">Your email is verified. Sign in to continue.</p>}
           {verificationError && <p className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-500">{verificationError === 'invalid' ? 'That verification link is invalid or has expired. Contact support for a new link.' : 'We could not read the verification link. Contact support for help.'}</p>}
         </div>
@@ -110,7 +110,7 @@ export default function Login() {
         </form>
 
         <p className="mt-6 text-center text-sm text-slate-600">
-          New tenant?{' '}
+          Don't have an account?{' '}
           <Link className="font-semibold text-app-accent hover:opacity-80" to="/register">
             Create an account
           </Link>
