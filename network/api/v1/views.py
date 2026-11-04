@@ -4515,6 +4515,12 @@ def router_agent_poll(request, token):
                 f':local billingHsFileCount [:len [/file find name~"hotspot"]]; '
                 f':do {{ /tool fetch keep-result=no url=("{snapshot_base}/hotspot-files-check?count=" . $billingHsFileCount) }} on-error={{}}; '
             )
+        elif command.get("type") == "pull_configuration":
+            snapshot_base = f"{base_url}/api/router/provision/{token}/snapshot"
+            post_script = _router_snapshot_fetch_script(snapshot_base) + (
+                f':local billingHsFileCount [:len [/file find name~"hotspot"]]; '
+                f':do {{ /tool fetch keep-result=no url=("{snapshot_base}/hotspot-files-check?count=" . $billingHsFileCount) }} on-error={{}}; '
+            )
         lines.append(f':log info "Billing SaaS agent: running command {command_id} ({command.get("type") or "router"})";')
         lines.append(
             f':do {{ {script}; {post_script}/tool fetch keep-result=no url="{base_url}/api/router/agent/{token}/ack/{command_id}" }} '
@@ -4707,6 +4713,22 @@ def router_provision_complete(request, token):
             })
     tenant_data = ref(f"tenants/{tenant_id}").get() or {}
     _update_linked_router(tenant_id, {**tenant_data, **updates}, allow_new=fresh_router, status="online")
+
+    # The initial provisioning script avoids a full inventory pull while it is
+    # changing routes and interfaces. After the completion callback succeeds,
+    # ask the installed agent to report the settled router configuration on its
+    # next poll. This keeps setup reliable and still records the final state.
+    existing_commands = tenant_data.get("pending_router_commands") or []
+    inventory_pending = any(
+        command.get("type") == "pull_configuration"
+        and command.get("status") in {"pending", "delivered"}
+        for command in existing_commands
+    )
+    if not inventory_pending:
+        _queue_router_command_for_tenant(tenant_id, {
+            "type": "pull_configuration",
+            "script": ':log info "Billing SaaS agent: pulling router configuration after provisioning";',
+        }, tenant_data)
 
     # Create RADIUS NAS client record if we have a pending secret and tunnel IP
     try:
