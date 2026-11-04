@@ -4349,14 +4349,14 @@ def router_provision_script(request, token):
         :do { /ip hotspot walled-garden ip add action=accept dst-address-list=Expressnet-portal-ips dst-port=443 protocol=tcp comment=Expressnet-hotspot-ip-wg } on-error={}
         """
 
-    # --- Extracted from field export: /ip firewall raw hotspot-proxy-lockdown + dns-flood-cap ---
-    # Blocks direct client access to the hotspot's internal proxy port range and rate-limits
-    # DNS queries per-client (100 packets, burst 200, per source IP per minute) before dropping
-    # the rest, so a single compromised customer device can't flood the router's DNS/proxy.
+    # Keep RouterOS's Hotspot proxy reachable from the customer bridge.  A raw
+    # prerouting drop on ports 64872-64875 runs before Hotspot interception and
+    # prevents Android/iOS from receiving the captive-portal redirect. Remove
+    # the rule left by older provisioning scripts; retain only the DNS flood
+    # protection below.
     hotspot_abuse_protection_script = """
         :do { /ip firewall raw remove [find comment~"Expressnet-hotspot"] } on-error={}
         :do { /ip firewall filter remove [find comment~"Expressnet-hotspot-dns-flood-cap"] } on-error={}
-        :do { /ip firewall raw add action=drop chain=prerouting dst-port=64872-64875 in-interface=$billingBridge protocol=tcp comment=Expressnet-hotspot-proxy-lockdown } on-error={}
         :do { /ip firewall filter add action=accept chain=input dst-limit=100,200,src-address/1m dst-port=53 in-interface=$billingBridge protocol=udp place-before=[find comment="defconf: drop all not coming from LAN"] comment=Expressnet-hotspot-dns-flood-cap } on-error={}
         :do { /ip firewall filter add action=drop chain=input dst-port=53 in-interface=$billingBridge protocol=udp place-before=[find comment="defconf: drop all not coming from LAN"] comment=Expressnet-hotspot-dns-flood-cap } on-error={}
         :do { /ip firewall filter add action=accept chain=input dst-limit=100,200,src-address/1m dst-port=53 in-interface=$billingBridge protocol=tcp place-before=[find comment="defconf: drop all not coming from LAN"] comment=Expressnet-hotspot-dns-flood-cap } on-error={}
