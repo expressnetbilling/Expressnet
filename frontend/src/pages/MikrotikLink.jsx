@@ -37,6 +37,7 @@ export default function MikrotikSettings() {
   const [migrationSummary, setMigrationSummary] = useState(null);
   const [pullingStatus, setPullingStatus] = useState(false);
   const [assigning, setAssigning] = useState(false);
+  const [assignmentProgress, setAssignmentProgress] = useState('');
   const [activeStep, setActiveStep] = useState('link');
   const [selectedServices, setSelectedServices] = useState(['hotspot']);
   const [selectedPorts, setSelectedPorts] = useState([]);
@@ -78,7 +79,9 @@ export default function MikrotikSettings() {
       }
       return data;
     } catch (error) {
-      toast.error(error.response?.data?.message || 'Failed to pull router status');
+      if (!options.silent) {
+        toast.error(error.response?.data?.message || 'Failed to pull router status');
+      }
       return null;
     } finally {
       setPullingStatus(false);
@@ -224,6 +227,32 @@ export default function MikrotikSettings() {
     ));
   };
 
+  const waitForPortAssignments = async (portNames) => {
+    // The router-side agent polls every 30 seconds. Keep the action visibly
+    // in progress and resolve its promise as soon as the acknowledgement is
+    // reflected in status instead of making the operator refresh manually.
+    const maxAttempts = 18;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      setAssignmentProgress(
+        attempt === 0
+          ? 'Waiting for the router to confirm…'
+          : `Waiting for router confirmation… (${Math.min(attempt * 2, 36)}s)`,
+      );
+      const status = await pullRouterStatus({ silent: true });
+      const assignments = status?.assignments || {};
+      const unconfirmed = portNames.filter((portName) => {
+        const assignment = assignments[portName];
+        return !assignment || ['queued', 'delivered'].includes(assignment.status);
+      });
+      const failed = portNames.filter((portName) => assignments[portName]?.status === 'failed');
+      if (failed.length > 0 || unconfirmed.length === 0) {
+        return { confirmed: unconfirmed.length === 0, failed };
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    }
+    return { confirmed: false, failed: [] };
+  };
+
   const assignPorts = async () => {
     if (!selectedService) {
       toast.error('Select PPPoE, Hotspot, or both');
@@ -234,6 +263,7 @@ export default function MikrotikSettings() {
       return;
     }
     setAssigning(true);
+    setAssignmentProgress('Contacting router…');
     const profile = selectedService === 'hotspot' ? 'billing-saas-captive' : 'default';
     try {
       let data;
@@ -253,8 +283,22 @@ export default function MikrotikSettings() {
       const assignedCount = selectedPorts.length - failedPorts.length;
       setSelectedPorts(failedPorts);
       if (assignedCount > 0) {
-        toast.success(`${assignedCount} port${assignedCount === 1 ? '' : 's'} assigned to ${serviceLabel(selectedService)}`);
-        await pullRouterStatus({ silent: true });
+        const queued = Boolean(data.queued) || (data.results || []).some((item) => item.queued);
+        if (queued) {
+          const pendingPorts = selectedPorts.filter((portName) => !failedPorts.includes(portName));
+          const outcome = await waitForPortAssignments(pendingPorts);
+          if (outcome.confirmed) {
+            toast.success(`${assignedCount} port${assignedCount === 1 ? '' : 's'} confirmed on the router`);
+          } else if (outcome.failed.length > 0) {
+            toast.error(`Router could not confirm ${outcome.failed.map(portLabel).join(', ')}. Check the router log and retry.`);
+            setSelectedPorts((current) => [...new Set([...current, ...outcome.failed])]);
+          } else {
+            toast('The router has not acknowledged the assignment yet. It will continue automatically on its next poll.');
+          }
+        } else {
+          toast.success(`${assignedCount} port${assignedCount === 1 ? '' : 's'} assigned to ${serviceLabel(selectedService)}`);
+          await pullRouterStatus({ silent: true });
+        }
       }
       if (failedPorts.length > 0) {
         toast.error(`Could not assign ${failedPorts.map(portLabel).join(', ')}. They remain selected so you can retry.`);
@@ -263,6 +307,7 @@ export default function MikrotikSettings() {
       toast.error(error.response?.data?.message || 'Could not assign the selected ports');
     } finally {
       setAssigning(false);
+      setAssignmentProgress('');
     }
   };
 
@@ -459,8 +504,9 @@ export default function MikrotikSettings() {
               )}
 
               <div className="mt-6 flex justify-end">
-                <button type="button" className="h-11 min-w-56 rounded-full border border-slate-400 bg-white px-6 text-sm font-semibold text-slate-800 transition hover:border-[var(--app-accent)] hover:text-[var(--app-accent)] disabled:cursor-not-allowed disabled:opacity-50" onClick={assignPorts} disabled={assigning || selectedPorts.length === 0}>
-                  {assigning ? 'Assigning...' : `Assign ${serviceLabel(selectedService)} to selected ports`}
+                <button type="button" className="flex h-11 min-w-56 items-center justify-center gap-2 rounded-full border border-slate-400 bg-white px-6 text-sm font-semibold text-slate-800 transition hover:border-[var(--app-accent)] hover:text-[var(--app-accent)] disabled:cursor-not-allowed disabled:opacity-50" onClick={assignPorts} disabled={assigning || selectedPorts.length === 0}>
+                  {assigning && <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                  {assigning ? (assignmentProgress || 'Assigning…') : `Assign ${serviceLabel(selectedService)} to selected ports`}
                 </button>
               </div>
             </div>

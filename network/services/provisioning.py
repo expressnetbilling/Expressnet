@@ -1090,6 +1090,17 @@ def _clear_wireless_password_for_hotspot(api, interface_name, tenant=None):
                 "security-profile": profile_name,
                 "disabled": "no",
             })
+            # Existing WPA associations retain dynamic keys until clients are
+            # disconnected. Remove only registrations on the WLAN explicitly
+            # converted to the open Hotspot profile so users do not need to
+            # clear those entries manually in Winbox.
+            try:
+                registrations = api.path("interface", "wireless", "registration-table")
+                for registration in list(registrations.select()):
+                    if registration.get("interface") == interface_name and registration.get(".id"):
+                        registrations.remove(registration[".id"])
+            except Exception:
+                pass
             return profile_name
         except Exception:
             pass
@@ -1106,6 +1117,13 @@ def _clear_wireless_password_for_hotspot(api, interface_name, tenant=None):
                 "security.passphrase": "",
                 "disabled": "no",
             })
+            try:
+                registrations = api.path("interface", "wifi", "registration-table")
+                for registration in list(registrations.select()):
+                    if registration.get("interface") == interface_name and registration.get(".id"):
+                        registrations.remove(registration[".id"])
+            except Exception:
+                pass
             return "open"
     except Exception:
         pass

@@ -1642,6 +1642,53 @@ def _public_pay_impl(request, tenant_id, data=None):
         return ok({"success": False, "message": exc.public_message}, exc.status_code)
     daraja_source = "platform"
     collection_account = "platform_daraja"
+    # A captive browser can resubmit a form while the M-Pesa prompt is still
+    # being displayed (or when Android re-opens the sign-in tab). Reuse the
+    # recent live STK request so one customer is never sent duplicate prompts
+    # or left with several pending payment records for the same purchase.
+    pending_cutoff = timezone.now() - timedelta(minutes=5)
+    existing_payment = None
+    for candidate in reversed(list_children(f"tenants/{tenant_id}/payments")):
+        if str(candidate.get("status") or "").lower() != "pending":
+            continue
+        if str(candidate.get("provider") or "mpesa").lower() != "mpesa":
+            continue
+        if str(candidate.get("package_id") or "") != str(data["package_id"]):
+            continue
+        if str(candidate.get("service_type") or "hotspot").lower() != service_type:
+            continue
+        if normalize_phone(candidate.get("phone")) != phone:
+            continue
+        if service_type == "hotspot" and router_client_mac and normalize_mac(candidate.get("router_client_mac") or candidate.get("router_mac")) != router_client_mac:
+            continue
+        if service_type == "pppoe" and access_username and str(candidate.get("username") or "") != access_username:
+            continue
+        if not candidate.get("daraja_checkout_request_id"):
+            continue
+        try:
+            initiated_at = datetime.fromisoformat(str(candidate.get("initiated_at") or "").replace("Z", "+00:00"))
+            if timezone.is_naive(initiated_at):
+                initiated_at = timezone.make_aware(initiated_at, timezone.get_current_timezone())
+        except (TypeError, ValueError):
+            continue
+        if initiated_at >= pending_cutoff:
+            existing_payment = candidate
+            break
+    if existing_payment:
+        payment_id = str(existing_payment.get("id") or "")
+        access_token = str(existing_payment.get("access_verify_token") or make_payment_access_token(tenant_id, payment_id))
+        if payment_id and not existing_payment.get("access_verify_token"):
+            ref(f"tenants/{tenant_id}/payments/{payment_id}").update({"access_verify_token": access_token})
+        logger.info("Reusing pending captive M-Pesa prompt tenant=%s payment=%s", tenant_id, payment_id)
+        return ok({
+            "success": True,
+            "status": "pending",
+            "message": "An M-Pesa prompt is already waiting on this phone. Enter your PIN; do not submit another payment.",
+            "paymentId": payment_id,
+            "verifyToken": access_token,
+            "provider": "mpesa",
+            "checkoutRequestId": existing_payment.get("daraja_checkout_request_id"),
+        }, 202)
     payment_ref = ref(f"tenants/{tenant_id}/payments").push(
         {
             "customer_id": customer.get("id") if customer else None,
@@ -2589,7 +2636,11 @@ def router_ports(request):
     if service_type not in {"pppoe", "hotspot", "both"}:
         return ok({"message": "Port service must be PPPoE, Hotspot, or both"}, 400)
     wan_interface = str(request.tenant.get("mikrotik_wan_interface") or "ether1").strip()
-    if service_type == "both" or (_router_is_agent_linked(request.tenant) and not has_mikrotik_credentials(request.tenant)):
+    # A linked agent is the fallback when the direct binary API is not
+    # available.  Do not needlessly wait for its next poll when the dashboard
+    # can reach RouterOS directly, including for a port that needs both
+    # services.
+    if _router_is_agent_linked(request.tenant) and not has_mikrotik_credentials(request.tenant):
         eligible_interfaces = []
         results = []
         for interface_name in interface_names:
@@ -2629,7 +2680,7 @@ def router_ports(request):
         if port_service in {"pppoe", "both"} and interface_name.lower().startswith(("wlan", "wifi", "wireless")):
             port_service = "hotspot"
             port_profile = "Expressnet-profile"
-        if port_service == "both" or (_router_is_agent_linked(request.tenant) and not has_mikrotik_credentials(request.tenant)):
+        if _router_is_agent_linked(request.tenant) and not has_mikrotik_credentials(request.tenant):
             response = _queue_router_port_command(request, interface_name, port_service, port_profile)
             result_data = getattr(response, "data", {})
             success = bool(result_data.get("success"))
@@ -2639,7 +2690,33 @@ def router_ports(request):
             continue
         try:
             logger.info("Router port assignment using direct RouterOS API tenant=%s interface=%s", request.tenant["id"], interface_name)
-            result = configure_router_port(request.tenant, interface_name, port_service, port_profile, base_url=public_base_url(request).rstrip("/"))
+            if port_service == "both":
+                # configure_router_port deliberately accepts one service at a
+                # time. Applying the two idempotent configurations through
+                # the binary API makes a wired "both" port immediate instead
+                # of artificially queueing it for the agent.
+                pppoe_result = configure_router_port(
+                    request.tenant,
+                    interface_name,
+                    "pppoe",
+                    port_profile,
+                    base_url=public_base_url(request).rstrip("/"),
+                )
+                hotspot_result = configure_router_port(
+                    request.tenant,
+                    interface_name,
+                    "hotspot",
+                    "Expressnet-profile",
+                    base_url=public_base_url(request).rstrip("/"),
+                )
+                result = {
+                    **hotspot_result,
+                    "service_type": "both",
+                    "pppoe": pppoe_result,
+                    "hotspot": hotspot_result,
+                }
+            else:
+                result = configure_router_port(request.tenant, interface_name, port_service, port_profile, base_url=public_base_url(request).rstrip("/"))
             assignments = dict(request.tenant.get("router_port_assignments") or {})
             assignments[interface_name] = {
                 "service_type": port_service,
@@ -2725,17 +2802,37 @@ def _repair_legacy_router_port_script(script):
     )
 
 
-def _build_agent_port_assignment_script(interface_names, bridge_name):
-    """Return the smallest idempotent script that can attach customer ports.
+def _build_agent_port_assignment_script(interface_names, bridge_name, service_type="", tenant=None, portal_url=""):
+    """Return an idempotent agent script for a customer port assignment.
 
-    The provisioning script has already created the Expressnet bridge and its
-    Hotspot/PPPoE services.  Re-running that larger setup from the agent means
-    a harmless service, firewall, or Wi-Fi error can prevent a physical port
-    from being moved and acknowledged.  Port assignment must only perform the
-    bridge operation it represents.
+    Bridge membership is the only required operation. Hotspot and Wi-Fi repair
+    are best-effort so an unsupported Wi-Fi menu or a profile variation cannot
+    keep an already-attached port pending. The repair makes an assigned WLAN
+    open for Hotspot authentication and keeps the existing Hotspot server on
+    the managed bridge without changing RADIUS settings.
     """
     bridge = _rsc_escape(bridge_name or "Expressnet-bridge")
-    lines = [f':local billingBridge "{bridge}";']
+    # Create the bridge before the best-effort Hotspot repair below. A router
+    # recovered from a partial provisioning run may not have it yet.
+    lines = [
+        f':local billingBridge "{bridge}";',
+        ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};',
+    ]
+    hotspot_requested = str(service_type or "").lower() in {"hotspot", "both"}
+    tenant = tenant or {}
+    if hotspot_requested:
+        try:
+            lan_gateway = _router_lan_config(tenant).get("lan_gateway") or "192.168.88.1"
+        except ValueError:
+            lan_gateway = "192.168.88.1"
+        portal = _rsc_escape(portal_url or "")
+        lines.extend((
+            ':do { /ip dns set allow-remote-requests=yes } on-error={ :log warning "Billing SaaS: could not enable DNS for captive clients" };',
+            f':do {{ /ip hotspot profile add name="Expressnet-profile" hotspot-address={_rsc_escape(lan_gateway)} dns-name="hot.spot" login-by=cookie,http-pap,trial,mac-cookie html-directory="Expressnet-hotspot" comment="Expressnet captive portal: {portal}" }} on-error={{ :do {{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address={_rsc_escape(lan_gateway)} dns-name="hot.spot" login-by=cookie,http-pap,trial,mac-cookie html-directory="Expressnet-hotspot" comment="Expressnet captive portal: {portal}" }} on-error={{ :log warning "Billing SaaS: captive profile repair failed" }} }};',
+            ':local billingHotspot [/ip hotspot find interface=$billingBridge];',
+            ':if ([:len $billingHotspot] = 0) do={ :set billingHotspot [/ip hotspot find name="Expressnet-hotspot"] };',
+            ':if ([:len $billingHotspot] > 0) do={ :do { /ip hotspot set $billingHotspot name="Expressnet-hotspot" interface=$billingBridge address-pool="Expressnet-pool" profile="Expressnet-profile" disabled=no } on-error={ :log warning "Billing SaaS: hotspot server repair failed" } } else={ :do { /ip hotspot add name="Expressnet-hotspot" interface=$billingBridge address-pool="Expressnet-pool" profile="Expressnet-profile" disabled=no } on-error={ :log warning "Billing SaaS: hotspot server create failed" } };',
+        ))
     names = dict.fromkeys(
         str(value or "").strip()
         for value in (interface_names or [])
@@ -2743,11 +2840,25 @@ def _build_agent_port_assignment_script(interface_names, bridge_name):
     )
     for interface_name in names:
         port = _rsc_escape(interface_name)
+        wireless = str(interface_name or "").lower().startswith(("wlan", "wifi", "wireless"))
         lines.extend((
             f':local billingPort "{port}";',
             ':if ([:len [/interface find name=$billingPort]] = 0) do={ :error ("Router interface not found: " . $billingPort) };',
             ':do { /interface enable [find name=$billingPort] } on-error={};',
-            ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};',
+        ))
+        if hotspot_requested and wireless:
+            ssid = _rsc_escape(str(tenant.get("business_name") or "Expressnet")[:32])
+            # Reconnect only the assigned WLAN's clients. They rejoin without
+            # a WPA dynamic key and are then captured by the Hotspot portal.
+            lines.extend((
+                f':do {{ /interface wireless security-profiles add name="billing-saas-open" mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{ :do {{ /interface wireless security-profiles set [find name="billing-saas-open"] mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{ :log warning "Billing SaaS: wireless security profile repair failed" }} }};',
+                f':do {{ /interface wireless set [find name=$billingPort] ssid="{ssid}" security-profile="billing-saas-open" disabled=no }} on-error={{}};',
+                f':do {{ /interface wifi set [find name=$billingPort] configuration.ssid="{ssid}" security.authentication-types="" security.passphrase="" disabled=no }} on-error={{}};',
+                ':do { /interface wireless registration-table remove [find interface=$billingPort] } on-error={};',
+                ':do { /interface wifi registration-table remove [find interface=$billingPort] } on-error={};',
+                ':log info ("Billing SaaS: cleared WLAN security and reconnected clients on " . $billingPort . ".");',
+            ))
+        lines.extend((
             ':do { /interface bridge port remove [find interface=$billingPort] } on-error={};',
             ':do { /interface bridge port add bridge=$billingBridge interface=$billingPort disabled=no comment="billing-saas customer port" } on-error={};',
             ':do { /interface bridge port set [find interface=$billingPort bridge=$billingBridge] disabled=no } on-error={};',
@@ -2775,7 +2886,13 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
             per_interface[interface_name] = {"service_type": "both", "profile": profile_name}
         else:
             per_interface[interface_name] = {"service_type": port_service, "profile": port_profile}
-    script = _build_agent_port_assignment_script(interface_names, bridge_name)
+    script = _build_agent_port_assignment_script(
+        interface_names,
+        bridge_name,
+        service_type=service_type,
+        tenant=request.tenant,
+        portal_url=portal_url,
+    )
 
     commands = [
         command for command in (request.tenant.get("pending_router_commands") or [])
@@ -4601,6 +4718,9 @@ def router_agent_poll(request, token):
             script = _build_agent_port_assignment_script(
                 command.get("interfaces") or ([command.get("interface")] if command.get("interface") else []),
                 command.get("bridge"),
+                service_type=command.get("service_type"),
+                tenant=tenant,
+                portal_url=command.get("portal_url"),
             )
         if not script:
             lines.append(f':log warning "Billing SaaS agent: command {command_id} had no script";')
@@ -4620,6 +4740,14 @@ def router_agent_poll(request, token):
                 f':local billingHsFileCount [:len [/file find name~"hotspot"]]; '
                 f':do {{ /tool fetch keep-result=no url=("{snapshot_base}/hotspot-files-check?count=" . $billingHsFileCount) }} on-error={{}}; '
             )
+            if str(command.get("service_type") or "").lower() in {"hotspot", "both"}:
+                # Fetching portal HTML can be slow on an unreliable WAN. Run
+                # it only after acknowledgement so it can never hold bridge
+                # assignment in Pending confirmation.
+                post_script += routeros_hotspot_fetch_script(
+                    command.get("portal_url") or captive_portal_url({"id": tenant_id, **tenant}, base_url),
+                    "Billing SaaS agent",
+                )
         elif command.get("type") == "pull_configuration":
             snapshot_base = f"{base_url}/api/router/provision/{token}/snapshot"
             post_script = _router_snapshot_fetch_script(snapshot_base) + (

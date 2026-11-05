@@ -791,6 +791,51 @@ def _public_pay_impl(request, tenant_id):
         return ok({"success": False, "message": exc.public_message}, exc.status_code)
     daraja_source = "platform"
     collection_account = "platform_daraja"
+    # Avoid sending duplicate STK requests when a captive browser resubmits a
+    # payment while the earlier prompt is still awaiting the customer's PIN.
+    pending_cutoff = timezone.now() - timedelta(minutes=5)
+    existing_payment = None
+    for candidate in reversed(list_children(f"tenants/{tenant_id}/payments")):
+        if str(candidate.get("status") or "").lower() != "pending":
+            continue
+        if str(candidate.get("provider") or "mpesa").lower() != "mpesa":
+            continue
+        if str(candidate.get("package_id") or "") != str(data["package_id"]):
+            continue
+        if str(candidate.get("service_type") or "hotspot").lower() != service_type:
+            continue
+        if normalize_phone(candidate.get("phone")) != phone:
+            continue
+        if service_type == "hotspot" and router_client_mac and normalize_mac(candidate.get("router_client_mac") or candidate.get("router_mac")) != router_client_mac:
+            continue
+        if service_type == "pppoe" and access_username and str(candidate.get("username") or "") != access_username:
+            continue
+        if not candidate.get("daraja_checkout_request_id"):
+            continue
+        try:
+            initiated_at = datetime.fromisoformat(str(candidate.get("initiated_at") or "").replace("Z", "+00:00"))
+            if timezone.is_naive(initiated_at):
+                initiated_at = timezone.make_aware(initiated_at, timezone.get_current_timezone())
+        except (TypeError, ValueError):
+            continue
+        if initiated_at >= pending_cutoff:
+            existing_payment = candidate
+            break
+    if existing_payment:
+        payment_id = str(existing_payment.get("id") or "")
+        access_token = str(existing_payment.get("access_verify_token") or make_payment_access_token(tenant_id, payment_id))
+        if payment_id and not existing_payment.get("access_verify_token"):
+            ref(f"tenants/{tenant_id}/payments/{payment_id}").update({"access_verify_token": access_token})
+        logger.info("Reusing pending public M-Pesa prompt tenant=%s payment=%s", tenant_id, payment_id)
+        return ok({
+            "success": True,
+            "status": "pending",
+            "message": "An M-Pesa prompt is already waiting on this phone. Enter your PIN; do not submit another payment.",
+            "paymentId": payment_id,
+            "verifyToken": access_token,
+            "provider": "mpesa",
+            "checkoutRequestId": existing_payment.get("daraja_checkout_request_id"),
+        }, 202)
     payment_ref = ref(f"tenants/{tenant_id}/payments").push(
         {
             "customer_id": customer.get("id") if customer else None,
@@ -878,8 +923,11 @@ def _public_pay_impl(request, tenant_id):
 
 def _public_paystack_impl(request, tenant_id, tenant, pkg, data, phone, service_type, customer, access_username, pending_access_password, mac_address, router_ip, router_client_ip, router_client_mac, router_mac, link_login, dst, amount_payable):
     if str(os.getenv("PAYSTACK_MANUAL_PAYOUTS_ENABLED", "false")).strip().lower() not in {"1", "true", "yes", "on"}:
-        logger.warning("Paystack payment blocked because pooled payouts are disabled for tenant=%s", tenant_id)
-        return ok({"success": False, "message": "This payment method is temporarily unavailable. Please choose M-Pesa or contact the service provider."}, 503)
+        # Checkout is Daraja-first. If an old portal/browser still requests
+        # Paystack, continue with the current M-Pesa checkout rather than
+        # showing a dead-end error page to the customer.
+        logger.info("Paystack checkout request redirected to M-Pesa tenant=%s", tenant_id)
+        return _public_pay_impl(request, tenant_id)
     reference = f"EN-{tenant_id}-{secrets.token_urlsafe(14)}".replace("_", "-")
     currency = str(os.getenv("PAYSTACK_CURRENCY") or ((ref("site_settings").get() or {}).get("paystack_currency")) or "KES").upper()
     platform_fee_percent = tenant_paystack_platform_fee_percent()

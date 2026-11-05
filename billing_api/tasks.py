@@ -1,3 +1,5 @@
+import logging
+
 from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
@@ -5,6 +7,8 @@ from django.utils.dateparse import parse_datetime
 
 from .models import Customer, Tenant, TenantSubscription
 from .services import iso_now, list_children, normalize_phone, ref, send_sms_message, send_whatsapp_message, set_customer_enabled, upsert_customer_access, write_audit_log
+
+logger = logging.getLogger(__name__)
 
 """
 
