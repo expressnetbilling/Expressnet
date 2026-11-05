@@ -9,10 +9,11 @@ librouteros==4.0.1
 dj-database-url==3.0.1
 psycopg2-binary==2.9.10
 django-redis==6.0.0
-# Celery 5.4's Redis transport now requires redis-py 6.1 or newer.
+# Celery 5.6 and Kombu 5.7 support redis-py 6.x. Keep these dependency
+# generations aligned so the worker can consume Redis-backed payment jobs.
 redis>=6.1,<7
 psutil>=5.9,<8
-celery[redis]==5.4.0
+celery[redis]==5.6.3
 gevent==24.11.1
 whitenoise==6.8.2
 gunicorn==23.0.0

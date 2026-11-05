@@ -100,7 +100,14 @@ export default function Payments() {
     setLoading(true);
     try {
       const { data } = await api.get('/payments?page_size=100');
-      setPayments(Array.isArray(data) ? data : data.results || []);
+      const records = Array.isArray(data) ? data : data.results || [];
+      // The API can include older imported records first. Always put the most
+      // recently paid/initiated record at the top of the operator table.
+      setPayments([...records].sort((left, right) => {
+        const leftTime = toDate(left.paid_at || left.initiated_at || left.created_at)?.getTime() || 0;
+        const rightTime = toDate(right.paid_at || right.initiated_at || right.created_at)?.getTime() || 0;
+        return rightTime - leftTime;
+      }));
     } catch (error) {
       toast.error(error.response?.data?.message || 'Failed to load payments');
     } finally {

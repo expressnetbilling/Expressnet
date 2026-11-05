@@ -44,7 +44,16 @@ export default function AdminTenantDetail() {
     if (selected === 'network' || selected === 'profile') { setTabRows([]); return; }
     const { data } = await adminApi.get(`/admin/tenants/${id}/${selected}`);
     if (selected === 'overview') setOverview(data);
-    else setTabRows(Array.isArray(data) ? data : []);
+    else {
+      const rows = Array.isArray(data) ? data : [];
+      // Show the current tenant's latest payment first, even where an older
+      // ledger import is returned in insertion order.
+      setTabRows(selected === 'payments' ? [...rows].sort((left, right) => {
+        const leftTime = Date.parse(left.paid_at || left.initiated_at || left.created_at || '') || 0;
+        const rightTime = Date.parse(right.paid_at || right.initiated_at || right.created_at || '') || 0;
+        return rightTime - leftTime;
+      }) : rows);
+    }
   }, [id]);
 
   useEffect(() => {
