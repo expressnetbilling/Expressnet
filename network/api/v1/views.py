@@ -2725,6 +2725,38 @@ def _repair_legacy_router_port_script(script):
     )
 
 
+def _build_agent_port_assignment_script(interface_names, bridge_name):
+    """Return the smallest idempotent script that can attach customer ports.
+
+    The provisioning script has already created the Expressnet bridge and its
+    Hotspot/PPPoE services.  Re-running that larger setup from the agent means
+    a harmless service, firewall, or Wi-Fi error can prevent a physical port
+    from being moved and acknowledged.  Port assignment must only perform the
+    bridge operation it represents.
+    """
+    bridge = _rsc_escape(bridge_name or "Expressnet-bridge")
+    lines = [f':local billingBridge "{bridge}";']
+    names = dict.fromkeys(
+        str(value or "").strip()
+        for value in (interface_names or [])
+        if str(value or "").strip()
+    )
+    for interface_name in names:
+        port = _rsc_escape(interface_name)
+        lines.extend((
+            f':local billingPort "{port}";',
+            ':if ([:len [/interface find name=$billingPort]] = 0) do={ :error ("Router interface not found: " . $billingPort) };',
+            ':do { /interface enable [find name=$billingPort] } on-error={};',
+            ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};',
+            ':do { /interface bridge port remove [find interface=$billingPort] } on-error={};',
+            ':do { /interface bridge port add bridge=$billingBridge interface=$billingPort disabled=no comment="billing-saas customer port" } on-error={};',
+            ':do { /interface bridge port set [find interface=$billingPort bridge=$billingBridge] disabled=no } on-error={};',
+            ':if ([:len [/interface bridge port find interface=$billingPort bridge=$billingBridge disabled=no]] = 0) do={ :error ("Could not attach port to Expressnet bridge: " . $billingPort) };',
+            ':log info ("Billing SaaS: assigned customer port " . $billingPort . " to " . $billingBridge . ".");',
+        ))
+    return " ".join(lines)
+
+
 def _queue_router_ports_command(request, interface_names, service_type, profile_name, failure_message=""):
     if service_type not in {"pppoe", "hotspot", "both"}:
         return ok({"message": "Port service must be PPPoE, Hotspot, or both"}, 400)
@@ -2732,15 +2764,6 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
     tenant_id = request.tenant["id"]
     portal_url = captive_portal_url({"id": tenant_id, **request.tenant}, public_base_url(request).rstrip("/")) if service_type in {"hotspot", "both"} else None
     bridge_name = mikrotik_managed_bridge_name(request.tenant)
-    tenant = {"id": tenant_id, **request.tenant}
-    lan_config = _router_lan_config(request.tenant)
-    wan_interface = str(request.tenant.get("mikrotik_wan_interface") or "ether1").strip()
-    radius_enabled = _radius_server_config(
-        request.tenant,
-        _wireguard_server_config(request.tenant, public_base_url(request)),
-        public_base_url(request),
-    ).get("ready", False)
-    script_parts = []
     per_interface = {}
     for interface_name in interface_names:
         port_service = service_type
@@ -2749,15 +2772,10 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
             port_service = "hotspot"
             port_profile = "Expressnet-profile"
         if port_service == "both":
-            script_parts.extend((
-                _build_port_command_script(interface_name, "pppoe", profile_name, None, bridge_name, tenant, lan_config, wan_interface, radius_enabled),
-                _build_port_command_script(interface_name, "hotspot", "Expressnet-profile", portal_url, bridge_name, tenant, lan_config, wan_interface, radius_enabled),
-            ))
             per_interface[interface_name] = {"service_type": "both", "profile": profile_name}
         else:
-            script_parts.append(_build_port_command_script(interface_name, port_service, port_profile, portal_url, bridge_name, tenant, lan_config, wan_interface, radius_enabled))
             per_interface[interface_name] = {"service_type": port_service, "profile": port_profile}
-    script = "".join(script_parts)
+    script = _build_agent_port_assignment_script(interface_names, bridge_name)
 
     commands = [
         command for command in (request.tenant.get("pending_router_commands") or [])
@@ -4578,7 +4596,12 @@ def router_agent_poll(request, token):
         command_id = command.get("id") or secrets.token_hex(8)
         script = str(command.get("script") or "").strip()
         if command.get("type") == "configure_ports":
-            script = _repair_legacy_router_port_script(script)
+            # Rebuild queued commands too, so existing cards stuck at Pending
+            # confirmation are retried without their old broad setup scripts.
+            script = _build_agent_port_assignment_script(
+                command.get("interfaces") or ([command.get("interface")] if command.get("interface") else []),
+                command.get("bridge"),
+            )
         if not script:
             lines.append(f':log warning "Billing SaaS agent: command {command_id} had no script";')
             continue
