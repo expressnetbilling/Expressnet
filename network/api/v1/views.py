@@ -3918,7 +3918,7 @@ def _router_snapshot_fetch_script(snapshot_url):
             :do {{ :set billingInterfaceMac [/interface get $i mac-address] }} on-error={{}};
             :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/interface?name=" . [/interface get $i name] . "&type=" . [/interface get $i type] . "&running=" . [/interface get $i running] . "&disabled=" . [/interface get $i disabled] . "&mac_address=" . $billingInterfaceMac) }} on-error={{}}
         }}
-        :foreach p in=[/interface bridge port find] do={{ :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/bridge-port?name=" . [/interface bridge port get $p interface] . "&interface=" . [/interface bridge port get $p interface] . "&bridge=" . [/interface bridge port get $p bridge] . "&disabled=" . [/interface bridge port get $p disabled]) }} on-error={{}} }}
+        :foreach p in=[/interface bridge port find] do={{ :do {{ /tool fetch check-certificate=no keep-result=no url=($billingSnapshot . "/bridge-port?name=" . [/interface bridge port get $p interface] . "&interface=" . [/interface bridge port get $p interface] . "&bridge=" . [/interface bridge port get $p bridge] . "&disabled=" . [/interface bridge port get $p disabled]) }} on-error={{}} }}
         :foreach a in=[/ip address find] do={{ :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/address?name=" . [/ip address get $a address] . "&address=" . [/ip address get $a address] . "&interface=" . [/ip address get $a interface] . "&disabled=" . [/ip address get $a disabled]) }} on-error={{}} }}
         :foreach p in=[/ip pool find] do={{ :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/pool?name=" . [/ip pool get $p name] . "&ranges=" . [/ip pool get $p ranges]) }} on-error={{}} }}
         :foreach d in=[/ip dhcp-server find] do={{ :do {{ /tool fetch keep-result=no url=($billingSnapshot . "/dhcp-server?name=" . [/ip dhcp-server get $d name] . "&interface=" . [/ip dhcp-server get $d interface] . "&address_pool=" . [/ip dhcp-server get $d address-pool] . "&disabled=" . [/ip dhcp-server get $d disabled]) }} on-error={{}} }}
@@ -4962,6 +4962,18 @@ def router_provision_snapshot(request, token, section):
         "mikrotik_router_snapshot": snapshot,
         "mikrotik_snapshot_updated_at": iso_now(),
     }
+    # RouterOS can complete the bridge change but lose the separate command
+    # acknowledgement request.  The bridge-port inventory is authoritative,
+    # so reconcile a matching queued/delivered assignment here instead of
+    # leaving the tenant permanently on "Pending confirmation".
+    if section == "bridge-port" and not item.get("disabled"):
+        assignments = dict((tenant.extra or {}).get("router_port_assignments") or {})
+        interface_name = str(item.get("interface") or "")
+        assignment = assignments.get(interface_name)
+        if assignment and str(assignment.get("bridge") or "") == str(item.get("bridge") or ""):
+            assignment.update({"status": "applied", "updated_at": iso_now()})
+            assignments[interface_name] = assignment
+            snapshot_updates["router_port_assignments"] = assignments
     migration_sections = {
         "migration-pppoe-profile",
         "migration-hotspot-profile",
