@@ -2880,44 +2880,53 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
         portal_url=portal_url,
     )
 
-    commands = [
-        command for command in (request.tenant.get("pending_router_commands") or [])
-        if command.get("status") in {"pending", "delivered"}
-    ][-30:]
-    command_id = secrets.token_hex(8)
-    commands.append({
-        "id": command_id,
-        "type": "configure_ports",
-        "interface": interface_names[0] if len(interface_names) == 1 else None,
-        "interfaces": list(interface_names),
-        "service_type": service_type,
-        "profile": profile_name,
-        "portal_url": portal_url,
-        "bridge": bridge_name,
-        "port_assignments": per_interface,
-        "script": script,
-        "status": "pending",
-        "created_at": iso_now(),
-    })
-    ref(f"tenants/{tenant_id}").update({"pending_router_commands": commands})
+    # The dashboard request, Celery and the agent poll can arrive together.
+    # Serialise edits to the legacy JSON command list so an old poll cannot
+    # overwrite a newly selected port before the router gets it.
+    with transaction.atomic():
+        locked_tenant = Tenant.objects.select_for_update().get(pk=tenant_id)
+        locked_data = locked_tenant.as_dict(include_id=True)
+        commands = [
+            command for command in (locked_data.get("pending_router_commands") or [])
+            if command.get("status") in {"pending", "delivered"}
+        ][-30:]
+        command_id = secrets.token_hex(8)
+        commands.append({
+            "id": command_id,
+            "type": "configure_ports",
+            "interface": interface_names[0] if len(interface_names) == 1 else None,
+            "interfaces": list(interface_names),
+            "service_type": service_type,
+            "profile": profile_name,
+            "portal_url": portal_url,
+            "bridge": bridge_name,
+            "port_assignments": per_interface,
+            "script": script,
+            "status": "pending",
+            "created_at": iso_now(),
+        })
+        assignments = dict(locked_data.get("router_port_assignments") or {})
+        for interface_name, service in per_interface.items():
+            assignments[interface_name] = {
+                **service,
+                "portal_url": portal_url,
+                "bridge": bridge_name,
+                "updated_at": iso_now(),
+                "status": "queued",
+                "command_id": command_id,
+                "message": failure_message or "Queued for MikroTik agent sync.",
+            }
+        locked_tenant.apply_data({
+            "pending_router_commands": commands,
+            "router_port_assignments": assignments,
+        })
+        locked_tenant.save()
     request.tenant["pending_router_commands"] = commands
     logger.info(
         "Router port assignment queued for agent tenant=%s command=%s interfaces=%s direct_error=%s",
         tenant_id, command_id, ",".join(interface_names), failure_message or "none",
     )
 
-    assignments = dict(request.tenant.get("router_port_assignments") or {})
-    for interface_name, service in per_interface.items():
-        assignments[interface_name] = {
-            **service,
-            "portal_url": portal_url,
-            "bridge": bridge_name,
-            "updated_at": iso_now(),
-            "status": "queued",
-            "command_id": command_id,
-            "message": failure_message or "Queued for MikroTik agent sync.",
-        }
-    ref(f"tenants/{tenant_id}").update({"router_port_assignments": assignments})
     request.tenant["router_port_assignments"] = assignments
 
     return ok({
@@ -3548,24 +3557,29 @@ def _queue_router_command(request, command_data):
 
 
 def _queue_router_command_for_tenant(tenant_id, command_data, tenant_data=None):
-    tenant_data = tenant_data or ref(f"tenants/{tenant_id}").get() or {}
-    commands = [
-        command for command in (tenant_data.get("pending_router_commands") or [])
-        if command.get("status") in {"pending", "delivered"}
-    ][-30:]
-    command_id = secrets.token_hex(8)
-    if command_data.get("type") == "reboot":
-        script = '/system reboot;'
-    else:
-        script = command_data.get("script", "")
-    commands.append({
-        "id": command_id,
-        **command_data,
-        "script": script,
-        "status": "pending",
-        "created_at": iso_now(),
-    })
-    ref(f"tenants/{tenant_id}").update({"pending_router_commands": commands})
+    # See _queue_router_ports_command: use a row lock for every command type,
+    # not just port assignments, because all of them share the same JSON list.
+    with transaction.atomic():
+        locked_tenant = Tenant.objects.select_for_update().get(pk=tenant_id)
+        locked_data = locked_tenant.as_dict(include_id=True)
+        commands = [
+            command for command in (locked_data.get("pending_router_commands") or [])
+            if command.get("status") in {"pending", "delivered"}
+        ][-30:]
+        command_id = secrets.token_hex(8)
+        if command_data.get("type") == "reboot":
+            script = '/system reboot;'
+        else:
+            script = command_data.get("script", "")
+        commands.append({
+            "id": command_id,
+            **command_data,
+            "script": script,
+            "status": "pending",
+            "created_at": iso_now(),
+        })
+        locked_tenant.apply_data({"pending_router_commands": commands})
+        locked_tenant.save()
     logger.info("Router command queued tenant=%s command=%s type=%s", tenant_id, command_id, command_data.get("type") or "router")
     return ok({
         "success": True,
@@ -4749,32 +4763,45 @@ def router_agent_poll(request, token):
             f'}} '
             f'}}'
         )
-    assignments = dict(tenant.get("router_port_assignments") or {})
-    for command in all_commands:
-        if command.get("id") not in delivered_ids or command.get("status") not in {"pending", "delivered"}:
-            continue
-        command["status"] = "delivered"
-        command["delivered_at"] = delivered_at
-        command["delivery_attempts"] = int(command.get("delivery_attempts") or 0) + 1
-        command["ack_mode"] = "poll_delivery"
-        interface_names = command.get("interfaces") or ([command.get("interface")] if command.get("interface") else [])
-        for interface_name in interface_names:
-            assignment = assignments.get(interface_name) or {}
-            port_assignment = (command.get("port_assignments") or {}).get(interface_name) or {}
-            assignment.update({
-                "service_type": port_assignment.get("service_type") or command.get("service_type") or assignment.get("service_type"),
-                "profile": port_assignment.get("profile") or command.get("profile") or assignment.get("profile"),
-                "portal_url": command.get("portal_url") or assignment.get("portal_url"),
-                "bridge": command.get("bridge") or assignment.get("bridge"),
-                "status": "delivered",
-                "updated_at": delivered_at,
-            })
-            assignments[interface_name] = assignment
-    ref(f"tenants/{tenant_id}").update({
-        "pending_router_commands": all_commands,
-        "router_port_assignments": assignments,
-        "mikrotik_last_command_delivered_at": delivered_at,
-    })
+    # Re-read under a row lock before writing delivery state. The agent can be
+    # polling at the same moment the dashboard queues a port; writing the
+    # stale all_commands list here was deleting that newly queued assignment.
+    with transaction.atomic():
+        locked_tenant = Tenant.objects.select_for_update().get(pk=tenant_id)
+        locked_data = locked_tenant.as_dict(include_id=True)
+        current_commands = list(locked_data.get("pending_router_commands") or [])
+        assignments = dict(locked_data.get("router_port_assignments") or {})
+        for command in current_commands:
+            if command.get("id") not in delivered_ids or command.get("status") not in {"pending", "delivered"}:
+                continue
+            command["status"] = "delivered"
+            command["delivered_at"] = delivered_at
+            command["delivery_attempts"] = int(command.get("delivery_attempts") or 0) + 1
+            command["ack_mode"] = "poll_delivery"
+            interface_names = command.get("interfaces") or ([command.get("interface")] if command.get("interface") else [])
+            for interface_name in interface_names:
+                assignment = assignments.get(interface_name) or {}
+                # A newer assignment for the same physical port wins. Do not
+                # overwrite it with delivery data from an older command.
+                if assignment.get("command_id") not in {None, "", command.get("id")}:
+                    continue
+                port_assignment = (command.get("port_assignments") or {}).get(interface_name) or {}
+                assignment.update({
+                    "service_type": port_assignment.get("service_type") or command.get("service_type") or assignment.get("service_type"),
+                    "profile": port_assignment.get("profile") or command.get("profile") or assignment.get("profile"),
+                    "portal_url": command.get("portal_url") or assignment.get("portal_url"),
+                    "bridge": command.get("bridge") or assignment.get("bridge"),
+                    "status": "delivered",
+                    "updated_at": delivered_at,
+                    "command_id": command.get("id"),
+                })
+                assignments[interface_name] = assignment
+        locked_tenant.apply_data({
+            "pending_router_commands": current_commands,
+            "router_port_assignments": assignments,
+            "mikrotik_last_command_delivered_at": delivered_at,
+        })
+        locked_tenant.save()
     return HttpResponse("\n".join(lines) + "\n", content_type="text/plain")
 
 @csrf_exempt
@@ -4792,33 +4819,37 @@ def router_agent_ack(request, token, command_id):
     if not tenant:
         return ok({"message": "Tenant not found"}, 404)
 
-    commands = tenant.get("pending_router_commands") or []
     updated = False
     applied_command = None
-    for command in commands:
-        if command.get("id") == command_id and command.get("status") in {"pending", "delivered"}:
-            command["status"] = "applied"
-            command["applied_at"] = iso_now()
-            updated = True
-            applied_command = command
-            break
-
-    if updated:
-        logger.info("MikroTik agent acknowledged command tenant=%s command=%s type=%s", tenant_id, command_id, (applied_command or {}).get("type"))
-        ref(f"tenants/{tenant_id}").update({
-            "pending_router_commands": commands,
-            "mikrotik_last_seen_at": iso_now(),
-        })
-        interface_names = (applied_command or {}).get("interfaces") or ([(applied_command or {}).get("interface")] if (applied_command or {}).get("interface") else [])
-        if interface_names:
-            assignments = dict(tenant.get("router_port_assignments") or {})
+    with transaction.atomic():
+        locked_tenant = Tenant.objects.select_for_update().get(pk=tenant_id)
+        locked_data = locked_tenant.as_dict(include_id=True)
+        commands = list(locked_data.get("pending_router_commands") or [])
+        for command in commands:
+            if command.get("id") == command_id and command.get("status") in {"pending", "delivered"}:
+                command["status"] = "applied"
+                command["applied_at"] = iso_now()
+                updated = True
+                applied_command = command
+                break
+        if updated:
+            assignments = dict(locked_data.get("router_port_assignments") or {})
+            interface_names = (applied_command or {}).get("interfaces") or ([(applied_command or {}).get("interface")] if (applied_command or {}).get("interface") else [])
             for interface_name in interface_names:
                 assignment = assignments.get(interface_name)
-                if assignment and assignment.get("status") in {"queued", "delivered"}:
+                if assignment and assignment.get("command_id") == command_id and assignment.get("status") in {"queued", "delivered"}:
                     assignment["status"] = "applied"
                     assignment["updated_at"] = iso_now()
                     assignments[interface_name] = assignment
-                ref(f"tenants/{tenant_id}").update({"router_port_assignments": assignments})
+            locked_tenant.apply_data({
+                "pending_router_commands": commands,
+                "router_port_assignments": assignments,
+                "mikrotik_last_seen_at": iso_now(),
+            })
+            locked_tenant.save()
+
+    if updated:
+        logger.info("MikroTik agent acknowledged command tenant=%s command=%s type=%s", tenant_id, command_id, (applied_command or {}).get("type"))
         if (applied_command or {}).get("type") == "sync_packages":
             for package_id_value in ((applied_command or {}).get("package_ids") or []):
                 ref(f"tenants/{tenant_id}/packages/{package_id_value}").update({
