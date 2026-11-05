@@ -1130,60 +1130,86 @@ def configure_router_port(tenant, interface_name, service_type, profile_name="de
 
     api = router_connect(tenant)
     try:
+        warnings = []
+
+        def supporting_step(label, operation):
+            try:
+                return operation()
+            except Exception as exc:
+                warning = f"{label}: {exc}"
+                warnings.append(warning)
+                logger.warning(
+                    "Router port setup warning tenant=%s interface=%s step=%s error=%s",
+                    tenant.get("id"), interface_name, label, exc,
+                )
+                return None
+
         interfaces = list(api.path("interface").select())
         interface = next((item for item in interfaces if item.get("name") == interface_name), None)
         if not interface or not interface.get(".id"):
             raise ValueError("Router interface not found")
         _enable_router_interface(api, interface)
 
-        # 1. Remove the interface from any existing bridge
-        _remove_port_from_any_bridge(api, interface_name)
-
-        # 2. Shift the interface into the Expressnet managed bridge
+        # Prepare the managed bridge before moving the port.  These supporting
+        # services must not disconnect a customer port if one of their upserts
+        # cannot be completed on this RouterOS version.
         managed_bridge = mikrotik_managed_bridge_name(tenant)
         existing_bridges = list(api.path("interface", "bridge").select())
         if not any(b.get("name") == managed_bridge for b in existing_bridges):
             api.path("interface", "bridge").add(name=managed_bridge, comment="Created by Expressnet")
-        upsert_router_item(
-            api,
-            ("ip", "pool"),
-            {"name": "Expressnet-pool"},
+        supporting_step("IP pool setup", lambda: upsert_router_item(
+            api, ("ip", "pool"), {"name": "Expressnet-pool"},
             {"name": "Expressnet-pool", "ranges": "192.168.88.2-192.168.88.254", "comment": "IP Pool created by Expressnet"},
-        )
-        upsert_router_item(
-            api,
-            ("ip", "address"),
-            {"interface": managed_bridge, "comment": "Added by Expressnet"},
+        ))
+        supporting_step("bridge address setup", lambda: upsert_router_item(
+            api, ("ip", "address"), {"interface": managed_bridge, "comment": "Added by Expressnet"},
             {"address": "192.168.88.1/24", "interface": managed_bridge, "comment": "Added by Expressnet"},
-        )
-        upsert_router_item(
-            api,
-            ("ip", "dhcp-server"),
-            {"name": "Expressnet-dhcp"},
+        ))
+        supporting_step("DHCP server setup", lambda: upsert_router_item(
+            api, ("ip", "dhcp-server"), {"name": "Expressnet-dhcp"},
             {"name": "Expressnet-dhcp", "interface": managed_bridge, "address-pool": "Expressnet-pool", "lease-time": "4h", "disabled": "no"},
-        )
-        upsert_router_item(
-            api,
-            ("ip", "dhcp-server", "network"),
-            {"address": "192.168.88.0/24"},
+        ))
+        supporting_step("DHCP network setup", lambda: upsert_router_item(
+            api, ("ip", "dhcp-server", "network"), {"address": "192.168.88.0/24"},
             {"address": "192.168.88.0/24", "gateway": "192.168.88.1", "dns-server": "192.168.88.1"},
-        )
-        upsert_router_item(
-            api,
-            ("ip", "firewall", "nat"),
+        ))
+        supporting_step("NAT setup", lambda: upsert_router_item(
+            api, ("ip", "firewall", "nat"),
             {"chain": "srcnat", "src-address": "192.168.88.0/24", "comment": "billing-saas hotspot masquerade"},
             {"chain": "srcnat", "src-address": "192.168.88.0/24", "action": "masquerade", "comment": "billing-saas hotspot masquerade"},
-        )
-        _isolate_customer_bridge_from_router_management(api, managed_bridge)
+        ))
+        isolation_warnings = supporting_step(
+            "customer bridge isolation",
+            lambda: _isolate_customer_bridge_from_router_management(api, managed_bridge),
+        ) or []
+        warnings.extend(isolation_warnings)
 
-        # Add the target interface to our managed bridge
-        api.path("interface", "bridge", "port").add(bridge=managed_bridge, interface=interface_name)
+        # Only remove the old bridge membership immediately before adding the
+        # managed one, so a supporting-service failure cannot strand the port.
+        _remove_port_from_any_bridge(api, interface_name)
+        bridge_add_error = None
+        try:
+            api.path("interface", "bridge", "port").add(bridge=managed_bridge, interface=interface_name)
+        except Exception as exc:
+            # A binary API reply can be lost after RouterOS has already applied
+            # the add. Confirm the actual bridge state before treating it as a
+            # failed assignment.
+            bridge_add_error = exc
+        managed_port_present = False
         for port in api.path("interface", "bridge", "port").select():
-            if port.get("interface") == interface_name and port.get(".id"):
+            if port.get("interface") == interface_name and port.get("bridge") == managed_bridge:
+                managed_port_present = True
+            if port.get("interface") == interface_name and port.get("bridge") == managed_bridge and port.get(".id"):
                 try:
                     api.path("interface", "bridge", "port").update(**{".id": port[".id"], "disabled": "no"})
-                except Exception:
-                    pass
+                except Exception as exc:
+                    warnings.append(f"bridge port enable: {exc}")
+                    logger.warning("Router port setup warning tenant=%s interface=%s step=bridge-port-enable error=%s", tenant.get("id"), interface_name, exc)
+        if not managed_port_present:
+            detail = f": {bridge_add_error}" if bridge_add_error else ""
+            raise RouterOSAPIError(f"Router did not add {interface_name} to managed bridge {managed_bridge}{detail}")
+        if bridge_add_error:
+            warnings.append(f"bridge port add response: {bridge_add_error}")
         bind_interface = managed_bridge
 
         wireless_security_profile = None
@@ -1191,6 +1217,8 @@ def configure_router_port(tenant, interface_name, service_type, profile_name="de
             wireless_security_profile = _clear_wireless_password_for_hotspot(api, interface_name, tenant)
 
         bridge_note = f"Interface '{interface_name}' successfully moved into Expressnet managed bridge '{managed_bridge}'."
+        if warnings:
+            bridge_note += " Warnings: " + "; ".join(warnings)
 
         if service_type == "pppoe":
             _set_bridge_port_pppoe_only(api, interface_name)
@@ -1267,12 +1295,15 @@ def _set_bridge_port_pppoe_only(api, interface_name):
 
 def _isolate_customer_bridge_from_router_management(api, bridge_name):
     """Allow captive network services, then drop all other router input from customer ports."""
+    warnings = []
     for item in list(api.path("interface", "list", "member").select()):
         if item.get("interface") == bridge_name and item.get(".id"):
             try:
                 api.path("interface", "list", "member").remove(item[".id"])
-            except Exception:
-                pass
+            except Exception as exc:
+                warning = f"customer bridge-list cleanup: {exc}"
+                warnings.append(warning)
+                logger.warning("Router customer bridge isolation warning bridge=%s error=%s", bridge_name, exc)
     try:
         upsert_router_item(
             api,
@@ -1286,8 +1317,10 @@ def _isolate_customer_bridge_from_router_management(api, bridge_name):
             {"interface": bridge_name},
             {"list": "EXPRESSNET-CUSTOMER", "interface": bridge_name, "comment": "billing-saas customer bridge"},
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        warning = f"customer interface-list setup: {exc}"
+        warnings.append(warning)
+        logger.warning("Router customer bridge isolation warning bridge=%s error=%s", bridge_name, exc)
 
     comments = {
         "billing-saas allow customer dns",
@@ -1299,8 +1332,10 @@ def _isolate_customer_bridge_from_router_management(api, bridge_name):
         if item.get("comment") in comments and item.get(".id"):
             try:
                 api.path("ip", "firewall", "filter").remove(item[".id"])
-            except Exception:
-                pass
+            except Exception as exc:
+                warning = f"customer firewall cleanup: {exc}"
+                warnings.append(warning)
+                logger.warning("Router customer bridge isolation warning bridge=%s error=%s", bridge_name, exc)
 
     firewall = api.path("ip", "firewall", "filter")
     before = next((item.get(".id") for item in firewall.select() if item.get("comment") == "defconf: drop all not coming from LAN" and item.get(".id")), None)
@@ -1319,8 +1354,11 @@ def _isolate_customer_bridge_from_router_management(api, bridge_name):
     try:
         api.path("tool", "mac-server").update(**{"allowed-interface-list": "LAN"})
         api.path("tool", "mac-server", "mac-winbox").update(**{"allowed-interface-list": "LAN"})
-    except Exception:
-        pass
+    except Exception as exc:
+        warning = f"MAC server lockdown: {exc}"
+        warnings.append(warning)
+        logger.warning("Router customer bridge isolation warning bridge=%s error=%s", bridge_name, exc)
+    return warnings
 
 
 def _rsc_escape(value):

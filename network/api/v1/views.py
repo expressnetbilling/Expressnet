@@ -34,6 +34,7 @@ from rest_framework.permissions import AllowAny
 
 from billing_api.auth import admin_required, tenant_required
 from billing_api.models import AdminUser, Customer, InternetPackage, Payment, SubscriptionPayment, Tenant, TenantSubscription, Ticket, User, Voucher
+from network.services.provisioning import RouterOSAPIError
 from billing_api.services import (
     admin_token,
     check_password,
@@ -2637,6 +2638,7 @@ def router_ports(request):
                 request.tenant["router_port_assignments"] = result_data.get("assignments") or request.tenant.get("router_port_assignments") or {}
             continue
         try:
+            logger.info("Router port assignment using direct RouterOS API tenant=%s interface=%s", request.tenant["id"], interface_name)
             result = configure_router_port(request.tenant, interface_name, port_service, port_profile, base_url=public_base_url(request).rstrip("/"))
             assignments = dict(request.tenant.get("router_port_assignments") or {})
             assignments[interface_name] = {
@@ -2649,8 +2651,10 @@ def router_ports(request):
             ref(f"tenants/{request.tenant['id']}").update({"router_port_assignments": assignments})
             request.tenant["router_port_assignments"] = assignments
             results.append({"interface": interface_name, "success": True, "queued": False, "result": result})
-        except (TimeoutError, OSError):
-            response = _queue_router_port_command(request, interface_name, port_service, port_profile)
+        except (TimeoutError, OSError, RouterOSAPIError) as exc:
+            failure_message = f"Direct RouterOS API assignment failed: {exc}"
+            logger.info("Router port assignment fell back to agent tenant=%s interface=%s error=%s", request.tenant["id"], interface_name, exc)
+            response = _queue_router_port_command(request, interface_name, port_service, port_profile, failure_message=failure_message)
             result_data = getattr(response, "data", {})
             success = bool(result_data.get("success"))
             results.append({"interface": interface_name, "success": success, "queued": bool(result_data.get("queued")), "message": result_data.get("message")})
@@ -2658,14 +2662,19 @@ def router_ports(request):
                 request.tenant["router_port_assignments"] = result_data.get("assignments") or request.tenant.get("router_port_assignments") or {}
         except Exception as exc:
             if request.tenant.get("mikrotik_last_seen_at"):
-                response = _queue_router_port_command(request, interface_name, port_service, port_profile)
+                failure_message = f"Direct RouterOS API assignment failed: {exc}"
+                logger.info("Router port assignment fell back to agent tenant=%s interface=%s error=%s", request.tenant["id"], interface_name, exc)
+                response = _queue_router_port_command(request, interface_name, port_service, port_profile, failure_message=failure_message)
                 result_data = getattr(response, "data", {})
                 success = bool(result_data.get("success"))
                 results.append({"interface": interface_name, "success": success, "queued": bool(result_data.get("queued")), "message": result_data.get("message")})
                 if success:
                     request.tenant["router_port_assignments"] = result_data.get("assignments") or request.tenant.get("router_port_assignments") or {}
             else:
-                results.append({"interface": interface_name, "success": False, "message": f"Unable to assign router port: {exc}"})
+                failure_message = f"Unable to assign router port: {exc}"
+                _record_port_assignment_failure(request, interface_name, port_service, port_profile, failure_message)
+                logger.warning("Router port assignment failed tenant=%s interface=%s error=%s", request.tenant["id"], interface_name, exc)
+                results.append({"interface": interface_name, "success": False, "message": failure_message})
 
     assignments = dict(request.tenant.get("router_port_assignments") or {})
     succeeded = [item for item in results if item.get("success")]
@@ -2682,8 +2691,24 @@ def router_ports(request):
         "assignments": assignments,
     }, 200 if succeeded else 400)
 
-def _queue_router_port_command(request, interface_name, service_type, profile_name):
-    return _queue_router_ports_command(request, [interface_name], service_type, profile_name)
+def _queue_router_port_command(request, interface_name, service_type, profile_name, failure_message=""):
+    return _queue_router_ports_command(request, [interface_name], service_type, profile_name, failure_message=failure_message)
+
+
+def _record_port_assignment_failure(request, interface_name, service_type, profile_name, message):
+    assignments = dict(request.tenant.get("router_port_assignments") or {})
+    assignment = assignments.get(interface_name) or {}
+    assignment.update({
+        "service_type": assignment.get("service_type") or service_type,
+        "profile": assignment.get("profile") or profile_name,
+        "bridge": assignment.get("bridge") or mikrotik_managed_bridge_name(request.tenant),
+        "status": "failed",
+        "message": str(message)[:500],
+        "updated_at": iso_now(),
+    })
+    assignments[interface_name] = assignment
+    ref(f"tenants/{request.tenant['id']}").update({"router_port_assignments": assignments})
+    request.tenant["router_port_assignments"] = assignments
 
 
 def _repair_legacy_router_port_script(script):
@@ -2700,7 +2725,7 @@ def _repair_legacy_router_port_script(script):
     )
 
 
-def _queue_router_ports_command(request, interface_names, service_type, profile_name):
+def _queue_router_ports_command(request, interface_names, service_type, profile_name, failure_message=""):
     if service_type not in {"pppoe", "hotspot", "both"}:
         return ok({"message": "Port service must be PPPoE, Hotspot, or both"}, 400)
 
@@ -2734,7 +2759,10 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
             per_interface[interface_name] = {"service_type": port_service, "profile": port_profile}
     script = "".join(script_parts)
 
-    commands = [c for c in (request.tenant.get("pending_router_commands") or []) if c.get("status") == "pending"][-19:]
+    commands = [
+        command for command in (request.tenant.get("pending_router_commands") or [])
+        if command.get("status") in {"pending", "delivered"}
+    ][-30:]
     command_id = secrets.token_hex(8)
     commands.append({
         "id": command_id,
@@ -2752,6 +2780,10 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
     })
     ref(f"tenants/{tenant_id}").update({"pending_router_commands": commands})
     request.tenant["pending_router_commands"] = commands
+    logger.info(
+        "Router port assignment queued for agent tenant=%s command=%s interfaces=%s direct_error=%s",
+        tenant_id, command_id, ",".join(interface_names), failure_message or "none",
+    )
 
     assignments = dict(request.tenant.get("router_port_assignments") or {})
     for interface_name, service in per_interface.items():
@@ -2762,6 +2794,7 @@ def _queue_router_ports_command(request, interface_names, service_type, profile_
             "updated_at": iso_now(),
             "status": "queued",
             "command_id": command_id,
+            "message": failure_message or "Queued for MikroTik agent sync.",
         }
     ref(f"tenants/{tenant_id}").update({"router_port_assignments": assignments})
     request.tenant["router_port_assignments"] = assignments
@@ -3395,7 +3428,10 @@ def _queue_router_command(request, command_data):
 
 def _queue_router_command_for_tenant(tenant_id, command_data, tenant_data=None):
     tenant_data = tenant_data or ref(f"tenants/{tenant_id}").get() or {}
-    commands = [c for c in (tenant_data.get("pending_router_commands") or []) if c.get("status") == "pending"][-19:]
+    commands = [
+        command for command in (tenant_data.get("pending_router_commands") or [])
+        if command.get("status") in {"pending", "delivered"}
+    ][-30:]
     command_id = secrets.token_hex(8)
     if command_data.get("type") == "reboot":
         script = '/system reboot;'
@@ -3409,6 +3445,7 @@ def _queue_router_command_for_tenant(tenant_id, command_data, tenant_data=None):
         "created_at": iso_now(),
     })
     ref(f"tenants/{tenant_id}").update({"pending_router_commands": commands})
+    logger.info("Router command queued tenant=%s command=%s type=%s", tenant_id, command_id, command_data.get("type") or "router")
     return ok({
         "success": True,
         "queued": True,

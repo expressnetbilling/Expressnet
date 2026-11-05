@@ -117,7 +117,7 @@ def generate_expired_customer_invoices(self, batch_size=200):
 def provision_customer_access(self, tenant_id, customer_id):
     """Apply a newly created customer to MikroTik outside the API request."""
     from network.services.provisioning import (
-        create_hotspot_profile, create_ppp_profile, has_mikrotik_credentials,
+        RouterOSAPIError, create_hotspot_profile, create_ppp_profile, has_mikrotik_credentials,
         mikrotik_managed_bridge_name, upsert_customer_access,
     )
     from network.api.v1.views import (
@@ -136,6 +136,7 @@ def provision_customer_access(self, tenant_id, customer_id):
     payload = {**customer, "package_name": customer.get("package"), "speed": package.get("speed"), "service_type": service_type}
     try:
         if has_mikrotik_credentials(tenant):
+            logger.info("Customer provisioning using direct RouterOS API tenant=%s customer=%s", tenant_id, customer_id)
             if service_type == "pppoe":
                 create_ppp_profile(tenant, package.get("name"), package.get("speed"))
             elif service_type == "hotspot":
@@ -143,28 +144,34 @@ def provision_customer_access(self, tenant_id, customer_id):
             upsert_customer_access(tenant, payload, disabled=customer.get("status") != "active")
         elif _router_is_agent_linked(tenant):
             payload.update({"package": customer.get("package"), "mikrotik_bridge_name": mikrotik_managed_bridge_name(tenant)})
-            _queue_router_command_for_tenant(tenant_id, {
+            queued = _queue_router_command_for_tenant(tenant_id, {
                 "type": "sync_secrets", "router_id": customer.get("mikrotik_router_id"),
                 "customer_ids": [customer_id], "script": _customer_secret_script(payload),
             }, tenant)
+            command_id = getattr(queued, "data", {}).get("command_id")
+            logger.info("Customer provisioning queued for router agent tenant=%s customer=%s command=%s", tenant_id, customer_id, command_id)
             ref(f"tenants/{tenant_id}/customers/{customer_id}").update({
                 "provisioning_status": "queued", "provisioning_message": "Access queued for MikroTik agent sync",
             })
             return {"status": "queued"}
+        message = "MikroTik is not configured and no linked router agent is available. Customer access was not provisioned."
         ref(f"tenants/{tenant_id}/customers/{customer_id}").update({
-            "provisioning_status": "provisioned", "provisioning_message": f"{service_type.upper()} access created on MikroTik",
+            "provisioning_status": "failed", "provisioning_message": message,
         })
-        return {"status": "provisioned"}
+        logger.warning("Customer provisioning unavailable tenant=%s customer=%s", tenant_id, customer_id)
+        return {"status": "failed", "message": message}
     except Exception as exc:
         logger.exception("Customer provisioning failed tenant=%s customer=%s", tenant_id, customer_id)
-        if isinstance(exc, (TimeoutError, OSError)) and _router_is_agent_linked(tenant):
+        if isinstance(exc, (TimeoutError, OSError, RouterOSAPIError)) and _router_is_agent_linked(tenant):
             payload.update({"package": customer.get("package"), "mikrotik_bridge_name": mikrotik_managed_bridge_name(tenant)})
-            _queue_router_command_for_tenant(tenant_id, {
+            queued = _queue_router_command_for_tenant(tenant_id, {
                 "type": "sync_secrets", "router_id": customer.get("mikrotik_router_id"),
                 "customer_ids": [customer_id], "script": _customer_secret_script(payload),
             }, tenant)
+            command_id = getattr(queued, "data", {}).get("command_id")
+            logger.info("Customer provisioning fell back to router agent tenant=%s customer=%s command=%s error=%s", tenant_id, customer_id, command_id, exc)
             ref(f"tenants/{tenant_id}/customers/{customer_id}").update({
-                "provisioning_status": "queued", "provisioning_message": "Router is unreachable; access was queued for agent sync",
+                "provisioning_status": "queued", "provisioning_message": f"Direct RouterOS provisioning failed: {exc}. Access queued for agent sync.",
             })
             return {"status": "queued"}
         if self.request.retries < self.max_retries:
@@ -182,7 +189,7 @@ def sync_customer_access_after_update(self, tenant_id, customer_id, send_credent
         _customer_credentials_sms, _customer_secret_script, package_data_limit_bytes,
         package_duration_delta, package_is_bundle,
     )
-    from network.services.provisioning import has_mikrotik_credentials, mikrotik_managed_bridge_name, set_customer_enabled, upsert_customer_access
+    from network.services.provisioning import RouterOSAPIError, has_mikrotik_credentials, mikrotik_managed_bridge_name, set_customer_enabled, upsert_customer_access
     from network.api.v1.views import _queue_router_command_for_tenant, _router_is_agent_linked
 
     tenant_record = Tenant.objects.filter(pk=tenant_id).first()
@@ -201,26 +208,40 @@ def sync_customer_access_after_update(self, tenant_id, customer_id, send_credent
     }
     try:
         if has_mikrotik_credentials(tenant):
+            logger.info("Customer update sync using direct RouterOS API tenant=%s customer=%s", tenant_id, customer_id)
             upsert_customer_access(tenant, payload, disabled=customer.get("status") != "active")
             if service_type != "static":
                 set_customer_enabled(tenant, customer.get("username"), service_type, customer.get("status") == "active")
         elif _router_is_agent_linked(tenant):
             payload["mikrotik_bridge_name"] = mikrotik_managed_bridge_name(tenant)
-            _queue_router_command_for_tenant(tenant_id, {
+            queued = _queue_router_command_for_tenant(tenant_id, {
                 "type": "sync_secrets", "customer_ids": [customer_id], "script": _customer_secret_script(payload),
             }, tenant)
+            logger.info("Customer update sync queued for router agent tenant=%s customer=%s command=%s", tenant_id, customer_id, getattr(queued, "data", {}).get("command_id"))
+        else:
+            message = "MikroTik is not configured and no linked router agent is available. Customer update was not synced."
+            ref(f"tenants/{tenant_id}/customers/{customer_id}").update({
+                "router_sync_status": "failed", "router_sync_error": message, "provisioning_message": message,
+            })
+            logger.warning("Customer update sync unavailable tenant=%s customer=%s", tenant_id, customer_id)
+            return {"status": "failed", "message": message}
         ref(f"tenants/{tenant_id}/customers/{customer_id}").update({"router_sync_status": "synced"})
         if send_credentials:
             send_sms_message(customer.get("phone"), _customer_credentials_sms(customer, tenant), tenant)
         return {"status": "synced"}
     except Exception as exc:
         logger.exception("Customer update sync failed tenant=%s customer=%s", tenant_id, customer_id)
-        if isinstance(exc, (TimeoutError, OSError)) and _router_is_agent_linked(tenant):
+        if isinstance(exc, (TimeoutError, OSError, RouterOSAPIError)) and _router_is_agent_linked(tenant):
             payload["mikrotik_bridge_name"] = mikrotik_managed_bridge_name(tenant)
-            _queue_router_command_for_tenant(tenant_id, {
+            queued = _queue_router_command_for_tenant(tenant_id, {
                 "type": "sync_secrets", "customer_ids": [customer_id], "script": _customer_secret_script(payload),
             }, tenant)
-            ref(f"tenants/{tenant_id}/customers/{customer_id}").update({"router_sync_status": "queued"})
+            command_id = getattr(queued, "data", {}).get("command_id")
+            logger.info("Customer update sync fell back to router agent tenant=%s customer=%s command=%s error=%s", tenant_id, customer_id, command_id, exc)
+            ref(f"tenants/{tenant_id}/customers/{customer_id}").update({
+                "router_sync_status": "queued", "router_sync_error": str(exc)[:500],
+                "provisioning_message": f"Direct RouterOS sync failed: {exc}. Update queued for agent sync.",
+            })
             if send_credentials:
                 send_sms_message(customer.get("phone"), _customer_credentials_sms(customer, tenant), tenant)
             return {"status": "queued"}

@@ -415,7 +415,7 @@ export default function MikrotikSettings() {
                   const selected = selectedPorts.includes(item.name);
                   const assignment = routerStatus.assignments?.[item.name];
                   const assigned = assignment?.status === 'applied' && item.bridge === assignment.bridge ? assignment : null;
-                  const pendingAssignment = assignment && !assigned;
+                  const pendingAssignment = ['queued', 'delivered'].includes(assignment?.status) && !assigned;
                   const blocked = item.customer_assignable === false;
                   return (
                     <button
