@@ -2815,6 +2815,9 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
     lines = [
         f':local billingBridge "{bridge}";',
         ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};',
+        # Upgrade existing agents too; otherwise routers provisioned before
+        # the 10-second interval would retain their old 30-second scheduler.
+        ':do { /system scheduler set [find name="billing-saas-agent"] interval=10s } on-error={};',
     ]
     hotspot_requested = str(service_type or "").lower() in {"hotspot", "both"}
     tenant = tenant or {}
@@ -4640,7 +4643,7 @@ def router_provision_script(request, token):
         {wireless_provision_script}
         {provisioning_callback_script}
         :do {{ /system scheduler remove [find name="billing-saas-agent"] }} on-error={{}}
-        /system scheduler add name="billing-saas-agent" interval=30s on-event=":do {{ /file remove [find name=\\"billing-saas-cmd.rsc\\"] }} on-error={{}}; :do {{ /tool fetch check-certificate=no url=\\"{agent_poll_url}\\" dst-path=billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command fetch failed\\" }}; :if ([:len [/file find name=\\"billing-saas-cmd.rsc\\"]] > 0) do={{ :do {{ /import billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command import failed\\" }} }};"
+        /system scheduler add name="billing-saas-agent" interval=10s on-event=":do {{ /file remove [find name=\\"billing-saas-cmd.rsc\\"] }} on-error={{}}; :do {{ /tool fetch check-certificate=no url=\\"{agent_poll_url}\\" dst-path=billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command fetch failed\\" }}; :if ([:len [/file find name=\\"billing-saas-cmd.rsc\\"]] > 0) do={{ :do {{ /import billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command import failed\\" }} }};"
         :log info "Billing SaaS provisioning complete. No customer ports were moved; assign Hotspot or PPPoE ports from the dashboard.";
         :put "Configuration completed successfully. No customer ports were moved; assign Hotspot or PPPoE ports from the dashboard.";
         """
@@ -4701,6 +4704,10 @@ def router_agent_poll(request, token):
                 commands.append(command)
         except (TypeError, ValueError):
             commands.append(command)
+    # A customer-port command must not sit behind a long package/customer
+    # sync.  It is safe to execute independently and is the operation an
+    # operator is actively waiting for.
+    commands.sort(key=lambda command: 0 if command.get("type") == "configure_ports" else 1)
     base_url = public_base_url(request).rstrip("/")
     if not commands:
         return HttpResponse(':log info "Billing SaaS agent: no pending commands";\n', content_type="text/plain")

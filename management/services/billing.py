@@ -16,6 +16,7 @@ import bcrypt
 import jwt
 import requests
 from django.conf import settings
+from django.core.cache import cache
 
 from billing_api.models import AdminAuditLog, AdminUser, Customer, InternetPackage, Payment, SiteSettings, Tenant, Ticket, Voucher
 
@@ -28,6 +29,14 @@ from core.services.shared import *
 
 
 PAYSTACK_API_BASE = "https://api.paystack.co"
+
+
+def _provider_timeout(name, default):
+    """Return a bounded network timeout; provider calls must not exhaust web workers."""
+    try:
+        return max(1, min(30, float(os.getenv(name, str(default)) or default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def paystack_secret_key():
@@ -667,10 +676,15 @@ def get_daraja_access_token(tenant, payment_method="daraja_paybill", require_stk
         if not consumer_key or not consumer_secret:
             raise PaymentProviderError("Daraja API credentials are incomplete.", "Missing Daraja consumer key or consumer secret", 503)
         creds = {"consumer_key": consumer_key, "consumer_secret": consumer_secret}
+    cache_seed = f"{daraja_base_url(tenant)}:{creds['consumer_key']}"
+    cache_key = "daraja-access-token:" + hashlib.sha256(cache_seed.encode()).hexdigest()
+    cached_token = cache.get(cache_key)
+    if cached_token:
+        return cached_token
     response = requests.get(
         f"{daraja_base_url(tenant)}/oauth/v1/generate?grant_type=client_credentials",
         auth=(creds["consumer_key"], creds["consumer_secret"]),
-        timeout=30,
+        timeout=_provider_timeout("DARAJA_OAUTH_TIMEOUT_SECONDS", 10),
     )
     try:
         response.raise_for_status()
@@ -705,6 +719,11 @@ def get_daraja_access_token(tenant, payment_method="daraja_paybill", require_stk
     if not token:
         logger.warning("Daraja OAuth returned no access token for tenant=%s method=%s", (tenant or {}).get("id"), payment_method)
         raise PaymentProviderError("M-Pesa is temporarily unavailable. Please try again shortly.", "Daraja OAuth returned no access_token", 503)
+    try:
+        expires_in = int(response.json().get("expires_in") or 3600)
+    except (TypeError, ValueError):
+        expires_in = 3600
+    cache.set(cache_key, token, timeout=max(60, expires_in - 60))
     return token
 
 
@@ -788,7 +807,7 @@ def initiate_daraja_payment(tenant, payment_id, amount, phone, description=None,
         f"{daraja_base_url(tenant)}/mpesa/stkpush/v1/processrequest",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json=payload,
-        timeout=30,
+        timeout=_provider_timeout("DARAJA_STK_TIMEOUT_SECONDS", 15),
     )
     try:
         response.raise_for_status()
@@ -870,7 +889,7 @@ def query_daraja_stk_payment(tenant, checkout_request_id, payment_method="daraja
         f"{daraja_base_url(tenant)}/mpesa/stkpushquery/v1/query",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json=payload,
-        timeout=30,
+        timeout=_provider_timeout("DARAJA_VERIFY_TIMEOUT_SECONDS", 10),
     )
     try:
         response.raise_for_status()

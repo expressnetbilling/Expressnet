@@ -56,13 +56,10 @@ from billing_api.services import (
     tenant_paystack_platform_fee_percent,
     verify_paystack_transaction,
     paystack_signature_valid,
-    initiate_daraja_b2c,
-    initiate_daraja_b2b_settlement,
     tenant_payment_collection_config,
     query_daraja_stk_payment,
     tenant_payout_details,
     daraja_b2b_settlement_status,
-    tenant_settlement_daraja_config,
     make_daraja_callback_token,
     verify_daraja_callback_token,
     make_payment_access_token,
@@ -1099,20 +1096,9 @@ def public_verify(request, tenant_id):
         ).exclude(radius_secret="").exists()
     access_status = str(payment.get("access_status") or "").lower()
     activation_needs_retry = access_status in {"", "pending", "activation_pending", "activation_failed"}
-    if payment.get("status") == "success" and (not payment.get("access_username") or not radius_customer_ready or activation_needs_retry):
-        tenant = {"id": tenant_id, **(ref(f"tenants/{tenant_id}").get() or {})}
-        try:
-            activate_paid_access(
-                tenant,
-                payment_id,
-                payment,
-                payment.get("phone"),
-                payment.get("payment_code") or payment.get("daraja_receipt_number") or payment.get("daraja_checkout_request_id") or payment_id,
-            )
-            payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get() or payment
-        except Exception:
-            logger.exception("Paid payment activation retry failed tenant=%s payment=%s", tenant_id, payment_id)
-            return ok({"success": False, "status": "activation_failed", "message": "Payment confirmed, but internet activation is still pending. Please wait a moment."}, 202)
+    if payment.get("status") == "success" and access_status != "activation_processing" and (not payment.get("access_username") or not radius_customer_ready or activation_needs_retry):
+        _queue_paid_access_activation(tenant_id, payment_id, "customer verification")
+        payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get() or payment
     payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get() or payment
     access_status = str(payment.get("access_status") or "").lower()
     if payment.get("status") == "success" and access_status not in {"active", "radius_ready"}:
@@ -1192,12 +1178,7 @@ def complete_paystack_payment(tenant_id, payment_id, transaction):
         payment = payment_ref.get() or payment
         payment = {**payment, "status": "success", "payment_code": code, "paid_at": paid_at, "paystack_transaction_id": str(transaction.get("id") or ""), "paystack_paid_at": paid_at, "paystack_channel": transaction.get("channel") or "", **payout_fields}
         _upsert_sql_paystack_payment(tenant_id, payment_id, payment)
-        tenant = {"id": tenant_id, **(ref(f"tenants/{tenant_id}").get() or {})}
-        try:
-            activate_paid_access(tenant, payment_id, payment, payment.get("phone"), code)
-        except Exception:
-            logger.exception("Paystack payment is confirmed but access activation failed tenant=%s payment=%s", tenant_id, payment_id)
-            payment_ref.update({"access_status": "activation_pending", "activation_error": "Retry activation from payment verification"})
+        _queue_paid_access_activation(tenant_id, payment_id, "Paystack confirmation")
     else:
         _upsert_sql_paystack_payment(tenant_id, payment_id, payment)
     return True
@@ -4088,6 +4069,31 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
     return access
 
 
+def _queue_paid_access_activation(tenant_id, payment_id, reason="payment confirmation"):
+    """Queue the slow router/RADIUS work without delaying a payment callback."""
+    from billing_api.tasks import activate_paid_payment
+
+    now = iso_now()
+    ref(f"tenants/{tenant_id}/payments/{payment_id}").update({
+        "access_status": "activation_pending",
+        "access_error": "",
+        "activation_queued_at": now,
+        "activation_queue_reason": reason,
+    })
+    try:
+        activate_paid_payment.delay(str(tenant_id), str(payment_id))
+        return True
+    except Exception:
+        # Keep the durable pending state.  A later verification request or the
+        # reconciliation task can enqueue it once the broker is available.
+        logger.exception("Could not enqueue paid access activation tenant=%s payment=%s", tenant_id, payment_id)
+        ref(f"tenants/{tenant_id}/payments/{payment_id}").update({
+            "access_error": "Activation is queued and will retry when the worker is available.",
+            "activation_enqueue_failed_at": now,
+        })
+        return False
+
+
 def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, receipt, paid_at, phone):
     payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get()
     if not payment:
@@ -4095,9 +4101,8 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         return False
     if payment.get("status") == "success":
         access_status = str(payment.get("access_status") or "").lower()
-        if not payment.get("access_username") or access_status in {"", "pending", "activation_pending", "activation_failed"}:
-            tenant_data = ref(f"tenants/{tenant_id}").get() or {}
-            activate_paid_access({"id": tenant_id, **tenant_data}, payment_id, {**payment, **callback_metadata}, phone or payment.get("phone"), receipt or payment.get("payment_code") or payment_id)
+        if access_status != "activation_processing" and (not payment.get("access_username") or access_status in {"", "pending", "activation_pending", "activation_failed"}):
+            _queue_paid_access_activation(tenant_id, payment_id, "duplicate Daraja callback")
         return True
 
     expected_amount = round(float(payment.get("amount") or 0), 2)
@@ -4169,12 +4174,10 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         "tenant_settlement_queued_at": iso_now() if platform_collected else "",
     })
     ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
-    try:
-        activate_paid_access({"id": tenant_id, **tenant_data}, payment_id, {**payment, **callback_metadata, **update}, phone or payment.get("phone"), receipt)
-    except Exception as exc:
-        logger.exception("Daraja payment activation failed tenant=%s payment=%s receipt=%s", tenant_id, payment_id, receipt)
-        ref(f"tenants/{tenant_id}/payments/{payment_id}").update({"access_status": "activation_failed", "access_error": str(exc)})
-        raise
+    # Never call RouterOS, RADIUS or notification providers inline here.
+    # Safaricom retries callbacks that do not finish promptly, which used to
+    # turn an already-paid customer into a duplicate/failed activation.
+    _queue_paid_access_activation(tenant_id, payment_id, "Daraja callback")
     current_balance = float(tenant_data.get("settlement_pending_amount") or 0)
     tenant_balance_update = {
         "settlement_pending_amount": round(current_balance + tenant_net_amount, 2) if platform_collected else current_balance,
@@ -4182,86 +4185,27 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         "settlement_updated_at": iso_now(),
     }
     if platform_collected and tenant_settlement_status == "withdrawal_ready" and tenant_net_amount > 0:
-        settlement_originator_id = f"SET{secrets.token_hex(8).upper()}"
+        # Settlement may take tens of seconds.  Persist a durable job first
+        # and let a worker submit it, rather than holding the STK callback
+        # open long enough for Safaricom to retry it.
         update.update({
-            "tenant_settlement_status": "initiating",
+            "tenant_settlement_status": "queued",
             "tenant_settlement_provider": settlement_provider,
-            "tenant_settlement_originator_conversation_id": settlement_originator_id,
+            "tenant_settlement_recipient": settlement_recipient,
             "tenant_settlement_destination_type": destination_type,
         })
-        ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
-        tenant_balance_update.update({
-            "settlement_pending_amount": round(current_balance, 2),
-            "settlement_status": "initiating",
-        })
-        ref(f"tenants/{tenant_id}").update(tenant_balance_update)
-        try:
-            if settlement_provider == "daraja_b2c":
-                settlement_response = initiate_daraja_b2c(
-                    {"id": tenant_id, **tenant_data},
-                    payment_id,
-                    tenant_net_amount,
-                    settlement_recipient,
-                    remarks=f"{tenant_data.get('business_name') or tenant_id} internet payment",
-                    originator_id=settlement_originator_id,
-                )
-            else:
-                settlement_response = initiate_daraja_b2b_settlement(
-                    tenant_settlement_daraja_config({"id": tenant_id, **tenant_data}),
-                    payment_id,
-                    tenant_net_amount,
-                    destination_type,
-                    settlement_recipient,
-                    payout.get("bank_account_number"),
-                    remarks=f"{tenant_data.get('business_name') or tenant_id} settlement",
-                    originator_id=settlement_originator_id,
-                )
-            update.update({
-                "tenant_settlement_status": "requested",
-                "tenant_settlement_provider": settlement_provider,
-                "tenant_settlement_recipient": settlement_recipient,
-                "tenant_settlement_requested_at": iso_now(),
-                "tenant_settlement_conversation_id": settlement_response.get("ConversationID"),
-                "tenant_settlement_originator_conversation_id": settlement_response.get("OriginatorConversationID") or settlement_originator_id,
-                "tenant_settlement_response_code": settlement_response.get("ResponseCode"),
-                "tenant_settlement_response_description": settlement_response.get("ResponseDescription"),
-            })
-            tenant_balance_update.update({
-                "settlement_pending_amount": max(0, round(current_balance, 2)),
-                "settlement_last_requested_amount": tenant_net_amount,
-                "settlement_last_requested_at": update["tenant_settlement_requested_at"],
-                "settlement_status": "requested",
-            })
-        except PaymentProviderError as exc:
-            update.update({
-                "tenant_settlement_status": "request_failed",
-                "tenant_settlement_error": exc.detail,
-                "tenant_settlement_failed_at": iso_now(),
-            })
-            tenant_balance_update["settlement_status"] = "request_failed"
-        except Exception as exc:
-            update.update({
-                "tenant_settlement_status": "request_failed",
-                "tenant_settlement_error": str(exc),
-                "tenant_settlement_failed_at": iso_now(),
-            })
-            tenant_balance_update["settlement_status"] = "request_failed"
+        tenant_balance_update["settlement_status"] = "queued"
     ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
-    latest_payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get() or {}
-    if latest_payment.get("tenant_settlement_result_at"):
-        for key in (
-            "tenant_settlement_status",
-            "tenant_settlement_result_code",
-            "tenant_settlement_result_desc",
-            "tenant_settlement_result_at",
-            "tenant_settlement_result",
-        ):
-            if key in latest_payment:
-                update[key] = latest_payment[key]
-        tenant_balance_update.pop("settlement_pending_amount", None)
-        tenant_balance_update["settlement_status"] = latest_payment.get("tenant_settlement_status") or "requested"
-        ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
     ref(f"tenants/{tenant_id}").update(tenant_balance_update)
+    if update.get("tenant_settlement_status") == "queued":
+        try:
+            from billing_api.tasks import request_tenant_settlement
+
+            request_tenant_settlement.delay(str(tenant_id), str(payment_id))
+        except Exception:
+            # The queued database state is deliberately retained for the
+            # periodic dispatcher/reconciliation path.
+            logger.exception("Could not enqueue tenant settlement tenant=%s payment=%s", tenant_id, payment_id)
     logger.info("Daraja payment completed tenant=%s payment=%s receipt=%s phone=%s amount=%s", tenant_id, payment_id, receipt, phone or payment.get("phone"), paid_amount)
     return True
 
@@ -4369,53 +4313,90 @@ def daraja_callback(request, tenant_id, payment_id, token):
     return ok({"success": True})
 
 
+def _find_settlement_payment(provider, occasion="", originator_id="", conversation_id=""):
+    """Find one settlement from callback identifiers without scanning ledgers."""
+    base = Payment.objects.filter(tenant_settlement_provider=provider)
+    if occasion and str(occasion).isdigit():
+        payment = base.filter(pk=str(occasion)).first()
+        if payment:
+            return payment
+    callback_ids = Q()
+    if originator_id:
+        callback_ids |= Q(tenant_settlement_originator_conversation_id=str(originator_id))
+    if conversation_id:
+        callback_ids |= Q(tenant_settlement_conversation_id=str(conversation_id))
+    if callback_ids:
+        payment = base.filter(callback_ids).first()
+        if payment:
+            return payment
+        # Temporary compatibility for settlement requests created before the
+        # indexed fields were introduced.  New requests never take this path.
+        legacy_ids = Q()
+        if originator_id:
+            legacy_ids |= Q(extra__tenant_settlement_originator_conversation_id=str(originator_id))
+        if conversation_id:
+            legacy_ids |= Q(extra__tenant_settlement_conversation_id=str(conversation_id))
+        return Payment.objects.filter(extra__tenant_settlement_provider=provider).filter(legacy_ids).first()
+    return None
+
+
+def _apply_settlement_result(payment_record, result, callback_status):
+    # Provider callbacks can be duplicated or arrive concurrently. Lock both
+    # records so a successful payout is subtracted from the pending balance
+    # exactly once.
+    with transaction.atomic():
+        payment = Payment.objects.select_for_update().get(pk=payment_record.pk)
+        payment_data = payment.as_dict()
+        if payment_data.get("tenant_settlement_result_at"):
+            return True
+        result_code = result.get("ResultCode")
+        result_desc = result.get("ResultDesc") or ""
+        settlement_status = "timeout" if callback_status == "timeout" else "paid" if str(result_code) == "0" else "failed"
+        now = iso_now()
+        update = {
+            "tenant_settlement_status": settlement_status,
+            "tenant_settlement_result_code": result_code,
+            "tenant_settlement_result_desc": result_desc,
+            "tenant_settlement_result": result,
+        }
+        receipt = result.get("TransactionID")
+        if receipt:
+            update["tenant_settlement_receipt"] = receipt
+        if callback_status == "timeout":
+            update["tenant_settlement_timeout_at"] = now
+        else:
+            update["tenant_settlement_result_at"] = now
+        payment.apply_data(update)
+        payment.save()
+
+        tenant = Tenant.objects.select_for_update().get(pk=payment.tenant_id)
+        tenant_data = tenant.as_dict()
+        pending_balance = float(tenant_data.get("settlement_pending_amount") or 0)
+        amount = float(payment_data.get("tenant_net_amount") or 0)
+        tenant_update = {
+            "settlement_status": settlement_status,
+            "settlement_last_result_at": now,
+            "settlement_last_result_desc": result_desc or (
+                "Settlement timed out; reconcile before retrying." if callback_status == "timeout" else ""
+            ),
+        }
+        # The pending balance is increased when the customer payment succeeds.
+        # Only a confirmed settlement removes it.  Previous code added the
+        # amount again on a failure, making failed payouts appear twice.
+        if settlement_status == "paid":
+            tenant_update["settlement_pending_amount"] = max(0, round(pending_balance - amount, 2))
+        tenant.apply_data(tenant_update)
+        tenant.save()
+    return True
+
+
 def update_b2c_settlement(event, status):
     result = (event or {}).get("Result") or {}
     originator_id = result.get("OriginatorConversationID") or ""
     conversation_id = result.get("ConversationID") or ""
     occasion = result.get("Occasion") or ""
-    result_code = result.get("ResultCode")
-    result_desc = result.get("ResultDesc") or ""
-    for tenant in list_children("tenants"):
-        tenant_id = tenant.get("id")
-        for payment in list_children(f"tenants/{tenant_id}/payments"):
-            if payment.get("tenant_settlement_provider") != "daraja_b2c":
-                continue
-            matches_payment = occasion and str(payment.get("id")) == str(occasion)
-            matches_originator = originator_id and payment.get("tenant_settlement_originator_conversation_id") == originator_id
-            matches_conversation = conversation_id and payment.get("tenant_settlement_conversation_id") == conversation_id
-            if not (matches_payment or matches_originator or matches_conversation):
-                continue
-            payment_id = payment.get("id")
-            if payment.get("tenant_settlement_result_at"):
-                return True
-            settlement_status = "timeout" if status == "timeout" else "paid" if str(result_code) == "0" else "failed"
-            now = iso_now()
-            update = {
-                "tenant_settlement_status": settlement_status,
-                "tenant_settlement_result_code": result_code,
-                "tenant_settlement_result_desc": result_desc,
-                "tenant_settlement_result": result,
-            }
-            if status == "timeout":
-                update["tenant_settlement_timeout_at"] = now
-            else:
-                update["tenant_settlement_result_at"] = now
-            ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
-            tenant_update = {
-                "settlement_status": settlement_status,
-                "settlement_last_result_at": now,
-                "settlement_last_result_desc": result_desc,
-            }
-            if settlement_status == "failed":
-                tenant_data = ref(f"tenants/{tenant_id}").get() or {}
-                tenant_update["settlement_pending_amount"] = round(
-                    float(tenant_data.get("settlement_pending_amount") or 0) + float(payment.get("tenant_net_amount") or 0),
-                    2,
-                )
-            ref(f"tenants/{tenant_id}").update(tenant_update)
-            return True
-    return False
+    payment = _find_settlement_payment("daraja_b2c", occasion, originator_id, conversation_id)
+    return _apply_settlement_result(payment, result, status) if payment else False
 
 
 @csrf_exempt
@@ -4440,51 +4421,8 @@ def update_b2b_bank_settlement(event, callback_status):
     result = (event or {}).get("Result") or {}
     originator_id = result.get("OriginatorConversationID") or (event or {}).get("OriginatorConversationID") or ""
     conversation_id = result.get("ConversationID") or (event or {}).get("ConversationID") or ""
-    result_code = result.get("ResultCode")
-    result_desc = result.get("ResultDesc") or ""
-    for tenant in list_children("tenants"):
-        tenant_id = tenant.get("id")
-        for payment in list_children(f"tenants/{tenant_id}/payments"):
-            if payment.get("tenant_settlement_provider") != "daraja_b2b":
-                continue
-            matches_originator = originator_id and payment.get("tenant_settlement_originator_conversation_id") == originator_id
-            matches_conversation = conversation_id and payment.get("tenant_settlement_conversation_id") == conversation_id
-            if not (matches_originator or matches_conversation):
-                continue
-            payment_id = payment.get("id")
-            if payment.get("tenant_settlement_result_at"):
-                return True
-            if callback_status == "timeout":
-                settlement_status = "timeout"
-            else:
-                settlement_status = "paid" if str(result_code) == "0" else "failed"
-            now = iso_now()
-            update = {
-                "tenant_settlement_status": settlement_status,
-                "tenant_settlement_result_code": result_code,
-                "tenant_settlement_result_desc": result_desc,
-                "tenant_settlement_result": result,
-            }
-            receipt = result.get("TransactionID")
-            if receipt:
-                update["tenant_settlement_receipt"] = receipt
-            if callback_status == "timeout":
-                update["tenant_settlement_timeout_at"] = now
-            else:
-                update["tenant_settlement_result_at"] = now
-            ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
-            tenant_update = {
-                "settlement_status": settlement_status,
-                "settlement_last_result_at": now,
-                "settlement_last_result_desc": result_desc or ("B2B bank transfer timed out; reconcile before retrying." if callback_status == "timeout" else ""),
-            }
-            if settlement_status == "failed":
-                tenant_data = ref(f"tenants/{tenant_id}").get() or {}
-                current_balance = float(tenant_data.get("settlement_pending_amount") or 0)
-                tenant_update["settlement_pending_amount"] = round(current_balance + float(payment.get("tenant_net_amount") or 0), 2)
-            ref(f"tenants/{tenant_id}").update(tenant_update)
-            return True
-    return False
+    payment = _find_settlement_payment("daraja_b2b", "", originator_id, conversation_id)
+    return _apply_settlement_result(payment, result, callback_status) if payment else False
 
 
 @csrf_exempt

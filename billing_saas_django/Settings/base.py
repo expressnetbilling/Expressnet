@@ -224,4 +224,8 @@ CELERY_BEAT_SCHEDULE = {
         "task": "billing_api.tasks.notify_router_offline",
         "schedule": 300.0,
     },
+    "reconcile-pending-payment-work-every-minute": {
+        "task": "billing_api.tasks.reconcile_pending_payment_work",
+        "schedule": 60.0,
+    },
 }

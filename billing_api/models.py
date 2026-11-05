@@ -258,8 +258,8 @@ class Payment(ExtraFieldsModel):
     paid_at = models.CharField(max_length=80, blank=True, null=True)
     initiated_at = models.CharField(max_length=80, blank=True, default="")
     merchant_request_id = models.CharField(max_length=255, blank=True, null=True)
-    checkout_request_id = models.CharField(max_length=255, blank=True, null=True)
-    paystack_reference = models.CharField(max_length=255, blank=True, null=True)
+    checkout_request_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    paystack_reference = models.CharField(max_length=255, blank=True, null=True, db_index=True)
     paystack_access_code = models.CharField(max_length=255, blank=True, null=True)
     paystack_authorization_url = models.TextField(blank=True, null=True)
     paystack_transaction_id = models.CharField(max_length=120, blank=True, null=True)
@@ -275,6 +275,12 @@ class Payment(ExtraFieldsModel):
     access_status = models.CharField(max_length=80, blank=True, null=True)
     callback_result_code = models.CharField(max_length=80, blank=True, null=True)
     callback_result_desc = models.TextField(blank=True, null=True)
+    # These values were previously stored only in ``extra``.  They are used
+    # to correlate provider callbacks, so keeping them indexed avoids a full
+    # tenant/payment ledger scan for every B2C/B2B result.
+    tenant_settlement_provider = models.CharField(max_length=32, blank=True, null=True, db_index=True)
+    tenant_settlement_originator_conversation_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    tenant_settlement_conversation_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
 
     class Meta:
         indexes = [

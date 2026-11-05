@@ -5,7 +5,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from .models import Customer, Tenant, TenantSubscription
+from .models import Customer, Payment, Tenant, TenantSubscription
 from .services import iso_now, list_children, normalize_phone, ref, send_sms_message, send_whatsapp_message, set_customer_enabled, upsert_customer_access, write_audit_log
 
 logger = logging.getLogger(__name__)
@@ -13,6 +13,193 @@ logger = logging.getLogger(__name__)
 """
 
 """
+
+
+@shared_task(bind=True, max_retries=5, default_retry_delay=15)
+def activate_paid_payment(self, tenant_id, payment_id):
+    """Provision access after a provider has confirmed a payment.
+
+    Provider callbacks must be acknowledged quickly.  RouterOS, RADIUS and
+    notification calls can be slow or temporarily unavailable, so doing them
+    in the callback process caused successful payments to time out and be
+    retried by the provider.  This task is intentionally idempotent: the
+    payment record remains the source of truth and ``activate_paid_access``
+    can safely be run again after a transient failure.
+    """
+    from management.api.v1.views import activate_paid_access
+
+    with transaction.atomic():
+        record = Payment.objects.select_for_update().filter(tenant_id=tenant_id, pk=payment_id).first()
+        if not record:
+            return {"status": "missing_record"}
+        payment = record.as_dict()
+        if payment.get("status") != "success":
+            return {"status": "not_ready"}
+        access_status = str(payment.get("access_status") or "").lower()
+        if access_status in {"active", "radius_ready"}:
+            return {"status": access_status}
+        started_at = parse_datetime(str(payment.get("activation_started_at") or ""))
+        if started_at and timezone.is_naive(started_at):
+            started_at = timezone.make_aware(started_at, timezone.get_current_timezone())
+        if access_status == "activation_processing" and started_at and started_at > timezone.now() - timezone.timedelta(minutes=2):
+            return {"status": "already_processing"}
+        record.apply_data({
+            "access_status": "activation_processing",
+            "access_error": "",
+            "activation_started_at": iso_now(),
+        })
+        record.save()
+        payment = record.as_dict()
+
+    tenant = ref(f"tenants/{tenant_id}").get() or {}
+    try:
+        access = activate_paid_access(
+            {"id": str(tenant_id), **tenant},
+            str(payment_id),
+            payment,
+            payment.get("phone"),
+            payment.get("payment_code") or payment.get("daraja_receipt_number") or payment_id,
+        )
+        return {"status": "activated", "access": access}
+    except Exception as exc:
+        logger.exception("Paid access activation failed tenant=%s payment=%s", tenant_id, payment_id)
+        ref(f"tenants/{tenant_id}/payments/{payment_id}").update({
+            "access_status": "activation_pending",
+            "access_error": str(exc)[:500],
+            "activation_last_failed_at": iso_now(),
+        })
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc)
+        raise
+
+
+@shared_task
+def request_tenant_settlement(tenant_id, payment_id):
+    """Request one queued B2C/B2B settlement outside the payment callback.
+
+    A queued record is claimed before calling Daraja so duplicate callbacks or
+    workers cannot submit the same settlement twice.  Ambiguous provider
+    failures are left for reconciliation instead of being blindly retried.
+    """
+    from management.services.billing import (
+        initiate_daraja_b2b_settlement,
+        initiate_daraja_b2c,
+        tenant_settlement_daraja_config,
+    )
+    import secrets
+
+    payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get()
+    if not payment or payment.get("status") != "success":
+        return {"status": "not_ready"}
+    if str(payment.get("tenant_settlement_status") or "") != "queued":
+        return {"status": payment.get("tenant_settlement_status") or "not_queued"}
+
+    provider = str(payment.get("tenant_settlement_provider") or "")
+    destination_type = str(payment.get("tenant_settlement_destination_type") or "")
+    payout = payment.get("tenant_payout") or {}
+    recipient = (
+        payout.get("payout_phone") if provider == "daraja_b2c"
+        else payout.get("daraja_settlement_till_number") if destination_type == "till"
+        else payout.get("bank_daraja_shortcode")
+    )
+    amount = float(payment.get("tenant_net_amount") or 0)
+    if provider not in {"daraja_b2c", "daraja_b2b"} or not recipient or amount <= 0:
+        ref(f"tenants/{tenant_id}/payments/{payment_id}").update({
+            "tenant_settlement_status": "request_failed",
+            "tenant_settlement_error": "Settlement destination or amount is invalid.",
+            "tenant_settlement_failed_at": iso_now(),
+        })
+        return {"status": "invalid"}
+
+    originator_id = str(payment.get("tenant_settlement_originator_conversation_id") or f"SET{secrets.token_hex(8).upper()}")[:20]
+    claimed_at = iso_now()
+    # ``ref`` is backed by the SQL ledger, but use an explicit row lock to
+    # make the queued -> initiating transition atomic across workers.
+    try:
+        with transaction.atomic():
+            record = Payment.objects.select_for_update().filter(tenant_id=tenant_id, pk=payment_id).first()
+            if record:
+                current = record.as_dict()
+                if str(current.get("tenant_settlement_status") or "") != "queued":
+                    return {"status": current.get("tenant_settlement_status") or "not_queued"}
+                record.apply_data({
+                    "tenant_settlement_status": "initiating",
+                    "tenant_settlement_provider": provider,
+                    "tenant_settlement_originator_conversation_id": originator_id,
+                    "tenant_settlement_started_at": claimed_at,
+                })
+                record.save()
+    except Exception:
+        logger.exception("Could not claim tenant settlement tenant=%s payment=%s", tenant_id, payment_id)
+        raise
+    ref(f"tenants/{tenant_id}/payments/{payment_id}").update({
+        "tenant_settlement_status": "initiating",
+        "tenant_settlement_provider": provider,
+        "tenant_settlement_originator_conversation_id": originator_id,
+        "tenant_settlement_started_at": claimed_at,
+    })
+
+    tenant = ref(f"tenants/{tenant_id}").get() or {}
+    try:
+        if provider == "daraja_b2c":
+            response = initiate_daraja_b2c(
+                {"id": str(tenant_id), **tenant}, payment_id, amount, recipient,
+                remarks=f"{tenant.get('business_name') or tenant_id} internet payment",
+                originator_id=originator_id,
+            )
+        else:
+            response = initiate_daraja_b2b_settlement(
+                tenant_settlement_daraja_config({"id": str(tenant_id), **tenant}),
+                payment_id, amount, destination_type, recipient,
+                payout.get("bank_account_number"),
+                remarks=f"{tenant.get('business_name') or tenant_id} settlement",
+                originator_id=originator_id,
+            )
+        update = {
+            "tenant_settlement_status": "requested",
+            "tenant_settlement_requested_at": iso_now(),
+            "tenant_settlement_recipient": recipient,
+            "tenant_settlement_conversation_id": response.get("ConversationID"),
+            "tenant_settlement_originator_conversation_id": response.get("OriginatorConversationID") or originator_id,
+            "tenant_settlement_response_code": response.get("ResponseCode"),
+            "tenant_settlement_response_description": response.get("ResponseDescription"),
+        }
+        ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
+        ref(f"tenants/{tenant_id}").update({
+            "settlement_status": "requested",
+            "settlement_last_requested_amount": amount,
+            "settlement_last_requested_at": update["tenant_settlement_requested_at"],
+        })
+        return {"status": "requested", "conversation_id": update["tenant_settlement_conversation_id"]}
+    except Exception as exc:
+        logger.exception("Tenant settlement request failed tenant=%s payment=%s", tenant_id, payment_id)
+        ref(f"tenants/{tenant_id}/payments/{payment_id}").update({
+            "tenant_settlement_status": "request_failed",
+            "tenant_settlement_error": str(getattr(exc, "detail", exc))[:500],
+            "tenant_settlement_failed_at": iso_now(),
+        })
+        ref(f"tenants/{tenant_id}").update({"settlement_status": "request_failed"})
+        return {"status": "request_failed"}
+
+
+@shared_task
+def reconcile_pending_payment_work(batch_size=100):
+    """Recover work that was accepted while a worker/broker was unavailable."""
+    activation_ids = list(
+        Payment.objects.filter(status="success", access_status__in=["activation_pending", "activation_failed", "activation_processing"])
+        .values_list("tenant_id", "pk")[:batch_size]
+    )
+    settlement_ids = list(
+        Payment.objects.filter(status="success", extra__tenant_settlement_status="queued")
+        .values_list("tenant_id", "pk")[:batch_size]
+    )
+    for tenant_id, payment_id in activation_ids:
+        activate_paid_payment.delay(str(tenant_id), str(payment_id))
+    for tenant_id, payment_id in settlement_ids:
+        request_tenant_settlement.delay(str(tenant_id), str(payment_id))
+    return {"activation": len(activation_ids), "settlement": len(settlement_ids)}
+
+
 @shared_task
 def expire_tenant_subscriptions():
     now = timezone.now()
