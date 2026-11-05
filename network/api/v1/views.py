@@ -4202,7 +4202,7 @@ def router_provision_script(request, token):
 
     provisioning_callback_script = f""":local billingWgPub "";
         :do {{ :set billingWgPub [/interface wireguard get [find name={wireguard_name}] public-key] }} on-error={{}}
-        :do {{ /tool fetch keep-result=no url=("{callback_url}{callback_join}radius=" . $billingRadiusFlag . "&wg_public_key=" . $billingWgPub . "&wg_tunnel_ip={_rsc_escape(wg_router_api_ip)}&bridge={_rsc_escape(bridge_name)}&mode={'wireguard' if vpn_interface_enabled else 'agent'}") }} on-error={{ :log warning "Billing SaaS provisioning callback failed" }}"""
+        :do {{ /tool fetch check-certificate=no keep-result=no url=("{callback_url}{callback_join}radius=" . $billingRadiusFlag . "&wg_public_key=" . $billingWgPub . "&wg_tunnel_ip={_rsc_escape(wg_router_api_ip)}&bridge={_rsc_escape(bridge_name)}&mode={'wireguard' if vpn_interface_enabled else 'agent'}") }} on-error={{ :log warning "Billing SaaS provisioning callback failed" }}"""
     vpn_health_script = f"""
         :log info "Billing SaaS Step 5: verifying VPN connectivity";
         :local billingVpnPing 0;
@@ -4468,7 +4468,7 @@ def router_provision_script(request, token):
         {wireless_provision_script}
         {provisioning_callback_script}
         :do {{ /system scheduler remove [find name="billing-saas-agent"] }} on-error={{}}
-        /system scheduler add name="billing-saas-agent" interval=30s on-event=":do {{ /file remove [find name=\\"billing-saas-cmd.rsc\\"] }} on-error={{}}; :do {{ /tool fetch url=\\"{agent_poll_url}\\" dst-path=billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command fetch failed\\" }}; :if ([:len [/file find name=\\"billing-saas-cmd.rsc\\"]] > 0) do={{ :do {{ /import billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command import failed\\" }} }};"
+        /system scheduler add name="billing-saas-agent" interval=30s on-event=":do {{ /file remove [find name=\\"billing-saas-cmd.rsc\\"] }} on-error={{}}; :do {{ /tool fetch check-certificate=no url=\\"{agent_poll_url}\\" dst-path=billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command fetch failed\\" }}; :if ([:len [/file find name=\\"billing-saas-cmd.rsc\\"]] > 0) do={{ :do {{ /import billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command import failed\\" }} }};"
         :log info "Billing SaaS provisioning complete. No customer ports were moved; assign Hotspot or PPPoE ports from the dashboard.";
         :put "Configuration completed successfully. No customer ports were moved; assign Hotspot or PPPoE ports from the dashboard.";
         """
@@ -4533,6 +4533,7 @@ def router_agent_poll(request, token):
     if not commands:
         return HttpResponse(':log info "Billing SaaS agent: no pending commands";\n', content_type="text/plain")
 
+    logger.info("MikroTik agent poll tenant=%s delivering=%s", tenant_id, len(commands))
     lines = [':log info "Billing SaaS agent: applying queued commands";']
     delivered_at = iso_now()
     delivered_ids = {command.get("id") for command in commands if command.get("id")}
@@ -4575,7 +4576,7 @@ def router_agent_poll(request, token):
             f':local billingCommandOk true; '
             f':do {{ {script} }} on-error={{ :set billingCommandOk false; :log warning "Billing SaaS agent: command {command_id} failed" }}; '
             f':if ($billingCommandOk) do={{ '
-            f':do {{ /tool fetch keep-result=no url="{base_url}/api/router/agent/{token}/ack/{command_id}" }} on-error={{ :log warning "Billing SaaS agent: command {command_id} acknowledgement failed" }}; '
+            f':do {{ /tool fetch check-certificate=no keep-result=no url="{base_url}/api/router/agent/{token}/ack/{command_id}" }} on-error={{ :log warning "Billing SaaS agent: command {command_id} acknowledgement failed" }}; '
             f':do {{ {post_script} }} on-error={{ :log warning "Billing SaaS agent: command {command_id} post-check failed" }}; '
             f'}} '
             f'}}'
@@ -4635,6 +4636,7 @@ def router_agent_ack(request, token, command_id):
             break
 
     if updated:
+        logger.info("MikroTik agent acknowledged command tenant=%s command=%s type=%s", tenant_id, command_id, (applied_command or {}).get("type"))
         ref(f"tenants/{tenant_id}").update({
             "pending_router_commands": commands,
             "mikrotik_last_seen_at": iso_now(),
