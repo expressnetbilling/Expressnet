@@ -2805,34 +2805,19 @@ def _repair_legacy_router_port_script(script):
 def _build_agent_port_assignment_script(interface_names, bridge_name, service_type="", tenant=None, portal_url=""):
     """Return an idempotent agent script for a customer port assignment.
 
-    Bridge membership is the only required operation. Hotspot and Wi-Fi repair
-    are best-effort so an unsupported Wi-Fi menu or a profile variation cannot
-    keep an already-attached port pending. The repair makes an assigned WLAN
-    open for Hotspot authentication and keeps the existing Hotspot server on
-    the managed bridge without changing RADIUS settings.
+    This is imported by RouterOS as a single command. It must therefore remain
+    deliberately parser-conservative: bridge membership is required and WLAN
+    cleanup is best-effort; portal/profile repair is handled separately by the
+    normal provisioning command. A port command must never contain nested
+    ``on-error`` blocks because RouterOS 7.12 rejects that whole import.
     """
     bridge = _rsc_escape(bridge_name or "Expressnet-bridge")
-    # Create the bridge before the best-effort Hotspot repair below. A router
-    # recovered from a partial provisioning run may not have it yet.
     lines = [
         f':local billingBridge "{bridge}";',
         ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};',
     ]
     hotspot_requested = str(service_type or "").lower() in {"hotspot", "both"}
     tenant = tenant or {}
-    if hotspot_requested:
-        try:
-            lan_gateway = _router_lan_config(tenant).get("lan_gateway") or "192.168.88.1"
-        except ValueError:
-            lan_gateway = "192.168.88.1"
-        portal = _rsc_escape(portal_url or "")
-        lines.extend((
-            ':do { /ip dns set allow-remote-requests=yes } on-error={ :log warning "Billing SaaS: could not enable DNS for captive clients" };',
-            f':do {{ /ip hotspot profile add name="Expressnet-profile" hotspot-address={_rsc_escape(lan_gateway)} dns-name="hot.spot" login-by=cookie,http-pap,trial,mac-cookie html-directory="Expressnet-hotspot" comment="Expressnet captive portal: {portal}" }} on-error={{ :do {{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address={_rsc_escape(lan_gateway)} dns-name="hot.spot" login-by=cookie,http-pap,trial,mac-cookie html-directory="Expressnet-hotspot" comment="Expressnet captive portal: {portal}" }} on-error={{ :log warning "Billing SaaS: captive profile repair failed" }} }};',
-            ':local billingHotspot [/ip hotspot find interface=$billingBridge];',
-            ':if ([:len $billingHotspot] = 0) do={ :set billingHotspot [/ip hotspot find name="Expressnet-hotspot"] };',
-            ':if ([:len $billingHotspot] > 0) do={ :do { /ip hotspot set $billingHotspot name="Expressnet-hotspot" interface=$billingBridge address-pool="Expressnet-pool" profile="Expressnet-profile" disabled=no } on-error={ :log warning "Billing SaaS: hotspot server repair failed" } } else={ :do { /ip hotspot add name="Expressnet-hotspot" interface=$billingBridge address-pool="Expressnet-pool" profile="Expressnet-profile" disabled=no } on-error={ :log warning "Billing SaaS: hotspot server create failed" } };',
-        ))
     names = dict.fromkeys(
         str(value or "").strip()
         for value in (interface_names or [])
@@ -2851,7 +2836,8 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
             # Reconnect only the assigned WLAN's clients. They rejoin without
             # a WPA dynamic key and are then captured by the Hotspot portal.
             lines.extend((
-                f':do {{ /interface wireless security-profiles add name="billing-saas-open" mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{ :do {{ /interface wireless security-profiles set [find name="billing-saas-open"] mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{ :log warning "Billing SaaS: wireless security profile repair failed" }} }};',
+                f':do {{ /interface wireless security-profiles add name="billing-saas-open" mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{}};',
+                f':do {{ /interface wireless security-profiles set [find name="billing-saas-open"] mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{}};',
                 f':do {{ /interface wireless set [find name=$billingPort] ssid="{ssid}" security-profile="billing-saas-open" disabled=no }} on-error={{}};',
                 f':do {{ /interface wifi set [find name=$billingPort] configuration.ssid="{ssid}" security.authentication-types="" security.passphrase="" disabled=no }} on-error={{}};',
                 ':do { /interface wireless registration-table remove [find interface=$billingPort] } on-error={};',
@@ -4735,19 +4721,13 @@ def router_agent_poll(request, token):
                 f':do {{ /tool fetch keep-result=no url=("{snapshot_base}/hotspot-files-check?count=" . $billingHsFileCount) }} on-error={{}}; '
             )
         elif command.get("type") == "configure_ports":
-            snapshot_base = f"{base_url}/api/router/provision/{token}/snapshot"
-            post_script = _router_snapshot_fetch_script(snapshot_base) + (
-                f':local billingHsFileCount [:len [/file find name~"hotspot"]]; '
-                f':do {{ /tool fetch keep-result=no url=("{snapshot_base}/hotspot-files-check?count=" . $billingHsFileCount) }} on-error={{}}; '
-            )
-            if str(command.get("service_type") or "").lower() in {"hotspot", "both"}:
-                # Fetching portal HTML can be slow on an unreliable WAN. Run
-                # it only after acknowledgement so it can never hold bridge
-                # assignment in Pending confirmation.
-                post_script += routeros_hotspot_fetch_script(
-                    command.get("portal_url") or captive_portal_url({"id": tenant_id, **tenant}, base_url),
-                    "Billing SaaS agent",
-                )
+            # Do not append snapshot collection or hotspot-file downloads to
+            # a port assignment. They create deeply nested error handlers in
+            # the one-line .rsc import and RouterOS 7.12 rejects the whole
+            # command before the bridge operation can run. The command ACK is
+            # the authoritative confirmation; normal polling/provisioning
+            # continues to refresh inventory and captive files separately.
+            post_script = ':log info "Billing SaaS agent: port assignment acknowledged";'
         elif command.get("type") == "pull_configuration":
             snapshot_base = f"{base_url}/api/router/provision/{token}/snapshot"
             post_script = _router_snapshot_fetch_script(snapshot_base) + (
