@@ -124,10 +124,19 @@ class Tenant(ExtraFieldsModel):
     mikrotik_host = models.CharField(max_length=255, blank=True, default="")
     mikrotik_user = models.CharField(max_length=255, blank=True, default="")
     mikrotik_pass = models.CharField(max_length=255, blank=True, default="")
+    # Kept for compatibility with databases created by earlier releases that
+    # required this column.  Router credentials continue to use
+    # ``mikrotik_pass``; this field must never make tenant registration fail.
+    mikrotik_pass_encrypted = models.TextField(blank=True, default="")
     mikrotik_port = models.IntegerField(default=8728)
     # Prefer the direct RouterOS binary API when credentials are configured;
     # the agent remains the automatic fallback for unreachable routers.
     mikrotik_api_mode = models.CharField(max_length=20, blank=True, default="auto")
+    # These two columns were introduced with the former REST agent.  They are
+    # retained only to keep existing production schemas compatible with the
+    # native binary API release.
+    mikrotik_rest_port = models.IntegerField(default=443)
+    mikrotik_tls_fingerprint = models.CharField(max_length=128, blank=True, default="")
 
     provision_token_expires_at = models.DateTimeField(null=True, blank=True)
     logo_url = models.CharField(max_length=500, blank=True, default="")
