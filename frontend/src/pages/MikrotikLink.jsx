@@ -476,7 +476,10 @@ export default function MikrotikSettings() {
                 {(routerStatus.interfaces || []).map((item) => {
                   const selected = selectedPorts.includes(item.name);
                   const assignment = routerStatus.assignments?.[item.name];
-                  const assigned = assignment?.status === 'applied' && item.bridge === assignment.bridge ? assignment : null;
+                  // An applied command acknowledgement is authoritative. The
+                  // next router inventory snapshot can lag behind it, so do
+                  // not make the assigned label disappear while it catches up.
+                  const assigned = assignment?.status === 'applied' ? assignment : null;
                   const pendingAssignment = ['queued', 'delivered'].includes(assignment?.status) && !assigned;
                   const blocked = item.customer_assignable === false;
                   return (

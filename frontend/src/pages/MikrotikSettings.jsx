@@ -54,6 +54,8 @@ export default function MikrotikSettings() {
   const [search, setSearch] = useState('');
   const [openActionId, setOpenActionId] = useState('');
   const [actionPosition, setActionPosition] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState('');
+  const [deletePassword, setDeletePassword] = useState('');
   const [routerRealtimeTick, setRouterRealtimeTick] = useState(0);
   const [page, setPage] = useState(1);
   const pageSize = 10;
@@ -172,14 +174,23 @@ export default function MikrotikSettings() {
     }
   };
 
-  const deleteRouter = async (routerId) => {
-    if (!window.confirm('Delete this linked MikroTik router from the account?')) return;
+  const requestDeleteRouter = (routerId) => {
     setOpenActionId('');
+    setActionPosition(null);
+    setDeletePassword('');
+    setDeleteTarget(routerId);
+  };
+
+  const deleteRouter = async () => {
+    if (!deleteTarget || !deletePassword) return;
+    const routerId = deleteTarget;
     setWorkingId(`delete:${routerId}`);
     try {
-      const { data } = await api.delete('/router/delete');
+      const { data } = await api.delete('/router/delete', { data: { current_password: deletePassword } });
       toast.success(data.message || 'Router deleted');
       setRouterStatus(null);
+      setDeleteTarget('');
+      setDeletePassword('');
       await loadConfig();
     } catch (error) {
       toast.error(error.response?.data?.message || 'Failed to delete router');
@@ -322,7 +333,7 @@ export default function MikrotikSettings() {
                               <RefreshCw size={14} />
                               Reprovision
                             </button>
-                            <button type="button" className="flex w-full items-center gap-2 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50" onClick={() => deleteRouter(router.id)}>
+                            <button type="button" className="flex w-full items-center gap-2 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50" onClick={() => requestDeleteRouter(router.id)}>
                               <Trash2 size={14} />
                               Delete
                             </button>
@@ -339,6 +350,37 @@ export default function MikrotikSettings() {
           <Pagination page={page} pageSize={pageSize} total={filteredRows.length} label="routers" onPageChange={setPage} />
         </div>
       </section>
+      {deleteTarget && (
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-labelledby="delete-router-title">
+          <form
+            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
+            onSubmit={(event) => {
+              event.preventDefault();
+              deleteRouter();
+            }}
+          >
+            <h2 id="delete-router-title" className="text-lg font-semibold text-slate-900">Delete linked MikroTik?</h2>
+            <p className="mt-2 text-sm text-slate-600">Enter your account password to permanently remove this router link and its queued commands.</p>
+            <label className="mt-5 block text-sm font-medium text-slate-700" htmlFor="delete-router-password">Account password</label>
+            <input
+              id="delete-router-password"
+              type="password"
+              autoComplete="current-password"
+              autoFocus
+              value={deletePassword}
+              onChange={(event) => setDeletePassword(event.target.value)}
+              className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 outline-none focus:border-[var(--app-accent)] focus:ring-2 focus:ring-[var(--app-accent-muted)]"
+              required
+            />
+            <div className="mt-6 flex justify-end gap-3">
+              <button type="button" className="btn-secondary rounded-full px-4" disabled={Boolean(workingId)} onClick={() => { setDeleteTarget(''); setDeletePassword(''); }}>Cancel</button>
+              <button type="submit" className="rounded-full bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={!deletePassword || Boolean(workingId)}>
+                {workingId.startsWith('delete:') ? 'Deleting…' : 'Delete router'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

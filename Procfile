@@ -1,4 +1,4 @@
 web: python manage.py collectstatic --noinput --settings=billing_saas_django.Settings.production && python manage.py migrate --settings=billing_saas_django.Settings.production && python manage.py ensure_superuser --settings=billing_saas_django.Settings.production && daphne --bind 0.0.0.0 --port $PORT billing_saas_django.asgi:application
 worker: sh -c 'if [ -z "$REDIS_URL" ]; then echo "REDIS_URL is not set; Celery worker disabled."; tail -f /dev/null; else celery -A billing_saas_django worker -l info --concurrency=${CELERY_WORKER_CONCURRENCY:-1} --uid=nobody; fi'
-beat: sh -c 'if [ -z "$REDIS_URL" ]; then echo "REDIS_URL is not set; Celery beat disabled."; tail -f /dev/null; else celery -A billing_saas_django beat -l info; fi'
+beat: sh -c 'if [ -z "$REDIS_URL" ]; then echo "REDIS_URL is not set; Celery beat/worker disabled."; tail -f /dev/null; else celery -A billing_saas_django worker -B -l info --concurrency=${CELERY_BEAT_WORKER_CONCURRENCY:-1} --uid=nobody; fi'
 radius: python manage.py runradius --settings=billing_saas_django.Settings.production --host 0.0.0.0 --auth-port ${RADIUS_AUTH_PORT:-1812} --acct-port ${RADIUS_ACCT_PORT:-1813}

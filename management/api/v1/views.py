@@ -996,6 +996,74 @@ def public_pay(request, tenant_id):
 
 
 
+def _activate_paid_access_from_portal(tenant_id, payment_id):
+    """Activate one confirmed payment during a customer portal verification.
+
+    Celery remains responsible for normal callback activation and notifications.
+    This deliberately small fallback handles the case where the broker accepted
+    the task but a worker has not started yet.  The processing state is claimed
+    transactionally so repeated captive-portal polls cannot create duplicate
+    RouterOS users or agent commands.
+    """
+    payment_path = f"tenants/{tenant_id}/payments/{payment_id}"
+    fallback_payment = ref(payment_path).get() or {}
+    if fallback_payment.get("status") != "success":
+        return fallback_payment
+
+    with transaction.atomic():
+        record = Payment.objects.select_for_update().filter(tenant_id=tenant_id, pk=_numeric_pk(payment_id)).first()
+        payment = record.as_dict() if record else fallback_payment
+        if payment.get("status") != "success":
+            return payment
+        access_status = str(payment.get("access_status") or "").lower()
+        if access_status in {"active", "radius_ready", "queued"}:
+            return payment
+        started_at = parse_datetime(str(payment.get("activation_started_at") or ""))
+        if started_at and timezone.is_naive(started_at):
+            started_at = timezone.make_aware(started_at, timezone.get_current_timezone())
+        if access_status == "activation_processing" and started_at and started_at > timezone.now() - timedelta(minutes=2):
+            return payment
+        updates = {
+            "access_status": "activation_processing",
+            "access_error": "",
+            "activation_started_at": iso_now(),
+            "activation_source": "customer_portal",
+        }
+        if record:
+            record.apply_data(updates)
+            record.save()
+            payment = record.as_dict()
+        else:
+            ref(payment_path).update(updates)
+            payment = {**payment, **updates}
+
+    tenant = {"id": str(tenant_id), **(ref(f"tenants/{tenant_id}").get() or {})}
+    try:
+        activate_paid_access(
+            tenant,
+            str(payment_id),
+            payment,
+            payment.get("phone"),
+            payment.get("payment_code") or payment.get("daraja_receipt_number") or payment_id,
+            notify=False,
+        )
+    except Exception as exc:
+        logger.exception("Portal payment activation failed tenant=%s payment=%s", tenant_id, payment_id)
+        failure = {
+            "access_status": "activation_pending",
+            "access_error": str(exc)[:500],
+            "activation_last_failed_at": iso_now(),
+        }
+        ref(payment_path).update(failure)
+        publish_realtime_event(
+            tenant_id,
+            "payment.updated",
+            {"payment_id": str(payment_id), "status": "success", **failure},
+            payment_id=payment_id,
+        )
+    return ref(payment_path).get() or payment
+
+
 @csrf_exempt
 @api_view(["GET"])
 def public_verify(request, tenant_id):
@@ -1098,8 +1166,12 @@ def public_verify(request, tenant_id):
     access_status = str(payment.get("access_status") or "").lower()
     activation_needs_retry = access_status in {"", "pending", "activation_pending", "activation_failed"}
     if payment.get("status") == "success" and access_status != "activation_processing" and (not payment.get("access_username") or not radius_customer_ready or activation_needs_retry):
-        _queue_paid_access_activation(tenant_id, payment_id, "customer verification")
-        payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get() or payment
+        # The portal is an active customer request, not a provider callback.
+        # Start one bounded activation now so a valid payment is never held
+        # hostage by an absent or restarting Celery worker.  Direct RouterOS
+        # binary calls apply immediately; agent-only routers receive a single
+        # durable command and report ``queued`` until their acknowledgement.
+        payment = _activate_paid_access_from_portal(tenant_id, payment_id) or payment
     payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get() or payment
     access_status = str(payment.get("access_status") or "").lower()
     if payment.get("status") == "success" and access_status not in {"active", "radius_ready"}:
@@ -3849,7 +3921,7 @@ def send_expiry_notifications(request):
     return ok({"success": True, "message": f"Sent {len(sent)} expiry WhatsApp notifications", "sent": sent, "skipped": skipped, "invoices_created": invoices_created})
 
 
-def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
+def activate_paid_access(tenant, payment_id, payment, phone, payment_code, notify=True):
     tenant_id = tenant["id"]
     package_name = payment.get("package_name")
     tenant_obj = Tenant.objects.filter(pk=tenant_id).first()
@@ -4059,14 +4131,15 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
     except Exception as exc:
         logger.warning("Paid access SQL payment sync failed tenant=%s payment=%s username=%s error=%s", tenant_id, payment_id, username, exc, exc_info=True)
     access = {"username": username, "password": password, "mac_address": mac_address, "expiry_date": expiry.isoformat()}
-    try:
-        notify_result = notify_payment_access(tenant, {**payment, "phone": phone, "package_name": package_for_access}, access)
-        if notify_result:
-            sent_channels = [name for name, result in notify_result.items() if result.get("sent")]
-            skipped = "; ".join(f"{name}: {result.get('skipped')}" for name, result in notify_result.items() if result.get("skipped"))
-            ref(f"tenants/{tenant_id}/payments/{payment_id}").update({"notification_status": "sent" if sent_channels else "skipped", "notification_channels": sent_channels, "notification_detail": skipped})
-    except Exception as exc:
-        ref(f"tenants/{tenant_id}/payments/{payment_id}").update({"whatsapp_status": "failed", "whatsapp_detail": str(exc)})
+    if notify:
+        try:
+            notify_result = notify_payment_access(tenant, {**payment, "phone": phone, "package_name": package_for_access}, access)
+            if notify_result:
+                sent_channels = [name for name, result in notify_result.items() if result.get("sent")]
+                skipped = "; ".join(f"{name}: {result.get('skipped')}" for name, result in notify_result.items() if result.get("skipped"))
+                ref(f"tenants/{tenant_id}/payments/{payment_id}").update({"notification_status": "sent" if sent_channels else "skipped", "notification_channels": sent_channels, "notification_detail": skipped})
+        except Exception as exc:
+            ref(f"tenants/{tenant_id}/payments/{payment_id}").update({"whatsapp_status": "failed", "whatsapp_detail": str(exc)})
     publish_realtime_event(
         tenant_id,
         "payment.updated",
@@ -4413,10 +4486,13 @@ def _apply_settlement_result(payment_record, result, callback_status):
 
 
 def update_b2c_settlement(event, status):
-    result = (event or {}).get("Result") or {}
-    originator_id = result.get("OriginatorConversationID") or ""
-    conversation_id = result.get("ConversationID") or ""
-    occasion = result.get("Occasion") or ""
+    event = event if isinstance(event, dict) else {}
+    body_data = event.get("Body") if isinstance(event.get("Body"), dict) else {}
+    result = event.get("Result") or body_data.get("Result") or event
+    result = result if isinstance(result, dict) else {}
+    originator_id = result.get("OriginatorConversationID") or event.get("OriginatorConversationID") or ""
+    conversation_id = result.get("ConversationID") or event.get("ConversationID") or ""
+    occasion = result.get("Occasion") or event.get("Occasion") or ""
     payment = _find_settlement_payment("daraja_b2c", occasion, originator_id, conversation_id)
     return _apply_settlement_result(payment, result, status) if payment else False
 
@@ -4440,10 +4516,14 @@ def daraja_b2c_timeout(request):
 
 
 def update_b2b_bank_settlement(event, callback_status):
-    result = (event or {}).get("Result") or {}
-    originator_id = result.get("OriginatorConversationID") or (event or {}).get("OriginatorConversationID") or ""
-    conversation_id = result.get("ConversationID") or (event or {}).get("ConversationID") or ""
-    payment = _find_settlement_payment("daraja_b2b", "", originator_id, conversation_id)
+    event = event if isinstance(event, dict) else {}
+    body_data = event.get("Body") if isinstance(event.get("Body"), dict) else {}
+    result = event.get("Result") or body_data.get("Result") or event
+    result = result if isinstance(result, dict) else {}
+    originator_id = result.get("OriginatorConversationID") or event.get("OriginatorConversationID") or ""
+    conversation_id = result.get("ConversationID") or event.get("ConversationID") or ""
+    occasion = result.get("Occasion") or event.get("Occasion") or ""
+    payment = _find_settlement_payment("daraja_b2b", occasion, originator_id, conversation_id)
     return _apply_settlement_result(payment, result, callback_status) if payment else False
 
 

@@ -2997,6 +2997,10 @@ def router_suspend(request):
 @api_view(["DELETE"])
 @tenant_required
 def router_delete(request):
+    data = body(request)
+    password = str(data.get("current_password") or "")
+    if not password or not check_password(password, request.tenant.get("password")):
+        return ok({"message": "Enter your account password to delete the linked MikroTik router."}, 403)
     updates = {
         "linked_routers": {},
         "mikrotik_router_snapshot": {},
