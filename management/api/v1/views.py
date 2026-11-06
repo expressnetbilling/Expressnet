@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 import ipaddress
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -4256,6 +4257,37 @@ def _activate_paid_access_immediately(tenant_id, payment_id, reason="payment con
     return False
 
 
+def _dispatch_tenant_settlement(tenant_id, payment_id):
+    """Start B2C/B2B settlement without placing it on the customer path.
+
+    Celery remains the durable dispatcher.  Railway's Beat-only deployment
+    can publish jobs without running a worker, so a daemon fallback executes
+    the same idempotent task in the web process.  The task row lock ensures
+    only one of the worker or fallback can submit a settlement.
+    """
+    from billing_api.tasks import request_tenant_settlement
+
+    try:
+        request_tenant_settlement.delay(str(tenant_id), str(payment_id))
+    except Exception:
+        logger.exception("Could not enqueue tenant settlement tenant=%s payment=%s", tenant_id, payment_id)
+
+    def run_settlement():
+        close_old_connections()
+        try:
+            request_tenant_settlement.run(str(tenant_id), str(payment_id))
+        except Exception:
+            logger.exception("Web fallback settlement failed tenant=%s payment=%s", tenant_id, payment_id)
+        finally:
+            close_old_connections()
+
+    threading.Thread(
+        target=run_settlement,
+        name=f"expressnet-settlement-{tenant_id}-{payment_id}",
+        daemon=True,
+    ).start()
+
+
 def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, receipt, paid_at, phone):
     payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get()
     if not payment:
@@ -4375,14 +4407,7 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
     ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
     ref(f"tenants/{tenant_id}").update(tenant_balance_update)
     if update.get("tenant_settlement_status") == "queued":
-        try:
-            from billing_api.tasks import request_tenant_settlement
-
-            request_tenant_settlement.delay(str(tenant_id), str(payment_id))
-        except Exception:
-            # The queued database state is deliberately retained for the
-            # periodic dispatcher/reconciliation path.
-            logger.exception("Could not enqueue tenant settlement tenant=%s payment=%s", tenant_id, payment_id)
+        _dispatch_tenant_settlement(tenant_id, payment_id)
     logger.info("Daraja payment completed tenant=%s payment=%s receipt=%s phone=%s amount=%s", tenant_id, payment_id, receipt, phone or payment.get("phone"), paid_amount)
     return True
 

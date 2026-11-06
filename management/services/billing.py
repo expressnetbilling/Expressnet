@@ -524,14 +524,13 @@ def daraja_b2b_settlement_status(tenant):
 
 
 def tenant_payment_collection_config(tenant, payment_method=None):
-    """Prepare platform collection only when automatic tenant settlement is ready."""
+    """Prepare platform collection independently from later tenant settlement.
+
+    A customer's STK payment is a collection operation.  B2C/B2B payout is a
+    separate back-office operation and must never prevent a customer from
+    buying internet or expose internal settlement configuration to the portal.
+    """
     tenant = tenant or {}
-    if daraja_b2b_settlement_status(tenant) != "withdrawal_ready":
-        raise PaymentProviderError(
-            "Automatic settlement is not configured for this provider yet. Please contact the service provider.",
-            "Tenant payout destination or platform Daraja settlement credentials are incomplete",
-            503,
-        )
     config = platform_daraja_config(tenant, payment_method, force_platform=True)
     collection_method = selected_daraja_method(tenant, payment_method)
     if collection_method == "daraja_buygoods":
@@ -540,7 +539,7 @@ def tenant_payment_collection_config(tenant, payment_method=None):
         config["daraja_shortcode_type"] = "CustomerBuyGoodsOnline"
     if not daraja_is_configured(config, collection_method):
         raise PaymentProviderError(
-            "Online M-Pesa is not configured for this provider yet. Please contact the service provider.",
+            "Unable to process payment. Please try again later.",
             "Platform Daraja collection credentials are incomplete",
             503,
         )

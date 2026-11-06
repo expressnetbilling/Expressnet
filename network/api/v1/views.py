@@ -2926,10 +2926,10 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
         lines.extend((
             f':do {{ /interface enable [find name="{port}"] }} on-error={{ :log warning "Billing SaaS: customer interface {port} was not found" }};',
         ))
-        if hotspot_requested and wireless:
+        if wireless:
             ssid = _rsc_escape(str(tenant.get("business_name") or "Expressnet")[:32])
-            # Reconnect only the assigned WLAN's clients. They rejoin without
-            # a WPA dynamic key and are then captured by the Hotspot portal.
+            # An assigned WLAN is always an open Expressnet access point. The
+            # Hotspot portal, not a WPA key, controls customer access.
             lines.extend((
                 f':do {{ /interface wireless security-profiles add name="billing-saas-open" mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{}};',
                 f':do {{ /interface wireless security-profiles set [find name="billing-saas-open"] mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{}};',
