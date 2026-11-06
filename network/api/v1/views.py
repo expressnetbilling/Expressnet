@@ -2795,6 +2795,33 @@ def _repair_legacy_router_port_script(script):
     )
 
 
+def _agent_hotspot_redirect_setup(portal_url):
+    """Return the small, import-safe part of captive setup needed by agents.
+
+    The full provisioning command writes every Hotspot page, but an agent-only
+    router can receive a port assignment without that command ever running.
+    In that case DHCP and a Hotspot server exist, yet RouterOS serves its
+    default login page (or simply reports no internet) because the custom
+    login page and walled-garden entry are absent.  ``login.html`` is the page
+    that handles unauthenticated interception, so downloading it is enough to
+    restore the redirect without embedding a huge script in the agent import.
+    """
+    portal_url = str(portal_url or "").strip()
+    parsed = urlparse(portal_url)
+    if not portal_url or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return []
+    login_url = f"{portal_url.rstrip('/')}/hotspot-file/login.html"
+    if parsed.hostname.lower().endswith("ngrok-free.dev"):
+        login_url += "&ngrok-skip-browser-warning=true" if "?" in login_url else "?ngrok-skip-browser-warning=true"
+    source = _rsc_escape(login_url)
+    host = _rsc_escape(parsed.hostname)
+    return [
+        f':do {{ /ip hotspot walled-garden add action=allow dst-host="{host}" comment="billing-saas captive portal access" }} on-error={{}};',
+        f':do {{ /tool fetch check-certificate=no url="{source}" dst-path="Expressnet-hotspot/login.html" }} on-error={{ :log warning "Billing SaaS: captive login page fetch failed" }};',
+        f':do {{ /tool fetch check-certificate=no url="{source}" dst-path="hotspot/login.html" }} on-error={{}};',
+    ]
+
+
 def _build_agent_port_assignment_script(interface_names, bridge_name, service_type="", tenant=None, portal_url=""):
     """Return an idempotent agent script for a customer port assignment.
 
@@ -2882,6 +2909,7 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
             f':do {{ /ip hotspot set [find name="Expressnet-hotspot"] interface="{bridge}" address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }} on-error={{}};',
             ':log info "Billing SaaS: Hotspot service is active on the Expressnet bridge.";',
         ))
+        lines.extend(_agent_hotspot_redirect_setup(portal_url))
     return "\n".join(lines)
 
 
