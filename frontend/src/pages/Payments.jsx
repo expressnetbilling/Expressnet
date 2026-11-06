@@ -33,13 +33,6 @@ function formatDate(value) {
   return `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}.${date.getFullYear()} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
-function disbursementLabel(payment) {
-  const status = String(payment.tenant_settlement_status || '').toLowerCase();
-  if (payment.provider === 'voucher') return 'Voucher';
-  if (status) return status.replaceAll('_', ' ');
-  return 'Queued';
-}
-
 function sameDay(a, b) {
   return a && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
@@ -331,11 +324,11 @@ export default function Payments() {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="min-w-[980px] w-full">
+          <table className="min-w-[860px] w-full">
             <thead className="bg-slate-50 text-left text-xs font-semibold text-black">
               <tr>
                 <th className="w-12 px-5 py-4"><input type="checkbox" className="h-4 w-4 rounded border-slate-300" /></th>
-                {['User', 'Phone', 'Receipt No.', 'Amount', 'Checked', 'Paid At', 'Disbursement'].map((heading) => (
+                {['User', 'Phone', 'Receipt No.', 'Amount', 'Checked', 'Paid At'].map((heading) => (
                   <th key={heading} className="px-5 py-4">
                     <span className="inline-flex items-center gap-1">{heading}<ChevronDown size={15} className="text-slate-400" /></span>
                   </th>
@@ -345,9 +338,9 @@ export default function Payments() {
             </thead>
             <tbody className="divide-y divide-slate-200 text-xs text-black">
               {loading ? (
-                <tr><td className="px-5 py-10 text-center text-slate-500" colSpan="9">Loading payments...</td></tr>
+                <tr><td className="px-5 py-10 text-center text-slate-500" colSpan="8">Loading payments...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td className="px-5 py-10 text-center text-slate-500" colSpan="9">No payments found.</td></tr>
+                <tr><td className="px-5 py-10 text-center text-slate-500" colSpan="8">No payments found.</td></tr>
               ) : pagedRows.map((payment) => (
                 <tr key={payment.id}>
                   <td className="px-5 py-4"><input type="checkbox" className="h-4 w-4 rounded border-slate-300" /></td>
@@ -357,7 +350,6 @@ export default function Payments() {
                   <td className="px-5 py-4">{formatKES(payment.amount)}</td>
                   <td className="px-5 py-4"><span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] text-emerald-700">{payment.status === 'success' ? 'Yes' : 'No'}</span></td>
                   <td className="px-5 py-4">{formatDate(payment.paid_at || payment.created_at || payment.initiated_at)}</td>
-                  <td className="px-5 py-4"><span className="rounded-md border px-2 py-1 text-[10px]" style={{ borderColor: 'var(--app-accent-soft)', background: 'var(--app-accent-muted)', color: 'var(--app-accent)' }}>{disbursementLabel(payment)}</span></td>
                   <td className="px-5 py-4 text-right" style={{ color: 'var(--app-accent)' }}><MoreVertical size={16} /></td>
                 </tr>
               ))}
