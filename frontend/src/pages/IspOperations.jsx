@@ -84,7 +84,7 @@ export default function IspOperations() {
     if (ticketResult.status === 'fulfilled') {
       setTickets(responseItems(ticketResult.value.data));
     } else {
-      toast.error(ticketResult.reason?.response?.data?.message || 'Failed to load tasks');
+      toast.error(ticketResult.reason?.response?.data?.message || 'Failed to load tickets');
     }
 
     if (teamResult.status === 'fulfilled') {
@@ -162,10 +162,10 @@ export default function IspOperations() {
     try {
       if (editingId) {
         await api.patch(`/tickets/${editingId}`, draft);
-        toast.success('Task updated');
+        toast.success('Ticket updated');
       } else {
         await api.post('/tickets/add', draft);
-        toast.success('Task created');
+        toast.success('Ticket created');
       }
       setDraft({ ...blankTask });
       setTaskTypeChoice(TASK_TYPES[0]);
@@ -224,10 +224,10 @@ export default function IspOperations() {
   };
 
   const remove = async (ticket) => {
-    if (!window.confirm(`Delete task "${ticket.title}"?`)) return;
+    if (!window.confirm(`Delete ticket "${ticket.title}"?`)) return;
     try {
       await api.delete(`/tickets/${ticket.id}`);
-      toast.success('Task deleted');
+      toast.success('Ticket deleted');
       loadTickets();
     } catch (error) {
       toast.error(error.response?.data?.message || 'Failed to delete task');
@@ -240,7 +240,7 @@ export default function IspOperations() {
         {canCreate && (
             <button type="button" className="btn-primary" onClick={openCreateForm}>
               <Plus size={16} />
-              New task
+              New ticket
             </button>
           )}
       </div>
@@ -248,11 +248,11 @@ export default function IspOperations() {
      
 
       {showForm && (
-        <Modal title={editingId ? 'Edit Task' : 'Create Task'} onClose={() => setShowForm(false)}>
+        <Modal title={editingId ? 'Edit Ticket' : 'Create Ticket'} onClose={() => setShowForm(false)}>
           <form className="space-y-4" onSubmit={save}>
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="block text-xs font-medium text-slate-500">
-                Task type
+                Ticket type
                 <select
                   className="form-input"
                   value={taskTypeChoice}
@@ -267,7 +267,7 @@ export default function IspOperations() {
 
               {taskTypeChoice === OTHER_TASK_TYPE && (
                 <label className="block text-xs font-medium text-slate-500">
-                  Specify task type
+                  Specify ticket type
                   <input
                     className="form-input"
                     value={draft.title}
@@ -337,7 +337,7 @@ export default function IspOperations() {
 
             <div className="flex justify-end gap-2 border-t border-slate-200 pt-4">
               <button type="button" className="btn-secondary" onClick={() => setShowForm(false)}>Cancel</button>
-              <button type="submit" className="btn-primary">{editingId ? 'Update task' : 'Create task'}</button>
+              <button type="submit" className="btn-primary">{editingId ? 'Update ticket' : 'Create ticket'}</button>
             </div>
           </form>
         </Modal>
@@ -347,17 +347,17 @@ export default function IspOperations() {
         <div className="border-b border-slate-100 p-4">
           <label className="relative block max-w-sm">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input className="form-input mt-0 pl-9" placeholder="Search tasks" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <input className="form-input mt-0 pl-9" placeholder="Search tickets" value={query} onChange={(event) => setQuery(event.target.value)} />
           </label>
         </div>
         {loading ? (
-          <div className="py-16 text-center text-sm text-slate-400">Loading tasks...</div>
+          <div className="py-16 text-center text-sm text-slate-400">Loading tickets...</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-[980px] w-full divide-y divide-slate-200">
               <thead className="table-head">
                 <tr>
-                  <th className="px-4 py-3">Task</th>
+                  <th className="px-4 py-3">Ticket</th>
                   <th className="px-4 py-3">Description</th>
                   <th className="px-4 py-3">Customer</th>
                   <th className="px-4 py-3">Mikrotik</th>
@@ -369,7 +369,7 @@ export default function IspOperations() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filtered.length === 0 ? (
-                  <tr><td className="table-cell text-slate-500" colSpan="8">No tasks found.</td></tr>
+                  <tr><td className="table-cell text-slate-500" colSpan="8">No tickets found.</td></tr>
                 ) : pagedTickets.map((ticket) => (
                   <tr key={ticket.id} className="bg-white">
                     <td className="table-cell font-semibold text-slate-950">{ticket.title}</td>
@@ -400,7 +400,7 @@ export default function IspOperations() {
                 ))}
               </tbody>
             </table>
-            <Pagination page={page} pageSize={pageSize} total={filtered.length} label="tasks" onPageChange={setPage} />
+            <Pagination page={page} pageSize={pageSize} total={filtered.length} label="tickets" onPageChange={setPage} />
           </div>
         )}
       </section>

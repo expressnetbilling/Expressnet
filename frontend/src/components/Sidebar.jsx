@@ -57,7 +57,7 @@ const sections = [
     title: 'Management',
     icon: BriefcaseBusiness,
     links: [
-      { to: '/tickets', label: 'Tasks', icon: Ticket },
+      { to: '/tickets', label: 'Tickets', icon: Ticket },
       { to: '/audit', label: 'Audit trail', icon: ClipboardList },
       { to: '/equipment', label: 'Tools & Equipments', icon: Wrench },
       { to: '/requisitions', label: 'Requisitions', icon: ClipboardList },
