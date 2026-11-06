@@ -42,7 +42,7 @@ def activate_paid_payment(self, tenant_id, payment_id):
         started_at = parse_datetime(str(payment.get("activation_started_at") or ""))
         if started_at and timezone.is_naive(started_at):
             started_at = timezone.make_aware(started_at, timezone.get_current_timezone())
-        if access_status == "activation_processing" and started_at and started_at > timezone.now() - timedelta(minutes=2):
+        if access_status == "activation_processing" and started_at and started_at > timezone.now() - timedelta(seconds=45):
             return {"status": "already_processing"}
         record.apply_data({
             "access_status": "activation_processing",

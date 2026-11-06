@@ -1013,18 +1013,12 @@ def _refresh_captive_daraja_payment(tenant_id, tenant, payment_id, payment):
     refreshed_access_status = str(refreshed.get("access_status") or "").lower()
     if refreshed.get("status") == "success" and (
         not refreshed.get("access_username")
-        or refreshed_access_status in {"", "pending", "activation_pending", "activation_failed"}
+        or refreshed_access_status in {"", "pending", "activation_pending", "activation_failed", "activation_processing"}
     ):
-        from management.api.v1.views import activate_paid_access
+        from management.api.v1.views import _activate_paid_access_from_portal
 
         try:
-            activate_paid_access(
-                tenant,
-                payment_id,
-                refreshed,
-                refreshed.get("phone"),
-                refreshed.get("payment_code") or refreshed.get("daraja_receipt_number") or refreshed.get("daraja_checkout_request_id") or payment_id,
-            )
+            _activate_paid_access_from_portal(tenant_id, payment_id)
         except Exception as exc:
             logger.warning("Captive paid access activation failed tenant=%s payment=%s error=%s", tenant_id, payment_id, exc, exc_info=True)
             ref(f"tenants/{tenant_id}/payments/{payment_id}").update({
@@ -1039,7 +1033,7 @@ def _refresh_captive_daraja_payment(tenant_id, tenant, payment_id, payment):
 def _refresh_captive_paystack_payment(tenant_id, tenant, payment_id, payment):
     if not payment_id or not payment:
         return payment
-    from management.api.v1.views import activate_paid_access, complete_paystack_payment
+    from management.api.v1.views import _activate_paid_access_from_portal, complete_paystack_payment
     from management.services.billing import verify_paystack_transaction
 
     if payment.get("status") != "success":
@@ -1059,16 +1053,10 @@ def _refresh_captive_paystack_payment(tenant_id, tenant, payment_id, payment):
     access_status = str(refreshed.get("access_status") or "").lower()
     if refreshed.get("status") == "success" and (
         not refreshed.get("access_username")
-        or access_status in {"", "pending", "activation_pending", "activation_failed"}
+        or access_status in {"", "pending", "activation_pending", "activation_failed", "activation_processing"}
     ):
         try:
-            activate_paid_access(
-                tenant,
-                payment_id,
-                refreshed,
-                refreshed.get("phone"),
-                refreshed.get("payment_code") or refreshed.get("paystack_transaction_id") or payment_id,
-            )
+            _activate_paid_access_from_portal(tenant_id, payment_id)
         except Exception as exc:
             logger.warning("Captive Paystack access activation failed tenant=%s payment=%s error=%s", tenant_id, payment_id, exc, exc_info=True)
             ref(f"tenants/{tenant_id}/payments/{payment_id}").update({"access_status": "activation_failed", "access_error": str(exc), "updated_at": iso_now()})
@@ -3098,41 +3086,45 @@ def _customer_secret_script(customer):
     limit_bytes_field = f' limit-bytes-total="{limit_bytes_total}"' if limit_bytes_total > 0 and service_type == "hotspot" else ""
     address = _rsc_escape(customer.get("ip_address") or "")
     address_field = f' address="{address}"' if address and service_type == "hotspot" else ""
-    ppp_profile_script = (
-        f':if ("{profile}" != "default") do={{ '
-        f':if ([:len [/ppp profile find name="{profile}"]] = 0) do={{'
-        f' /ppp profile add name="{profile}" local-address=192.168.88.1 remote-address=Expressnet-pool{rate_limit_field} }} '
-        f'else={{ /ppp profile set [find name="{profile}"] local-address=192.168.88.1 remote-address=Expressnet-pool{rate_limit_field} }}; }};'
-    )
-    hotspot_profile_script = (
-        f':if ("{profile}" != "default") do={{ '
-        f':if ([:len [/ip hotspot user profile find name="{profile}"]] = 0) do={{'
-        f' /ip hotspot user profile add name="{profile}"{rate_limit_field} }} '
-        f'else={{ /ip hotspot user profile set [find name="{profile}"]{rate_limit_field} }}; }};'
-    )
+    # The router agent imports this payload as an .rsc file.  RouterOS 7
+    # rejects the previous single, nested ``:if ... else`` command once a
+    # normal payment field pushes it past roughly 1 KB.  That left the payment
+    # in ``queued`` and the captive portal polling forever.  Keep every
+    # RouterOS statement short and independent instead.  ``add`` errors are
+    # harmless when the profile already exists; a later ``set`` updates it.
+    profile_lines = []
+    if profile != "default":
+        if service_type == "pppoe":
+            profile_lines.append(
+                f':do {{ /ppp profile add name="{profile}" local-address=192.168.88.1 remote-address=Expressnet-pool{rate_limit_field} }} on-error={{}};'
+            )
+            if rate_limit:
+                profile_lines.append(
+                    f'/ppp profile set [find name="{profile}"] local-address=192.168.88.1 remote-address=Expressnet-pool rate-limit="{rate_limit}";'
+                )
+        else:
+            profile_lines.append(
+                f':do {{ /ip hotspot user profile add name="{profile}"{rate_limit_field} }} on-error={{}};'
+            )
+            if rate_limit:
+                profile_lines.append(
+                    f'/ip hotspot user profile set [find name="{profile}"] rate-limit="{rate_limit}";'
+                )
     if service_type == "pppoe":
-        return (
-            fasttrack_script
-            + ppp_profile_script
-            +
-            f':if ([:len [/ppp secret find name="{username}"]] = 0) do={{'
-            f' /ppp secret add name="{username}" password="{password}" service=pppoe '
-            f'profile="{profile}" disabled={disabled} comment="billing-saas-managed" }} '
-            f'else={{ /ppp secret set [find name="{username}"] password="{password}" '
-            f'service=pppoe profile="{profile}" disabled={disabled} comment="billing-saas-managed" }};'
-        )
-    return (
-        fasttrack_script
-        + static_setup_script
-        +
-        hotspot_profile_script
-        +
-        f':if ([:len [/ip hotspot user find name="{username}"]] = 0) do={{'
-        f' /ip hotspot user add name="{username}" password="{password}" '
-        f'profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }} '
-        f'else={{ /ip hotspot user set [find name="{username}"] password="{password}" '
-        f'profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }};'
-    )
+        lines = [part for part in (fasttrack_script, *profile_lines) if part]
+        # A remove of a missing item is safe. Re-add rather than nested
+        # conditional upsert so the import stays parseable and deterministic.
+        lines.extend([
+            f'/ppp secret remove [find name="{username}"];',
+            f'/ppp secret add name="{username}" password="{password}" service=pppoe profile="{profile}" disabled={disabled} comment="billing-saas-managed";',
+        ])
+        return "\n".join(lines)
+    lines = [part for part in (fasttrack_script, static_setup_script, *profile_lines) if part]
+    lines.extend([
+        f'/ip hotspot user remove [find name="{username}"];',
+        f'/ip hotspot user add name="{username}" password="{password}" profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed";',
+    ])
+    return "\n".join(lines)
 
 
 def _migration_export_items(tenant):

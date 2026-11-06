@@ -1021,7 +1021,10 @@ def _activate_paid_access_from_portal(tenant_id, payment_id):
         started_at = parse_datetime(str(payment.get("activation_started_at") or ""))
         if started_at and timezone.is_naive(started_at):
             started_at = timezone.make_aware(started_at, timezone.get_current_timezone())
-        if access_status == "activation_processing" and started_at and started_at > timezone.now() - timedelta(minutes=2):
+        # RouterOS API work has short socket timeouts and agent dispatch is
+        # immediate. A processing lease longer than this means the worker was
+        # restarted or died; a captive portal retry may safely reclaim it.
+        if access_status == "activation_processing" and started_at and started_at > timezone.now() - timedelta(seconds=45):
             return payment
         updates = {
             "access_status": "activation_processing",
@@ -1165,7 +1168,7 @@ def public_verify(request, tenant_id):
         ).exclude(radius_secret="").exists()
     access_status = str(payment.get("access_status") or "").lower()
     activation_needs_retry = access_status in {"", "pending", "activation_pending", "activation_failed"}
-    if payment.get("status") == "success" and access_status != "activation_processing" and (not payment.get("access_username") or not radius_customer_ready or activation_needs_retry):
+    if payment.get("status") == "success" and (not payment.get("access_username") or not radius_customer_ready or activation_needs_retry or access_status == "activation_processing"):
         # The portal is an active customer request, not a provider callback.
         # Start one bounded activation now so a valid payment is never held
         # hostage by an absent or restarting Celery worker.  Direct RouterOS
