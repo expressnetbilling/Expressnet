@@ -1,3 +1,4 @@
+import atexit
 import base64
 import hashlib
 import hmac
@@ -5,11 +6,10 @@ import json
 import logging
 import os
 import re
-import socket
-import ssl
+import threading
 import uuid
-import base64
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse, urlsplit, urlunsplit
 
@@ -17,6 +17,13 @@ import bcrypt
 import jwt
 import requests
 from django.conf import settings
+from routeros_api import RouterOsApiPool
+from routeros_api.exceptions import (
+    RouterOsApiCommunicationError,
+    RouterOsApiConnectionError,
+    RouterOsApiError,
+    RouterOsApiFatalCommunicationError,
+)
 
 from billing_api.models import AdminAuditLog, AdminUser, Customer, InternetPackage, Payment, SiteSettings, Tenant, Ticket, Voucher
 
@@ -28,8 +35,30 @@ logger = logging.getLogger(__name__)
 
 from core.services.shared import *
 
+def _tenant_value(tenant, name, default=None):
+    """Read router configuration from either a tenant dict or Django model."""
+    if tenant is None:
+        return default
+    if hasattr(tenant, "get"):
+        return tenant.get(name, default)
+    return getattr(tenant, name, default)
+
+
+def _tenant_router_option(tenant, name, default=None):
+    """Read optional RouterOS settings, including ``Tenant.extra`` values."""
+    value = _tenant_value(tenant, name, None)
+    if value is not None:
+        return value
+    extra = _tenant_value(tenant, "extra", {}) or {}
+    return extra.get(name, default) if hasattr(extra, "get") else default
+
+
 def has_mikrotik_credentials(tenant):
-    return bool(tenant.get("mikrotik_host") and tenant.get("mikrotik_user") and tenant.get("mikrotik_pass"))
+    return bool(
+        _tenant_value(tenant, "mikrotik_host")
+        and _tenant_value(tenant, "mikrotik_user")
+        and _tenant_value(tenant, "mikrotik_pass")
+    )
 
 
 def radius_client_enabled(tenant):
@@ -109,6 +138,161 @@ class RouterOSAPIError(RuntimeError):
     pass
 
 
+# routeros-api reports RouterOS !trap replies as RouterOsApiCommunicationError.
+# Keep the name explicit in this module because callers need to distinguish a
+# command rejection from a dropped TCP connection.
+TrapError = RouterOsApiCommunicationError
+
+
+@dataclass(frozen=True)
+class RouterCredentials:
+    """Connection settings derived at call time from one tenant/router record."""
+
+    tenant_key: str
+    host: str
+    username: str
+    password_fingerprint: str
+    port: int
+    use_ssl: bool
+    ssl_verify: bool
+    plaintext_login: bool
+    timeout: float
+
+
+@dataclass
+class _RouterConnection:
+    pool: RouterOsApiPool
+    lock: threading.RLock
+
+
+class RouterConnectionManager:
+    """Process-local, per-router pool for the native RouterOS binary API.
+
+    `routeros-api` keeps a connected socket in ``RouterOsApiPool``.  A router
+    cannot safely service simultaneous sentence readers on that socket, so an
+    RLock serialises use of each tenant's connection while allowing nested
+    provisioning helpers in the same request.  Credentials are never used as
+    cache keys in plaintext; a fingerprint makes a password change create a
+    fresh connection.
+    """
+
+    def __init__(self):
+        self._connections = {}
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _bool(value, default=False):
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def credentials_for(self, tenant):
+        if not has_mikrotik_credentials(tenant):
+            raise RouterOSAPIError("Router API credentials are not configured")
+        host = str(_tenant_value(tenant, "mikrotik_host")).strip()
+        username = str(_tenant_value(tenant, "mikrotik_user")).strip()
+        password = str(_tenant_value(tenant, "mikrotik_pass"))
+        raw_port = _tenant_value(tenant, "mikrotik_port", None)
+        use_ssl = self._bool(_tenant_router_option(tenant, "mikrotik_use_ssl"), default=int(raw_port or 8728) == 8729)
+        port = int(raw_port or (8729 if use_ssl else 8728))
+        timeout = float(_tenant_router_option(tenant, "mikrotik_timeout", 20) or 20)
+        tenant_id = _tenant_value(tenant, "id", None) or _tenant_value(tenant, "pk", None) or host
+        password_fingerprint = hashlib.sha256(password.encode("utf-8")).hexdigest()
+        return RouterCredentials(
+            tenant_key=str(tenant_id),
+            host=host,
+            username=username,
+            password_fingerprint=password_fingerprint,
+            port=port,
+            use_ssl=use_ssl,
+            ssl_verify=self._bool(_tenant_router_option(tenant, "mikrotik_ssl_verify"), default=True),
+            plaintext_login=self._bool(_tenant_router_option(tenant, "mikrotik_plaintext_login"), default=True),
+            timeout=max(1.0, timeout),
+        ), password
+
+    @staticmethod
+    def _key(credentials):
+        return (
+            credentials.tenant_key,
+            credentials.host,
+            credentials.username,
+            credentials.password_fingerprint,
+            credentials.port,
+            credentials.use_ssl,
+            credentials.ssl_verify,
+            credentials.plaintext_login,
+        )
+
+    def acquire(self, tenant):
+        credentials, password = self.credentials_for(tenant)
+        key = self._key(credentials)
+        with self._lock:
+            entry = self._connections.get(key)
+            if entry is None:
+                pool = RouterOsApiPool(
+                    credentials.host,
+                    username=credentials.username,
+                    password=password,
+                    port=credentials.port,
+                    plaintext_login=credentials.plaintext_login,
+                    use_ssl=credentials.use_ssl,
+                    ssl_verify=credentials.ssl_verify,
+                    ssl_verify_hostname=credentials.ssl_verify,
+                )
+                # routeros-api has one socket timeout for connect/read. Use
+                # the tenant's configured timeout for both operations.
+                pool.socket_timeout = credentials.timeout
+                entry = _RouterConnection(pool=pool, lock=threading.RLock())
+                self._connections[key] = entry
+        entry.lock.acquire()
+        try:
+            return _ManagedRouterOSAPI(self, key, entry, entry.pool.get_api())
+        except _ROUTER_API_ERRORS as exc:
+            entry.lock.release()
+            self.invalidate(key, entry)
+            raise RouterOSAPIError(
+                f"Could not connect or authenticate to RouterOS at {credentials.host}:{credentials.port}: {exc}"
+            ) from exc
+        except Exception:
+            entry.lock.release()
+            raise
+
+    def invalidate(self, key, entry=None):
+        with self._lock:
+            current = self._connections.get(key)
+            if current is None or (entry is not None and current is not entry):
+                return
+            self._connections.pop(key, None)
+        try:
+            current.pool.disconnect()
+        except Exception:
+            logger.debug("RouterOS pool disconnect failed", exc_info=True)
+
+    def close_all(self):
+        """Disconnect every cached socket; useful from worker shutdown hooks."""
+        with self._lock:
+            entries = list(self._connections.values())
+            self._connections.clear()
+        for entry in entries:
+            try:
+                entry.pool.disconnect()
+            except Exception:
+                logger.debug("RouterOS pool disconnect failed", exc_info=True)
+
+
+_ROUTER_CONNECTION_ERRORS = (
+    RouterOsApiConnectionError,
+    RouterOsApiFatalCommunicationError,
+    TimeoutError,
+    OSError,
+)
+_ROUTER_API_ERRORS = _ROUTER_CONNECTION_ERRORS + (RouterOsApiError,)
+router_connection_manager = RouterConnectionManager()
+atexit.register(router_connection_manager.close_all)
+
+
 class RouterOSPath:
     def __init__(self, api, path):
         self.api = api
@@ -118,165 +302,73 @@ class RouterOSPath:
     def command_base(self):
         return "/" + "/".join(self.path)
 
-    def select(self):
-        return self.api.command(f"{self.command_base}/print")
+    @property
+    def resource(self):
+        # Deliberately use the native resource API rather than REST endpoints.
+        return self.api._api.get_resource(self.command_base)
+
+    def select(self, proplist=None, **filters):
+        """Fetch rows, optionally with RouterOS server-side filters/proplist."""
+        arguments = {}
+        if proplist:
+            arguments[".proplist"] = ",".join(proplist) if not isinstance(proplist, str) else proplist
+        return self.api._call(self.resource.call, "print", arguments, filters)
 
     def add(self, **fields):
-        rows = self.api.command(f"{self.command_base}/add", fields)
-        return (rows[0] or {}).get("ret") if rows else None
+        response = self.api._call(self.resource.call, "add", fields)
+        return getattr(response, "done_message", {}).get("ret")
 
     def update(self, **fields):
         item_id = fields.pop(".id", None) or fields.pop("id", None)
         if not item_id:
             raise RouterOSAPIError("RouterOS item id is required")
-        return self.api.command(f"{self.command_base}/set", {".id": item_id, **fields})
+        return self.api._call(self.resource.call, "set", {".id": item_id, **fields})
 
     def remove(self, item_id):
-        return self.api.command(f"{self.command_base}/remove", {".id": item_id})
+        return self.api._call(self.resource.call, "remove", {".id": item_id})
 
 
-class RouterOSAPI:
-    def __init__(self, host, username, password, port=8728, timeout=4, secure=False, verify_ssl=False,
-                 connect_timeout=None, read_timeout=None):
-        self.host = host
-        self.username = username
-        self.password = password
-        self.port = int(port or (8729 if secure else 8728))
-        self.connect_timeout = connect_timeout if connect_timeout is not None else min(timeout, 5)
-        self.read_timeout = read_timeout if read_timeout is not None else max(timeout, 20)
-        self.timeout = self.read_timeout
-        self.secure = secure
-        self.verify_ssl = verify_ssl
-        self.sock = None
+class _ManagedRouterOSAPI:
+    """Compatibility facade over routeros-api's ``get_resource`` interface."""
 
-    def connect(self):
-        raw = socket.create_connection((self.host, self.port), timeout=self.connect_timeout)
-        if self.secure:
-            context = ssl.create_default_context()
-            if not self.verify_ssl:
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-            self.sock = context.wrap_socket(raw, server_hostname=self.host)
-        else:
-            self.sock = raw
-        self.sock.settimeout(self.read_timeout)
-        self.login()
-        return self
+    def __init__(self, manager, key, entry, api):
+        self._manager = manager
+        self._key = key
+        self._entry = entry
+        self._api = api
+        self._closed = False
 
-    def close(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            finally:
-                self.sock = None
+    def _call(self, operation, *args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        except _ROUTER_CONNECTION_ERRORS as exc:
+            self._manager.invalidate(self._key, self._entry)
+            raise RouterOSAPIError(f"RouterOS connection lost: {exc}") from exc
+        except (TrapError, RouterOsApiError) as exc:
+            raise RouterOSAPIError(f"RouterOS rejected command: {exc}") from exc
 
     def path(self, *path):
         return RouterOSPath(self, tuple(path))
 
-    def _write_word(self, word):
-        data = str(word).encode("utf-8")
-        length = len(data)
-        if length < 0x80:
-            prefix = bytes([length])
-        elif length < 0x4000:
-            prefix = bytes([(length >> 8) | 0x80, length & 0xFF])
-        elif length < 0x200000:
-            prefix = bytes([(length >> 16) | 0xC0, (length >> 8) & 0xFF, length & 0xFF])
-        elif length < 0x10000000:
-            prefix = bytes([(length >> 24) | 0xE0, (length >> 16) & 0xFF, (length >> 8) & 0xFF, length & 0xFF])
+    def command(self, command, attrs=None, queries=None):
+        """Execute a native API command for legacy callers of this service."""
+        command = str(command).strip("/")
+        if "/" in command:
+            resource_path, action = command.rsplit("/", 1)
         else:
-            prefix = bytes([0xF0, (length >> 24) & 0xFF, (length >> 16) & 0xFF, (length >> 8) & 0xFF, length & 0xFF])
-        self.sock.sendall(prefix + data)
+            resource_path, action = "", command
+        resource = self._api.get_resource("/" + resource_path)
+        return self._call(resource.call, action, attrs or {}, queries or {})
 
-    def _read_length(self):
-        first = self.sock.recv(1)
-        if not first:
-            raise RouterOSAPIError("RouterOS connection closed")
-        value = first[0]
-        if (value & 0x80) == 0:
-            return value
-        if (value & 0xC0) == 0x80:
-            return ((value & ~0xC0) << 8) + self.sock.recv(1)[0]
-        if (value & 0xE0) == 0xC0:
-            chunk = self.sock.recv(2)
-            return ((value & ~0xE0) << 16) + (chunk[0] << 8) + chunk[1]
-        if (value & 0xF0) == 0xE0:
-            chunk = self.sock.recv(3)
-            return ((value & ~0xF0) << 24) + (chunk[0] << 16) + (chunk[1] << 8) + chunk[2]
-        chunk = self.sock.recv(4)
-        return (chunk[0] << 24) + (chunk[1] << 16) + (chunk[2] << 8) + chunk[3]
-
-    def _read_word(self):
-        length = self._read_length()
-        if length == 0:
-            return ""
-        data = b""
-        while len(data) < length:
-            part = self.sock.recv(length - len(data))
-            if not part:
-                raise RouterOSAPIError("RouterOS connection closed while reading")
-            data += part
-        return data.decode("utf-8", errors="replace")
-
-    def _write_sentence(self, words):
-        for word in words:
-            self._write_word(word)
-        self._write_word("")
-
-    def _read_sentence(self):
-        words = []
-        while True:
-            word = self._read_word()
-            if word == "":
-                return words
-            words.append(word)
-
-    def _read_response(self):
-        rows = []
-        while True:
-            sentence = self._read_sentence()
-            if not sentence:
-                continue
-            tag = sentence[0]
-            attrs = {}
-            for word in sentence[1:]:
-                if not word.startswith("="):
-                    continue
-                try:
-                    _, key, value = word.split("=", 2)
-                except ValueError:
-                    continue
-                attrs[key] = value
-            if tag == "!re":
-                rows.append(attrs)
-            elif tag == "!done":
-                return rows
-            elif tag in {"!trap", "!fatal"}:
-                raise RouterOSAPIError(attrs.get("message") or f"RouterOS API returned {tag}")
-
-    def login(self):
-        self.command("/login", {"name": self.username, "password": self.password})
-
-    def command(self, command, attrs=None):
-        words = [command]
-        for key, value in (attrs or {}).items():
-            if value is None:
-                continue
-            words.append(f"={key}={value}")
-        self._write_sentence(words)
-        return self._read_response()
+    def close(self):
+        """Release this borrower without destroying the cached TCP socket."""
+        if not self._closed:
+            self._closed = True
+            self._entry.lock.release()
 
 
 def router_connect(tenant):
-    return RouterOSAPI(
-        host=tenant.get("mikrotik_host"),
-        username=tenant.get("mikrotik_user"),
-        password=tenant.get("mikrotik_pass"),
-        port=int(tenant.get("mikrotik_port") or 8728),
-        connect_timeout=int(tenant.get("mikrotik_connect_timeout") or 5),
-        read_timeout=int(tenant.get("mikrotik_timeout") or 20),
-        secure=int(tenant.get("mikrotik_port") or 8728) == 8729,
-    ).connect()
+    return router_connection_manager.acquire(tenant)
 
 
 def router_items(tenant, *path):
@@ -311,17 +403,14 @@ def router_add_item(tenant, path, fields):
 
 
 def find_router_item_by_fields(api, path, fields):
-    for item in api.path(*path).select():
-        if all(str(item.get(key) or "") == str(value or "") for key, value in fields.items()):
-            return item
-    return None
+    # RouterOS evaluates the equality query, and .proplist keeps the reply to
+    # the identifier plus the requested fields. This replaces a full-table
+    # transfer followed by Python-side filtering.
+    return next(iter(api.path(*path).select(proplist=(".id", *fields.keys()), **fields)), None)
 
 
 def find_router_item(api, path, name):
-    for item in api.path(*path).select():
-        if item.get("name") == name:
-            return item
-    return None
+    return next(iter(api.path(*path).select(proplist=(".id", "name"), name=name)), None)
 
 
 def upsert_router_profile(tenant, path, name, speed, session_timeout=None):
@@ -885,8 +974,8 @@ def router_interface_status(tenant):
 
     api = router_connect(tenant)
     try:
-        def items(*path):
-            return list(api.path(*path).select())
+        def items(*path, proplist=None):
+            return list(api.path(*path).select(proplist=proplist))
 
         def command_rows(command, attrs=None):
             try:
@@ -904,15 +993,15 @@ def router_interface_status(tenant):
                         return value
             return None
 
-        resource = (items("system", "resource") or [{}])[0]
-        routerboard = (items("system", "routerboard") or [{}])[0]
-        interfaces = items("interface")
-        pppoe_servers = items("interface", "pppoe-server", "server")
-        hotspot_servers = items("ip", "hotspot")
-        ppp_profiles = items("ppp", "profile")
-        hotspot_profiles = items("ip", "hotspot", "user", "profile")
-        active_hotspot = items("ip", "hotspot", "active")
-        active_ppp = items("ppp", "active")
+        resource = (items("system", "resource", proplist=("board-name", "version", "uptime", "cpu-load", "free-memory", "total-memory", "architecture-name")) or [{}])[0]
+        routerboard = (items("system", "routerboard", proplist=("model",)) or [{}])[0]
+        interfaces = items("interface", proplist=(".id", "name", "type", "running", "disabled", "mac-address", "comment", "mtu"))
+        pppoe_servers = items("interface", "pppoe-server", "server", proplist=(".id", "service-name", "name", "interface", "default-profile", "disabled"))
+        hotspot_servers = items("ip", "hotspot", proplist=(".id", "name", "interface", "profile", "disabled"))
+        ppp_profiles = items("ppp", "profile", proplist=("name", "rate-limit"))
+        hotspot_profiles = items("ip", "hotspot", "user", "profile", proplist=("name", "rate-limit"))
+        active_hotspot = items("ip", "hotspot", "active", proplist=("user", "name", "mac-address", "address", "uptime", "bytes-in", "bytes-out", "acct-input-octets", "acct-output-octets", "server"))
+        active_ppp = items("ppp", "active", proplist=("name", "user", "caller-id", "address", "uptime", "bytes-in", "bytes-out", "acct-input-octets", "acct-output-octets", "service", "interface"))
 
         traffic_by_name = {}
         for interface in interfaces:
@@ -929,7 +1018,7 @@ def router_interface_status(tenant):
             }
 
         wireless_by_interface = {}
-        for row in command_rows("/interface/wireless/registration-table/print"):
+        for row in command_rows("/interface/wireless/registration-table/print", {".proplist": "interface,mac-address,signal-strength,tx-rate,rx-rate,uptime"}):
             interface_name = row.get("interface")
             if not interface_name:
                 continue

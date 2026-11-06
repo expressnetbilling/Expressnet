@@ -2557,7 +2557,7 @@ def vouchers(request, voucher_id=None):
                 # itself from reaching the router.
                 profile_name = "default"
             users = api.path("ip", "hotspot", "user")
-            existing = next((item for item in users.select() if str(item.get("name") or "") == voucher_username), None)
+            existing = next(iter(users.select(proplist=(".id", "name"), name=voucher_username)), None)
             if existing and existing.get(".id"):
                 users.update(**{".id": existing[".id"], "name": voucher_username, "password": voucher_password, "profile": profile_name, "disabled": "no", "comment": f"billing-saas-voucher:{code}"})
             else:
@@ -3398,7 +3398,7 @@ def _disable_voucher_on_router(request, voucher):
     api = router_connect(request.tenant)
     try:
         users = api.path("ip", "hotspot", "user")
-        existing = next((item for item in users.select() if str(item.get("name") or "") == username), None)
+        existing = next(iter(users.select(proplist=(".id", "name"), name=username)), None)
         if existing and existing.get(".id"):
             users.update(**{".id": existing[".id"], "disabled": "yes"})
     finally:
@@ -3416,17 +3416,20 @@ def _delete_voucher_from_router(request, voucher):
     try:
         active = api.path("ip", "hotspot", "active")
         if username:
-            for item in list(active.select()):
-                if str(item.get("user") or "") == username and item.get(".id"):
+            for item in active.select(proplist=(".id", "user"), user=username):
+                if item.get(".id"):
                     try:
                         active.remove(item[".id"])
                     except Exception:
                         pass
         users = api.path("ip", "hotspot", "user")
-        for item in list(users.select()):
-            matches_username = username and str(item.get("name") or "") == username
-            matches_comment = voucher.get("code") and str(item.get("comment") or "") == comment
-            if (matches_username or matches_comment) and item.get(".id"):
+        matched = {}
+        if username:
+            matched.update({item.get(".id"): item for item in users.select(proplist=(".id", "name"), name=username)})
+        if voucher.get("code"):
+            matched.update({item.get(".id"): item for item in users.select(proplist=(".id", "comment"), comment=comment)})
+        for item in matched.values():
+            if item.get(".id"):
                 try:
                     users.remove(item[".id"])
                 except Exception:
@@ -3516,8 +3519,8 @@ def _delete_package_profile_from_router(tenant, package):
     try:
         path = ("ppp", "profile") if service_type == "pppoe" else ("ip", "hotspot", "user", "profile")
         router_path = api.path(*path)
-        for item in list(router_path.select()):
-            if str(item.get("name") or "") != name or not item.get(".id"):
+        for item in router_path.select(proplist=(".id", "name", "comment"), name=name):
+            if not item.get(".id"):
                 continue
             if service_type == "pppoe" and str(item.get("comment") or "") != "billing-saas-package":
                 continue
