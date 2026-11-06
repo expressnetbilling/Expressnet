@@ -2822,6 +2822,62 @@ def _agent_hotspot_redirect_setup(portal_url):
     ]
 
 
+def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
+    """Queue a periodic self-heal for already-assigned agent Hotspot ports."""
+    assignments = (tenant or {}).get("router_port_assignments") or {}
+    interfaces = [
+        str(name)
+        for name, assignment in assignments.items()
+        if isinstance(assignment, dict)
+        and str(assignment.get("service_type") or "").lower() in {"hotspot", "both"}
+        and str(assignment.get("status") or "").lower() == "applied"
+    ]
+    if not interfaces:
+        return False
+    repaired_at = str((tenant or {}).get("mikrotik_captive_portal_repair_queued_at") or "")
+    try:
+        repaired_time = datetime.fromisoformat(repaired_at.replace("Z", "+00:00"))
+        if timezone.is_naive(repaired_time):
+            repaired_time = timezone.make_aware(repaired_time, timezone.get_current_timezone())
+        if repaired_time > timezone.now() - timedelta(minutes=5):
+            return False
+    except (TypeError, ValueError):
+        pass
+    bridge = next(
+        (
+            str(assignment.get("bridge") or "").strip()
+            for assignment in assignments.values()
+            if isinstance(assignment, dict) and assignment.get("bridge")
+        ),
+        mikrotik_managed_bridge_name(tenant),
+    )
+    portal_url = captive_portal_url({"id": tenant_id, **tenant}, base_url)
+    script = _build_agent_port_assignment_script(
+        interfaces,
+        bridge,
+        service_type="hotspot",
+        tenant=tenant,
+        portal_url=portal_url,
+    )
+    if not script:
+        return False
+    _queue_router_command_for_tenant(
+        tenant_id,
+        {
+            "type": "repair_captive_portal",
+            "interfaces": interfaces,
+            "service_type": "hotspot",
+            "bridge": bridge,
+            "portal_url": portal_url,
+            "script": script,
+        },
+        tenant,
+    )
+    ref(f"tenants/{tenant_id}").update({"mikrotik_captive_portal_repair_queued_at": iso_now()})
+    logger.info("Queued captive portal repair tenant=%s interfaces=%s", tenant_id, ",".join(interfaces))
+    return True
+
+
 def _build_agent_port_assignment_script(interface_names, bridge_name, service_type="", tenant=None, portal_url=""):
     """Return an idempotent agent script for a customer port assignment.
 
@@ -4826,7 +4882,7 @@ def router_agent_poll(request, token):
         # delivered but was never acknowledged: a RouterOS inventory fetch
         # (or a brief WAN interruption) must not leave a configured port
         # permanently labelled as "Pending confirmation" in the dashboard.
-        if command.get("status") != "delivered" or command.get("type") not in {"sync_secrets", "sync_packages", "sync_voucher", "sync_hotspot_login", "configure_ports", "pull_configuration"}:
+        if command.get("status") != "delivered" or command.get("type") not in {"sync_secrets", "sync_packages", "sync_voucher", "sync_hotspot_login", "configure_ports", "repair_captive_portal", "pull_configuration"}:
             continue
         try:
             delivered_at = datetime.fromisoformat(str(command.get("delivered_at") or "").replace("Z", "+00:00"))
@@ -4842,6 +4898,11 @@ def router_agent_poll(request, token):
     commands.sort(key=lambda command: 0 if command.get("type") == "configure_ports" else 1)
     base_url = public_base_url(request).rstrip("/")
     if not commands:
+        try:
+            if _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
+                return HttpResponse(':log info "Billing SaaS agent: captive portal repair queued for next poll";\n', content_type="text/plain")
+        except Exception:
+            logger.exception("Could not queue captive portal repair tenant=%s", tenant_id)
         return HttpResponse(':log info "Billing SaaS agent: no pending commands";\n', content_type="text/plain")
 
     logger.info("MikroTik agent poll tenant=%s delivering=%s", tenant_id, len(commands))
