@@ -67,6 +67,8 @@ TENANT_AUTH_CACHE_SECONDS = int(os.getenv("TENANT_AUTH_CACHE_SECONDS", "5"))
 TENANT_EMAIL_VERIFICATION_REQUIRED = env_bool("TENANT_EMAIL_VERIFICATION_REQUIRED", False)
 
 SHARED_APPS = [
+    "daphne",
+    "channels",
     "django_tenants",
     "core",
     "django.contrib.auth",
@@ -191,6 +193,19 @@ def usable_redis_url(value):
 
 
 REDIS_URL = usable_redis_url(os.getenv("REDIS_PUBLIC_URL")) or usable_redis_url(os.getenv("REDIS_URL")) or railway_redis_url() or "redis://localhost:6379/0"
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [REDIS_URL],
+            # Status events are edge notifications; durable state remains in
+            # PostgreSQL. A short expiry prevents stale router events building
+            # up while a browser is disconnected.
+            "expiry": 30,
+            "capacity": 100,
+        },
+    },
+}
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache"

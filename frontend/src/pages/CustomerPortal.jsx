@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useParams } from 'react-router-dom';
 import axios from 'axios';
+import { openBearerWebSocket } from '../utils/realtime';
 
 const publicApi = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
@@ -115,6 +116,20 @@ export default function CustomerPortal() {
   const [routerContext, setRouterContext] = useState({ routerIp: '', clientIp: '', mac: '', linkLogin: '', dst: '' });
   const [paymentMethod, setPaymentMethod] = useState('');
   const [pendingPayment, setPendingPayment] = useState(null);
+  const [paymentRealtimeTick, setPaymentRealtimeTick] = useState(0);
+
+  useEffect(() => {
+    if (!pendingPayment?.id || !pendingPayment?.verifyToken) return undefined;
+    return openBearerWebSocket(
+      `/ws/public/${encodeURIComponent(tenantId)}/payment/${encodeURIComponent(pendingPayment.id)}/`,
+      pendingPayment.verifyToken,
+      (event) => {
+        if (event.type === 'payment.updated' && String(event.data?.payment_id) === String(pendingPayment.id)) {
+          setPaymentRealtimeTick((value) => value + 1);
+        }
+      },
+    );
+  }, [tenantId, pendingPayment?.id, pendingPayment?.verifyToken]);
 
   useEffect(() => {
     const routeServiceType = pathServiceType();
@@ -251,12 +266,14 @@ export default function CustomerPortal() {
     }
 
     verifyMpesaPayment();
-    const timer = window.setInterval(verifyMpesaPayment, 5000);
+    // WebSocket payment events usually cause an immediate verification. Keep
+    // a slower fallback for browsers behind captive portals that block WS.
+    const timer = window.setInterval(verifyMpesaPayment, 15000);
     return () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [pendingPayment, routerContext.dst, routerContext.routerIp, routerContext.linkLogin, tenantId]);
+  }, [pendingPayment, paymentRealtimeTick, routerContext.dst, routerContext.routerIp, routerContext.linkLogin, tenantId]);
 
   const openPayment = (pkg, type = serviceType) => {
     setSelectedPackage(pkg);

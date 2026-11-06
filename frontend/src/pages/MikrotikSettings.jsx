@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 import api from '../api/axios';
 import Pagination from '../components/Pagination';
+import { openBearerWebSocket } from '../utils/realtime';
 
 function toDate(value) {
   if (!value) return null;
@@ -53,6 +54,7 @@ export default function MikrotikSettings() {
   const [search, setSearch] = useState('');
   const [openActionId, setOpenActionId] = useState('');
   const [actionPosition, setActionPosition] = useState(null);
+  const [routerRealtimeTick, setRouterRealtimeTick] = useState(0);
   const [page, setPage] = useState(1);
   const pageSize = 10;
 
@@ -124,12 +126,21 @@ export default function MikrotikSettings() {
   }
 
   useEffect(() => {
+    const token = localStorage.getItem('billing_saas_token');
+    return openBearerWebSocket('/ws/tenant/realtime/', token, (event) => {
+      if (String(event.type || '').startsWith('router.')) {
+        setRouterRealtimeTick((value) => value + 1);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
     loadConfig();
     const interval = window.setInterval(() => {
       loadConfig({ silent: true });
     }, 30000);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [routerRealtimeTick]);
 
   const editRouter = async (routerId) => {
     setOpenActionId('');

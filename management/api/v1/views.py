@@ -35,6 +35,7 @@ from rest_framework.permissions import AllowAny
 
 from billing_api.auth import admin_required, tenant_required
 from billing_api.models import AdminAuditLog, AdminUser, Customer, InternetPackage, Payment, PaystackWithdrawal, SubscriptionPayment, Tenant, TenantSubscription, Ticket, User
+from network.realtime import publish_realtime_event
 from core.models import Tenant as SchemaTenant
 from billing_api.services import (
     admin_token,
@@ -4066,6 +4067,17 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code):
             ref(f"tenants/{tenant_id}/payments/{payment_id}").update({"notification_status": "sent" if sent_channels else "skipped", "notification_channels": sent_channels, "notification_detail": skipped})
     except Exception as exc:
         ref(f"tenants/{tenant_id}/payments/{payment_id}").update({"whatsapp_status": "failed", "whatsapp_detail": str(exc)})
+    publish_realtime_event(
+        tenant_id,
+        "payment.updated",
+        {
+            "payment_id": str(payment_id),
+            "status": "success",
+            "access_status": router_access_status,
+            "access_error": router_access_error or "",
+        },
+        payment_id=payment_id,
+    )
     return access
 
 
@@ -4080,6 +4092,16 @@ def _queue_paid_access_activation(tenant_id, payment_id, reason="payment confirm
         "activation_queued_at": now,
         "activation_queue_reason": reason,
     })
+    publish_realtime_event(
+        tenant_id,
+        "payment.updated",
+        {
+            "payment_id": str(payment_id),
+            "status": "success",
+            "access_status": "activation_pending",
+        },
+        payment_id=payment_id,
+    )
     try:
         activate_paid_payment.delay(str(tenant_id), str(payment_id))
         return True

@@ -34,6 +34,7 @@ from rest_framework.permissions import AllowAny
 
 from billing_api.auth import admin_required, tenant_required
 from billing_api.models import AdminUser, Customer, InternetPackage, Payment, SubscriptionPayment, Tenant, TenantSubscription, Ticket, User, Voucher
+from network.realtime import publish_realtime_event
 from network.services.provisioning import RouterOSAPIError
 from billing_api.services import (
     admin_token,
@@ -3609,6 +3610,15 @@ def _queue_router_command_for_tenant(tenant_id, command_data, tenant_data=None):
         locked_tenant.apply_data({"pending_router_commands": commands})
         locked_tenant.save()
     logger.info("Router command queued tenant=%s command=%s type=%s", tenant_id, command_id, command_data.get("type") or "router")
+    publish_realtime_event(
+        tenant_id,
+        "router.command.queued",
+        {
+            "command_id": command_id,
+            "command_type": command_data.get("type") or "router",
+            "status": "pending",
+        },
+    )
     return ok({
         "success": True,
         "queued": True,
@@ -4891,6 +4901,15 @@ def router_agent_poll(request, token):
             "mikrotik_last_command_delivered_at": delivered_at,
         })
         locked_tenant.save()
+    if delivered_ids:
+        publish_realtime_event(
+            tenant_id,
+            "router.command.delivered",
+            {
+                "command_ids": sorted(delivered_ids),
+                "status": "delivered",
+            },
+        )
     return HttpResponse("\n".join(lines) + "\n", content_type="text/plain")
 
 @csrf_exempt
@@ -4939,6 +4958,15 @@ def router_agent_ack(request, token, command_id):
 
     if updated:
         logger.info("MikroTik agent acknowledged command tenant=%s command=%s type=%s", tenant_id, command_id, (applied_command or {}).get("type"))
+        publish_realtime_event(
+            tenant_id,
+            "router.command.applied",
+            {
+                "command_id": command_id,
+                "command_type": (applied_command or {}).get("type") or "router",
+                "status": "applied",
+            },
+        )
         if (applied_command or {}).get("type") == "sync_packages":
             for package_id_value in ((applied_command or {}).get("package_ids") or []):
                 ref(f"tenants/{tenant_id}/packages/{package_id_value}").update({
@@ -4960,6 +4988,16 @@ def router_agent_ack(request, token, command_id):
                     "access_status": "active",
                     "access_error": None,
                 })
+                publish_realtime_event(
+                    tenant_id,
+                    "payment.updated",
+                    {
+                        "payment_id": payment_id_value,
+                        "status": "success",
+                        "access_status": "active",
+                    },
+                    payment_id=payment_id_value,
+                )
             if payment_ids:
                 Payment.objects.filter(tenant_id=tenant_id, pk__in=payment_ids).update(access_status="active")
         if (applied_command or {}).get("type") == "suspend_router":

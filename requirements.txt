@@ -1,4 +1,6 @@
 Django==6.0.5
+channels[daphne]==4.3.2
+channels-redis==4.3.0
 django-tenants==3.14.0
 djangorestframework==3.17.1
 PyJWT==2.13.0
