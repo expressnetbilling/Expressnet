@@ -4219,6 +4219,43 @@ def _queue_paid_access_activation(tenant_id, payment_id, reason="payment confirm
         return False
 
 
+def _activate_paid_access_immediately(tenant_id, payment_id, reason="payment confirmation"):
+    """Activate paid local Hotspot access without relying on Celery/RADIUS.
+
+    The STK callback marks a payment successful only after Safaricom confirms
+    it.  At that point the customer path must create and enable the RouterOS
+    user immediately.  Celery is retained solely as recovery for a temporary
+    router failure; it is not allowed to gate internet access.
+    """
+    payment_path = f"tenants/{tenant_id}/payments/{payment_id}"
+    payment = ref(payment_path).get() or {}
+    if payment.get("status") != "success":
+        return False
+    if str(payment.get("access_status") or "").lower() == "active":
+        return True
+
+    tenant = {"id": str(tenant_id), **(ref(f"tenants/{tenant_id}").get() or {})}
+    # Explicitly bypass any stale tenant flag from an old RADIUS deployment.
+    tenant["radius_enabled"] = False
+    try:
+        activate_paid_access(
+            tenant,
+            str(payment_id),
+            payment,
+            payment.get("phone"),
+            payment.get("payment_code") or payment.get("daraja_receipt_number") or str(payment_id),
+            notify=False,
+        )
+        current = ref(payment_path).get() or {}
+        if str(current.get("access_status") or "").lower() == "active":
+            logger.info("Paid access activated directly tenant=%s payment=%s reason=%s", tenant_id, payment_id, reason)
+            return True
+        logger.warning("Direct paid access did not reach active state tenant=%s payment=%s status=%s", tenant_id, payment_id, current.get("access_status"))
+    except Exception:
+        logger.exception("Direct paid access activation failed tenant=%s payment=%s", tenant_id, payment_id)
+    return False
+
+
 def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, receipt, paid_at, phone):
     payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get()
     if not payment:
@@ -4227,7 +4264,8 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
     if payment.get("status") == "success":
         access_status = str(payment.get("access_status") or "").lower()
         if access_status != "activation_processing" and (not payment.get("access_username") or access_status in {"", "pending", "activation_pending", "activation_failed"}):
-            _queue_paid_access_activation(tenant_id, payment_id, "duplicate Daraja callback")
+            if not _activate_paid_access_immediately(tenant_id, payment_id, "duplicate Daraja callback"):
+                _queue_paid_access_activation(tenant_id, payment_id, "duplicate Daraja callback recovery")
         return True
 
     expected_amount = round(float(payment.get("amount") or 0), 2)
@@ -4311,10 +4349,12 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         "tenant_settlement_queued_at": iso_now() if platform_collected else "",
     })
     ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
-    # Never call RouterOS, RADIUS or notification providers inline here.
-    # Safaricom retries callbacks that do not finish promptly, which used to
-    # turn an already-paid customer into a duplicate/failed activation.
-    _queue_paid_access_activation(tenant_id, payment_id, "Daraja callback")
+    # The customer must be online as soon as the STK callback confirms
+    # payment.  Use the local RouterOS binary API now; settlement remains a
+    # separate background concern.  If the router is briefly unavailable, the
+    # durable queue below is recovery only, never the normal access path.
+    if not _activate_paid_access_immediately(tenant_id, payment_id, "Daraja callback"):
+        _queue_paid_access_activation(tenant_id, payment_id, "Daraja callback router recovery")
     current_balance = float(tenant_data.get("settlement_pending_amount") or 0)
     tenant_balance_update = {
         "settlement_pending_amount": round(current_balance + tenant_net_amount, 2) if platform_collected else current_balance,

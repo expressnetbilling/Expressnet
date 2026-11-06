@@ -63,19 +63,13 @@ def has_mikrotik_credentials(tenant):
 
 
 def radius_client_enabled(tenant):
-    """Return true only when a RADIUS server was explicitly configured."""
-    tenant = tenant or {}
-    extra = tenant.get("extra") if isinstance(tenant, dict) else getattr(tenant, "extra", {})
-    extra = extra or {}
-    configured_host = (
-        os.getenv("RADIUS_SERVER_IP")
-        or os.getenv("RADIUS_SERVER_HOST")
-        or os.getenv("RADIUS_HOST_IP")
-        or (tenant.get("radius_server_ip") if isinstance(tenant, dict) else "")
-        or extra.get("radius_server_ip")
-    )
-    requested = tenant.get("radius_enabled") if isinstance(tenant, dict) else getattr(tenant, "radius_enabled", False)
-    return bool(configured_host and requested)
+    """RADIUS is deliberately disabled while local RouterOS auth is active.
+
+    Paid Hotspot users are provisioned directly through the native binary API.
+    Leaving an old ``use-radius=yes`` profile enabled makes RouterOS reject
+    those local users when no RADIUS service is running.
+    """
+    return False
 
 
 def normalize_rate_limit(speed):
@@ -1642,6 +1636,29 @@ def upsert_customer_access(tenant, customer, disabled=False):
     api = router_connect(tenant)
     try:
         ensure_rate_limit_fasttrack_exemptions(api)
+        if service_type == "hotspot":
+            # A previous RADIUS deployment can leave the active Expressnet
+            # profile set to use-radius=yes.  Ensure that a payment always
+            # authenticates against the Hotspot user we create below.
+            servers = list(api.path("ip", "hotspot").select(proplist=("profile",)))
+            profile_names = {"Expressnet-profile"}
+            profile_names.update(str(server.get("profile") or "") for server in servers)
+            for profile in api.path("ip", "hotspot", "profile").select(proplist=(".id", "name", "use-radius", "radius-accounting")):
+                if profile.get(".id") and profile.get("name") in profile_names:
+                    try:
+                        api.path("ip", "hotspot", "profile").update(**{
+                            ".id": profile[".id"],
+                            "use-radius": "no",
+                            "radius-accounting": "no",
+                        })
+                    except RouterOSAPIError:
+                        # Some RouterOS versions do not expose
+                        # radius-accounting on every profile. Local auth is
+                        # still the essential setting for paid users.
+                        api.path("ip", "hotspot", "profile").update(**{
+                            ".id": profile[".id"],
+                            "use-radius": "no",
+                        })
         if service_type == "tv":
             mac_address = str(customer.get("mac_address") or customer.get("username") or "").strip().upper()
             if not mac_address:
