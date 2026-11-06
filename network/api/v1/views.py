@@ -2806,16 +2806,16 @@ def _repair_legacy_router_port_script(script):
 def _build_agent_port_assignment_script(interface_names, bridge_name, service_type="", tenant=None, portal_url=""):
     """Return an idempotent agent script for a customer port assignment.
 
-    This is imported by RouterOS as a single command. It must therefore remain
-    deliberately parser-conservative.  In addition to bridge membership, a
+    This is imported by RouterOS as a .rsc file. It must therefore remain
+    deliberately parser-conservative, with one complete operation per line.
+    In addition to bridge membership, a
     Hotspot assignment repairs the Hotspot service on that bridge.  Moving a
     WLAN into the bridge alone gives clients DHCP but leaves them with "No
     internet" instead of a captive redirect.
     """
     bridge = _rsc_escape(bridge_name or "Expressnet-bridge")
     lines = [
-        f':local billingBridge "{bridge}";',
-        ':do { /interface bridge add name=$billingBridge comment="Created by Expressnet" } on-error={};',
+        f':do {{ /interface bridge add name="{bridge}" comment="Created by Expressnet" }} on-error={{}};',
         # Upgrade existing agents too; otherwise routers provisioned before
         # the 10-second interval would retain their old 30-second scheduler.
         ':do { /system scheduler set [find name="billing-saas-agent"] interval=10s } on-error={};',
@@ -2849,9 +2849,7 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
         port = _rsc_escape(interface_name)
         wireless = str(interface_name or "").lower().startswith(("wlan", "wifi", "wireless"))
         lines.extend((
-            f':local billingPort "{port}";',
-            ':if ([:len [/interface find name=$billingPort]] = 0) do={ :error ("Router interface not found: " . $billingPort) };',
-            ':do { /interface enable [find name=$billingPort] } on-error={};',
+            f':do {{ /interface enable [find name="{port}"] }} on-error={{ :log warning "Billing SaaS: customer interface {port} was not found" }};',
         ))
         if hotspot_requested and wireless:
             ssid = _rsc_escape(str(tenant.get("business_name") or "Expressnet")[:32])
@@ -2860,18 +2858,18 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
             lines.extend((
                 f':do {{ /interface wireless security-profiles add name="billing-saas-open" mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{}};',
                 f':do {{ /interface wireless security-profiles set [find name="billing-saas-open"] mode=none authentication-types="" wpa-pre-shared-key="" wpa2-pre-shared-key="" supplicant-identity="billing-saas" }} on-error={{}};',
-                f':do {{ /interface wireless set [find name=$billingPort] ssid="{ssid}" security-profile="billing-saas-open" disabled=no }} on-error={{}};',
-                f':do {{ /interface wifi set [find name=$billingPort] configuration.ssid="{ssid}" security.authentication-types="" security.passphrase="" disabled=no }} on-error={{}};',
-                ':do { /interface wireless registration-table remove [find interface=$billingPort] } on-error={};',
-                ':do { /interface wifi registration-table remove [find interface=$billingPort] } on-error={};',
-                ':log info ("Billing SaaS: cleared WLAN security and reconnected clients on " . $billingPort . ".");',
+                f':do {{ /interface wireless set [find name="{port}"] ssid="{ssid}" security-profile="billing-saas-open" disabled=no }} on-error={{}};',
+                # RB951Ui-2Hn routers use the legacy wireless menu. Emitting
+                # /interface wifi for wlan1 on RouterOS 7.12 aborts the entire
+                # import before bridge membership can be changed.
+                f':do {{ /interface wireless registration-table remove [find interface="{port}"] }} on-error={{}};',
+                f':log info "Billing SaaS: cleared WLAN security and reconnected clients on {port}";',
             ))
         lines.extend((
-            ':do { /interface bridge port remove [find interface=$billingPort] } on-error={};',
-            ':do { /interface bridge port add bridge=$billingBridge interface=$billingPort disabled=no comment="billing-saas customer port" } on-error={};',
-            ':do { /interface bridge port set [find interface=$billingPort bridge=$billingBridge] disabled=no } on-error={};',
-            ':if ([:len [/interface bridge port find interface=$billingPort bridge=$billingBridge disabled=no]] = 0) do={ :error ("Could not attach port to Expressnet bridge: " . $billingPort) };',
-            ':log info ("Billing SaaS: assigned customer port " . $billingPort . " to " . $billingBridge . ".");',
+            f':do {{ /interface bridge port remove [find interface="{port}"] }} on-error={{}};',
+            f':do {{ /interface bridge port add bridge="{bridge}" interface="{port}" disabled=no comment="billing-saas customer port" }} on-error={{}};',
+            f':do {{ /interface bridge port set [find interface="{port}" bridge="{bridge}"] disabled=no }} on-error={{}};',
+            f':log info "Billing SaaS: assigned customer port {port} to {bridge}";',
         ))
     if hotspot_requested:
         # Keep this repair small enough for RouterOS's scheduler/import parser.
@@ -2879,17 +2877,20 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
         # these commands make the configured bridge immediately captive again.
         lines.extend((
             ':do { /ip dns set allow-remote-requests=yes } on-error={};',
-            f':if ([:len [/ip pool find name={hotspot_pool}]] = 0) do={{ /ip pool add name={hotspot_pool} ranges="{hotspot_pool_range}" comment="Created by Expressnet" }} else={{ /ip pool set [find name={hotspot_pool}] ranges="{hotspot_pool_range}" }};',
-            f':do {{ /ip address add address="{hotspot_cidr}" interface=$billingBridge comment="Added by Expressnet" }} on-error={{}};',
-            f':if ([:len [/ip dhcp-server find name=Expressnet-dhcp]] = 0) do={{ /ip dhcp-server add name=Expressnet-dhcp interface=$billingBridge address-pool={hotspot_pool} disabled=no lease-time=4h }} else={{ /ip dhcp-server set [find name=Expressnet-dhcp] interface=$billingBridge address-pool={hotspot_pool} disabled=no lease-time=4h }};',
-            f':if ([:len [/ip dhcp-server network find address="{hotspot_network}"]] = 0) do={{ /ip dhcp-server network add address="{hotspot_network}" gateway="{hotspot_gateway}" dns-server="{hotspot_gateway}" }} else={{ /ip dhcp-server network set [find address="{hotspot_network}"] gateway="{hotspot_gateway}" dns-server="{hotspot_gateway}" }};',
-            f':if ([:len [/ip hotspot profile find name="Expressnet-profile"]] = 0) do={{ /ip hotspot profile add name=Expressnet-profile hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie html-directory=Expressnet-hotspot }} else={{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie html-directory=Expressnet-hotspot }};',
-            ':local billingHotspot [/ip hotspot find name="Expressnet-hotspot"];',
-            f':if ([:len $billingHotspot] > 0) do={{ /ip hotspot set $billingHotspot interface=$billingBridge address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }} else={{ /ip hotspot add name=Expressnet-hotspot interface=$billingBridge address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }};',
-            ':if ([:len [/ip hotspot find interface=$billingBridge disabled=no]] = 0) do={ :error "Hotspot service is not active on the Expressnet bridge" };',
+            f':do {{ /ip pool add name={hotspot_pool} ranges="{hotspot_pool_range}" comment="Created by Expressnet" }} on-error={{}};',
+            f':do {{ /ip pool set [find name={hotspot_pool}] ranges="{hotspot_pool_range}" }} on-error={{}};',
+            f':do {{ /ip address add address="{hotspot_cidr}" interface="{bridge}" comment="Added by Expressnet" }} on-error={{}};',
+            f':do {{ /ip dhcp-server add name=Expressnet-dhcp interface="{bridge}" address-pool={hotspot_pool} disabled=no lease-time=4h }} on-error={{}};',
+            f':do {{ /ip dhcp-server set [find name=Expressnet-dhcp] interface="{bridge}" address-pool={hotspot_pool} disabled=no lease-time=4h }} on-error={{}};',
+            f':do {{ /ip dhcp-server network add address="{hotspot_network}" gateway="{hotspot_gateway}" dns-server="{hotspot_gateway}" }} on-error={{}};',
+            f':do {{ /ip dhcp-server network set [find address="{hotspot_network}"] gateway="{hotspot_gateway}" dns-server="{hotspot_gateway}" }} on-error={{}};',
+            f':do {{ /ip hotspot profile add name=Expressnet-profile hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie html-directory=Expressnet-hotspot }} on-error={{}};',
+            f':do {{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie html-directory=Expressnet-hotspot }} on-error={{}};',
+            f':do {{ /ip hotspot add name=Expressnet-hotspot interface="{bridge}" address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }} on-error={{}};',
+            f':do {{ /ip hotspot set [find name="Expressnet-hotspot"] interface="{bridge}" address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }} on-error={{}};',
             ':log info "Billing SaaS: Hotspot service is active on the Expressnet bridge.";',
         ))
-    return " ".join(lines)
+    return "\n".join(lines)
 
 
 def _queue_router_ports_command(request, interface_names, service_type, profile_name, failure_message=""):
@@ -5300,6 +5301,16 @@ def router_provision_snapshot(request, token, section):
             assignment.update({"status": "applied", "updated_at": iso_now()})
             assignments[interface_name] = assignment
             snapshot_updates["router_port_assignments"] = assignments
+            publish_realtime_event(
+                tenant_id,
+                "router.command.applied",
+                {
+                    "command_id": assignment.get("command_id") or "",
+                    "command_type": "configure_ports",
+                    "interface": interface_name,
+                    "status": "applied",
+                },
+            )
     migration_sections = {
         "migration-pppoe-profile",
         "migration-hotspot-profile",

@@ -11,6 +11,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import api from '../api/axios';
+import { openBearerWebSocket } from '../utils/realtime';
 
 function portLabel(name) {
   return String(name || '')
@@ -43,6 +44,7 @@ export default function MikrotikSettings() {
   const [selectedPorts, setSelectedPorts] = useState([]);
   const [routerName, setRouterName] = useState('');
   const [migrationMode, setMigrationMode] = useState(false);
+  const [routerRealtimeTick, setRouterRealtimeTick] = useState(0);
   const provisionRequestRef = useRef({ key: '', promise: null, data: null });
 
   const configured = useMemo(
@@ -179,6 +181,20 @@ export default function MikrotikSettings() {
   }, []);
 
   useEffect(() => {
+    const token = localStorage.getItem('billing_saas_token');
+    return openBearerWebSocket('/ws/tenant/realtime/', token, (event) => {
+      if (!String(event.type || '').startsWith('router.')) return;
+      if (event.type === 'router.command.delivered') setAssignmentProgress('Router received the bridge command…');
+      if (event.type === 'router.command.applied') setAssignmentProgress('Router applied the bridge command. Confirming…');
+      setRouterRealtimeTick((value) => value + 1);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (activeStep === 'configure') pullRouterStatus({ silent: true });
+  }, [routerRealtimeTick]);
+
+  useEffect(() => {
     loadProvisionCommand();
   }, [migrationMode]);
 
@@ -231,12 +247,12 @@ export default function MikrotikSettings() {
     // The router-side agent polls every 30 seconds. Keep the action visibly
     // in progress and resolve its promise as soon as the acknowledgement is
     // reflected in status instead of making the operator refresh manually.
-    const maxAttempts = 18;
+    const maxAttempts = 12;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       setAssignmentProgress(
         attempt === 0
           ? 'Waiting for the router to confirm…'
-          : `Waiting for router confirmation… (${Math.min(attempt * 2, 36)}s)`,
+          : `Waiting for router confirmation… (${Math.min(attempt * 3, 36)}s)`,
       );
       const status = await pullRouterStatus({ silent: true });
       const assignments = status?.assignments || {};
@@ -248,7 +264,7 @@ export default function MikrotikSettings() {
       if (failed.length > 0 || unconfirmed.length === 0) {
         return { confirmed: unconfirmed.length === 0, failed };
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      await new Promise((resolve) => window.setTimeout(resolve, 3000));
     }
     return { confirmed: false, failed: [] };
   };
@@ -394,6 +410,7 @@ export default function MikrotikSettings() {
           </div>
           <div className="mt-3 flex justify-end">
             <button type="button" className="btn-primary" onClick={goToConfiguration} disabled={pullingStatus}>
+              {pullingStatus && <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />}
               {pullingStatus ? 'Pulling live config...' : 'Next'}
               <ArrowRight size={16} />
             </button>
