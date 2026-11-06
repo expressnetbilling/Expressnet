@@ -54,7 +54,12 @@ export default function Register() {
       const { data } = await api.post('/auth/register', payload);
       setRegistration({ message: data.message || 'Your account was created. Check your email and open the verification link to continue to sign in.', email: form.email });
     } catch (error) {
-      const message = error.response?.data?.message || error.response?.data?.error || error.message || 'Registration failed';
+      const responseMessage = error.response?.data?.message || error.response?.data?.error || error.message || '';
+      const isInternalFailure = Number(error.response?.status || 0) >= 500
+        || /database|schema|migration|integrity|traceback/i.test(responseMessage);
+      const message = isInternalFailure
+        ? 'We could not create your account right now. Please try again shortly.'
+        : (responseMessage || 'Registration failed');
       toast.error(message);
     } finally { setLoading(false); }
   };

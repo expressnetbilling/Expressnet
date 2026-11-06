@@ -977,8 +977,14 @@ def auth_register(request):
         if "email" in str(exc).lower() or "unique" in str(exc).lower():
             logger.info("Tenant registration duplicate email race for %s", email)
             return ok({"message": "Email already registered"}, 400)
-        logger.exception("Tenant registration database constraint failed for %s", email)
-        return ok({"message": "Registration failed because the database schema is out of date. Please run migrations."}, 500)
+        # Database/migration details are operational diagnostics, not public
+        # registration feedback. They remain in the protected server/admin
+        # diagnostics, while tenants receive a safe, actionable response.
+        logger.exception("Tenant registration database constraint failed for %s; inspect migrations in the admin system view", email)
+        return ok({
+            "message": "We could not create your account right now. Please try again shortly.",
+            "code": "REGISTRATION_TEMPORARILY_UNAVAILABLE",
+        }, 500)
     except Exception:
         logger.exception("Tenant registration failed for %s", email)
         return ok({"message": "Registration failed. Please try again or contact support."}, 500)
