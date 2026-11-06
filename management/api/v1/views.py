@@ -2325,6 +2325,8 @@ def payments(request):
         status_filter = request.GET.get("status")
         from_date = parse_date(request.GET.get("from"))
         to_date = parse_date(request.GET.get("to"))
+        from_day = from_date.date() if from_date else None
+        to_day = to_date.date() if to_date else None
         if status_filter and status_filter != "all":
             payments_data = [item for item in payments_data if item.get("status") == status_filter]
         if from_date or to_date:
@@ -2333,9 +2335,10 @@ def payments(request):
                 current = payment_date(item)
                 if not current:
                     continue
-                if from_date and current < from_date:
+                current_day = current.date()
+                if from_day and current_day < from_day:
                     continue
-                if to_date and current > to_date:
+                if to_day and current_day > to_day:
                     continue
                 filtered.append(item)
             payments_data = filtered
@@ -2984,10 +2987,34 @@ def report_expenses(request):
     expenses = request.tenant.get("expenses") or []
     if not isinstance(expenses, list):
         expenses = []
+    start = parse_date(request.GET.get("from"))
+    end = parse_date(request.GET.get("to"))
+    start_date = start.date() if start else None
+    end_date = end.date() if end else None
     by_category = defaultdict(float)
     for expense in expenses:
+        expense_date = parse_date(
+            expense.get("paid_at")
+            or expense.get("date")
+            or expense.get("created_at")
+        )
+        current_date = expense_date.date() if expense_date else None
+        if start_date and (not current_date or current_date < start_date):
+            continue
+        if end_date and (not current_date or current_date > end_date):
+            continue
         by_category[expense.get("category") or "Other"] += float(expense.get("amount") or 0)
-    revenue = sum(float(p.get("amount") or 0) for p in tenant_payments(request.tenant["id"]) if p.get("status") == "success")
+    revenue = 0.0
+    for payment in tenant_payments(request.tenant["id"]):
+        if payment.get("status") != "success":
+            continue
+        paid_at = payment_date(payment)
+        paid_date = paid_at.date() if paid_at else None
+        if start_date and (not paid_date or paid_date < start_date):
+            continue
+        if end_date and (not paid_date or paid_date > end_date):
+            continue
+        revenue += float(payment.get("amount") or 0)
     total_expenses = sum(by_category.values())
     return ok({"results": [{"category": key, "amount": round(value, 2)} for key, value in sorted(by_category.items())], "total_expenses": round(total_expenses, 2), "net_revenue": round(revenue - total_expenses, 2)})
 

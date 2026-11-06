@@ -188,10 +188,25 @@ export default function MikrotikSettings() {
     try {
       const { data } = await api.delete('/router/delete', { data: { current_password: deletePassword } });
       toast.success(data.message || 'Router deleted');
+      // Do not make the operator wait for Firebase/the next status poll before
+      // reflecting a successful, password-confirmed deletion. The API clears
+      // the tenant's linked router, and this optimistic update prevents the
+      // old row being presented as if it still needs deleting.
+      setConfig((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          linked_routers: {},
+          mikrotik_provisioning_status: '',
+          mikrotik_last_seen_at: '',
+          mikrotik_last_seen_ip: '',
+        };
+      });
       setRouterStatus(null);
       setDeleteTarget('');
       setDeletePassword('');
-      await loadConfig();
+      // Reconcile in the background; the row is already gone from the UI.
+      void loadConfig({ silent: true });
     } catch (error) {
       toast.error(error.response?.data?.message || 'Failed to delete router');
     } finally {

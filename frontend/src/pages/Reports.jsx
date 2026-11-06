@@ -1,4 +1,4 @@
-import { Download, Eye } from 'lucide-react';
+import { CalendarDays, Download, RotateCcw } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import api from '../api/axios';
@@ -101,8 +101,39 @@ function LineChart({ data, indexes = [1], colors = [ACCENT], height = 190 }) {
   );
 }
 
-function sameDay(a, b) {
-  return a && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+function dateInputValue(date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function monthStartInputValue() {
+  const today = new Date();
+  return dateInputValue(new Date(today.getFullYear(), today.getMonth(), 1));
+}
+
+function paymentSeries(payments) {
+  const grouped = new Map();
+  payments.forEach((payment) => {
+    const paidAt = toDate(payment.paid_at || payment.created_at || payment.initiated_at);
+    if (!paidAt) return;
+    const key = dateInputValue(paidAt);
+    grouped.set(key, (grouped.get(key) || 0) + Number(payment.amount || 0));
+  });
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .slice(-12)
+    .map(([date, amount]) => [date.slice(5), amount]);
+}
+
+function packageSeries(payments) {
+  const grouped = new Map();
+  payments.forEach((payment) => {
+    const name = String(payment.package_name || 'Unassigned').trim() || 'Unassigned';
+    grouped.set(name, (grouped.get(name) || 0) + Number(payment.amount || 0));
+  });
+  return [...grouped.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 6);
 }
 
 function exportCsv(rows, filename = 'report.csv') {
@@ -120,10 +151,7 @@ function MetricCard({ title, value, helper }) {
   return (
     <div className="rounded-md p-4 shadow-[0_18px_30px_rgba(15,23,42,0.12)]" style={{ background: 'var(--app-metric-card-bg)', color: 'var(--app-text)' }}>
       <p className="text-xs font-medium">{title}</p>
-      <div className="mt-3 flex items-center gap-2">
-        <p className="text-xl font-semibold">{formatKES(value)}</p>
-        <Eye size={14} />
-      </div>
+      <p className="mt-3 text-xl font-semibold">{formatKES(value)}</p>
       <p className="mt-2 text-xs">{helper}</p>
     </div>
   );
@@ -144,42 +172,61 @@ export default function Reports({ type = 'finance' }) {
   const copy = reportCopy[reportType];
   const [payments, setPayments] = useState([]);
   const [dashboard, setDashboard] = useState(null);
+  const [expenseSummary, setExpenseSummary] = useState({ total_expenses: 0, net_revenue: 0 });
+  const [fromDate, setFromDate] = useState(monthStartInputValue);
+  const [toDateValue, setToDateValue] = useState(() => dateInputValue(new Date()));
+  const [appliedRange, setAppliedRange] = useState(() => ({ from: monthStartInputValue(), to: dateInputValue(new Date()) }));
 
   useEffect(() => {
     async function load() {
       try {
+        const query = new URLSearchParams({ all: '1' });
+        if (reportType === 'finance') {
+          if (appliedRange.from) query.set('from', appliedRange.from);
+          if (appliedRange.to) query.set('to', appliedRange.to);
+        }
         const [paymentsResponse, dashboardResponse] = await Promise.all([
-          api.get('/payments?page_size=100'),
+          api.get(`/payments?${query.toString()}`),
           api.get('/dashboard/stats'),
         ]);
         const paymentData = paymentsResponse.data;
         setPayments(Array.isArray(paymentData) ? paymentData : paymentData.results || []);
         setDashboard(dashboardResponse.data);
+        if (reportType === 'finance') {
+          const expensesResponse = await api.get(`/reports/expenses?from=${encodeURIComponent(appliedRange.from)}&to=${encodeURIComponent(appliedRange.to)}`);
+          setExpenseSummary(expensesResponse.data || { total_expenses: 0, net_revenue: 0 });
+        }
       } catch (error) {
         toast.error(error.response?.data?.message || 'Failed to load report');
       }
     }
     load();
-  }, []);
+  }, [reportType, appliedRange]);
 
   const successfulPayments = useMemo(() => payments.filter((payment) => payment.status === 'success'), [payments]);
+  const financialTotals = useMemo(() => {
+    const revenue = successfulPayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+    const expenses = Number(expenseSummary.total_expenses || 0);
+    return { revenue, expenses, net: revenue - expenses };
+  }, [expenseSummary, successfulPayments]);
+  const financialPaymentSeries = useMemo(() => paymentSeries(successfulPayments), [successfulPayments]);
+  const financialPackageSeries = useMemo(() => packageSeries(successfulPayments), [successfulPayments]);
+  const rangeLabel = appliedRange.from && appliedRange.to ? `${appliedRange.from} to ${appliedRange.to}` : 'Selected period';
 
-  const totals = useMemo(() => {
-    const now = new Date();
-    const weekStart = new Date(now);
-    weekStart.setDate(now.getDate() - now.getDay());
-    weekStart.setHours(0, 0, 0, 0);
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const sumSince = (start) => successfulPayments.reduce((sum, payment) => {
-      const date = toDate(payment.paid_at || payment.created_at);
-      return date && date >= start ? sum + Number(payment.amount || 0) : sum;
-    }, 0);
-    return {
-      daily: successfulPayments.reduce((sum, payment) => (sameDay(toDate(payment.paid_at || payment.created_at), now) ? sum + Number(payment.amount || 0) : sum), 0),
-      weekly: sumSince(weekStart),
-      monthly: sumSince(monthStart),
-    };
-  }, [successfulPayments]);
+  const applyDateRange = () => {
+    if (fromDate && toDateValue && fromDate > toDateValue) {
+      toast.error('The start date must be on or before the end date');
+      return;
+    }
+    setAppliedRange({ from: fromDate, to: toDateValue });
+  };
+
+  const resetDateRange = () => {
+    const next = { from: monthStartInputValue(), to: dateInputValue(new Date()) };
+    setFromDate(next.from);
+    setToDateValue(next.to);
+    setAppliedRange(next);
+  };
 
   const chartData = useMemo(() => ({
     payments: dashboard?.payments_chart?.length ? dashboard.payments_chart : fallbackSeries.payments,
@@ -213,12 +260,29 @@ export default function Reports({ type = 'finance' }) {
       </div>
 
       {reportType === 'finance' && (
-        <section className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard title="Daily Earnings" value={totals.daily} helper="Total earnings today" />
-          <MetricCard title="Weekly Earnings" value={totals.weekly} helper="Total earnings this week" />
-          <MetricCard title="Monthly Earnings" value={totals.monthly} helper="Total earnings this month" />
-          <MetricCard title="Mobile Money (This Month)" value={totals.monthly} helper="Excluding voucher payments" />
-        </section>
+        <>
+          <section className="theme-card flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="theme-text text-sm font-medium">Report period</h2>
+              <p className="theme-muted mt-1 text-xs">Choose the dates to include in every financial total, chart, table, and export.</p>
+            </div>
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="text-xs font-medium text-[var(--app-muted)]">From
+                <input type="date" className="form-input mt-1 h-9" value={fromDate} max={toDateValue || undefined} onChange={(event) => setFromDate(event.target.value)} />
+              </label>
+              <label className="text-xs font-medium text-[var(--app-muted)]">To
+                <input type="date" className="form-input mt-1 h-9" value={toDateValue} min={fromDate || undefined} onChange={(event) => setToDateValue(event.target.value)} />
+              </label>
+              <button type="button" className="btn-secondary h-9 px-3" onClick={resetDateRange} title="Reset to this month"><RotateCcw size={14} /></button>
+              <button type="button" className="btn-primary h-9 px-4" onClick={applyDateRange}><CalendarDays size={14} />Apply</button>
+            </div>
+          </section>
+          <section className="grid gap-6 md:grid-cols-3">
+            <MetricCard title="Revenue Collected" value={financialTotals.revenue} helper={rangeLabel} />
+            <MetricCard title="Expenses" value={financialTotals.expenses} helper="Recorded expenses in this period" />
+            <MetricCard title="Net Revenue" value={financialTotals.net} helper="Revenue less recorded expenses" />
+          </section>
+        </>
       )}
 
       {reportType === 'management' && (
@@ -242,8 +306,8 @@ export default function Reports({ type = 'finance' }) {
       <section className="grid gap-4 xl:grid-cols-2">
         {reportType === 'finance' && (
           <>
-            <ChartCard title="Payments" subtitle="Payments and expenses trend."><BarChart data={chartData.payments} height={230} /></ChartCard>
-            <ChartCard title="Revenue Forecast" subtitle="Expected revenue trend."><LineChart data={chartData.forecast} indexes={[1]} colors={[ACCENT]} height={230} /></ChartCard>
+            <ChartCard title="Payments trend" subtitle="Successful payments across the selected period." action={rangeLabel}><BarChart data={financialPaymentSeries.length ? financialPaymentSeries : [['No payments', 0]]} height={230} /></ChartCard>
+            <ChartCard title="Top packages" subtitle="Revenue collected by package in the selected period." action={rangeLabel}><BarChart data={financialPackageSeries.length ? financialPackageSeries : [['No packages', 0]]} height={230} /></ChartCard>
           </>
         )}
         {reportType === 'management' && (
@@ -260,6 +324,23 @@ export default function Reports({ type = 'finance' }) {
           </>
         )}
       </section>
+
+      {reportType === 'finance' && (
+        <section className="theme-card overflow-hidden rounded-lg border">
+          <div className="border-b border-slate-200 px-4 py-3">
+            <h2 className="theme-text text-sm font-medium">Successful payments</h2>
+            <p className="theme-muted mt-1 text-[11px]">Only transactions within {rangeLabel} are shown.</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead className="theme-card-muted text-xs text-[var(--app-muted)]"><tr><th className="px-4 py-3">Date</th><th className="px-4 py-3">Customer</th><th className="px-4 py-3">Package</th><th className="px-4 py-3">Reference</th><th className="px-4 py-3 text-right">Amount</th></tr></thead>
+              <tbody className="divide-y divide-slate-200">
+                {successfulPayments.length ? successfulPayments.slice(0, 20).map((payment) => <tr key={payment.id || payment.payment_code}><td className="px-4 py-3">{toDate(payment.paid_at || payment.created_at)?.toLocaleDateString() || '—'}</td><td className="px-4 py-3">{payment.customer_name || payment.phone || 'Walk-in customer'}</td><td className="px-4 py-3">{payment.package_name || '—'}</td><td className="px-4 py-3">{payment.payment_code || payment.daraja_receipt_number || '—'}</td><td className="px-4 py-3 text-right font-medium">{formatKES(payment.amount)}</td></tr>) : <tr><td colSpan="5" className="theme-muted px-4 py-10 text-center">No successful payments in the selected period.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
     </div>
   );
