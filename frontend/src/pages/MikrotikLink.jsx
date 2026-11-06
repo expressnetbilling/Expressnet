@@ -327,7 +327,14 @@ export default function MikrotikSettings() {
     }
   };
 
-  if (loading) return <p className="text-sm font-medium text-slate-600">Loading MikroTik configuration...</p>;
+  if (loading) {
+    return (
+      <p className="inline-flex items-center gap-2 text-sm font-medium text-slate-600" role="status" aria-live="polite">
+        <RefreshCw className="h-4 w-4 animate-spin text-[var(--app-accent)]" aria-hidden="true" />
+        Pulling MikroTik configuration and router ports…
+      </p>
+    );
+  }
 
   return (
     <div className="space-y-3 text-[13px] font-normal tracking-[0.005em]">
@@ -519,7 +526,14 @@ export default function MikrotikSettings() {
 
               {(routerStatus.interfaces || []).length === 0 && (
                 <div className="mt-6 rounded-2xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
-                  No assignable physical ports have been reported yet.
+                  {pullingStatus ? (
+                    <span className="inline-flex items-center gap-2" role="status" aria-live="polite">
+                      <RefreshCw className="h-4 w-4 animate-spin text-[var(--app-accent)]" aria-hidden="true" />
+                      Pulling physical ports from the router…
+                    </span>
+                  ) : (
+                    'No assignable physical ports have been reported yet.'
+                  )}
                 </div>
               )}
 

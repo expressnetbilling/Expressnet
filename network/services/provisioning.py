@@ -1434,6 +1434,7 @@ def _isolate_customer_bridge_from_router_management(api, bridge_name):
         "billing-saas allow customer dns",
         "billing-saas allow customer dhcp",
         "billing-saas allow customer hotspot service",
+        "billing-saas allow hotspot internet",
         "billing-saas block customer router access",
     }
     for item in list(api.path("ip", "firewall", "filter").select()):
@@ -1457,6 +1458,12 @@ def _isolate_customer_bridge_from_router_management(api, bridge_name):
     add_customer_rule(chain="input", action="accept", **{"in-interface": bridge_name, "protocol": "tcp", "dst-port": "53", "comment": "billing-saas allow customer dns"})
     add_customer_rule(chain="input", action="accept", **{"in-interface": bridge_name, "protocol": "udp", "dst-port": "67,68", "comment": "billing-saas allow customer dhcp"})
     add_customer_rule(chain="input", action="accept", **{"in-interface": bridge_name, "protocol": "tcp", "dst-port": "80,443,64872-64875", "comment": "billing-saas allow customer hotspot service"})
+    # The customer bridge is intentionally not a member of the operator LAN
+    # list.  Do not rely on a router's default LAN-to-WAN rule in that case:
+    # explicitly pass only authenticated Hotspot sessions to the forward
+    # chain.  Unauthenticated devices remain governed by Hotspot interception
+    # and the walled garden.
+    add_customer_rule(chain="forward", action="accept", **{"in-interface": bridge_name, "hotspot": "auth", "comment": "billing-saas allow hotspot internet"})
     add_customer_rule(chain="input", action="drop", **{"in-interface": bridge_name, "comment": "billing-saas block customer router access"})
 
     try:
@@ -1508,6 +1515,7 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
         f':do {{ /ip firewall filter remove [find comment="billing-saas allow customer dns"] }} on-error={{}}; '
         f':do {{ /ip firewall filter remove [find comment="billing-saas allow customer dhcp"] }} on-error={{}}; '
         f':do {{ /ip firewall filter remove [find comment="billing-saas allow customer hotspot service"] }} on-error={{}}; '
+        f':do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot internet"] }} on-error={{}}; '
         f':do {{ /ip firewall filter remove [find comment="billing-saas block customer router access"] }} on-error={{}}; '
         f':local billingInputDrop [/ip firewall filter find comment="defconf: drop all not coming from LAN"]; '
         f':if ([:len $billingInputDrop] > 0) do={{ '
@@ -1515,12 +1523,14 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
         f'/ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=53 place-before=$billingInputDrop comment="billing-saas allow customer dns"; '
         f'/ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=67,68 place-before=$billingInputDrop comment="billing-saas allow customer dhcp"; '
         f'/ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=80,443,64872-64875 place-before=$billingInputDrop comment="billing-saas allow customer hotspot service"; '
+        f'/ip firewall filter add chain=forward action=accept in-interface="{_rsc_escape(bridge_name)}" hotspot=auth place-before=$billingInputDrop comment="billing-saas allow hotspot internet"; '
         f'/ip firewall filter add chain=input action=drop in-interface="{_rsc_escape(bridge_name)}" place-before=$billingInputDrop comment="billing-saas block customer router access"; '
         f'}} else={{ '
         f'/ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=53 comment="billing-saas allow customer dns"; '
         f'/ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=53 comment="billing-saas allow customer dns"; '
         f'/ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=67,68 comment="billing-saas allow customer dhcp"; '
         f'/ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow customer hotspot service"; '
+        f'/ip firewall filter add chain=forward action=accept in-interface="{_rsc_escape(bridge_name)}" hotspot=auth comment="billing-saas allow hotspot internet"; '
         f'/ip firewall filter add chain=input action=drop in-interface="{_rsc_escape(bridge_name)}" comment="billing-saas block customer router access"; '
         f'}}; '
         f':do {{ /tool mac-server set allowed-interface-list=LAN }} on-error={{}}; '
@@ -1537,10 +1547,12 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
             f':do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot dns"] }} on-error={{}}; '
             f':do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot dhcp"] }} on-error={{}}; '
             f':do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot web-proxy"] }} on-error={{}}; '
+            f':do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot internet"] }} on-error={{}}; '
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=53 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dns" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=53 comment="billing-saas allow hotspot dns" }}; '
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=53 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dns" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=53 comment="billing-saas allow hotspot dns" }}; '
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=67,68 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dhcp" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }}; '
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=80,443,64872-64875 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot web-proxy" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }}; '
+            f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{_rsc_escape(bridge_name)}" hotspot=auth comment="billing-saas allow hotspot internet" }} on-error={{}}; '
             f':do {{ /ip hotspot profile add name="Expressnet-profile" hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius={radius_flag} radius-accounting={radius_flag} html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }} '
             f'on-error={{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius={radius_flag} radius-accounting={radius_flag} html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }}; '
             f':do {{ /ip firewall nat remove [find comment="billing-saas hotspot masquerade"] }} on-error={{}}; '

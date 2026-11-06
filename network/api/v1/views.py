@@ -2963,6 +2963,14 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
             f':do {{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie html-directory=Expressnet-hotspot }} on-error={{}};',
             f':do {{ /ip hotspot add name=Expressnet-hotspot interface="{bridge}" address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }} on-error={{}};',
             f':do {{ /ip hotspot set [find name="Expressnet-hotspot"] interface="{bridge}" address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }} on-error={{}};',
+            # Agent-only port assignments do not run the full provisioning
+            # firewall block.  These two idempotent rules are therefore
+            # essential: paid Hotspot sessions need forwarding and source NAT
+            # even when the customer bridge is deliberately outside `LAN`.
+            ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot internet"] } on-error={};',
+            f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" hotspot=auth comment="billing-saas allow hotspot internet" }} on-error={{}};',
+            ':do { /ip firewall nat remove [find comment="billing-saas hotspot masquerade"] } on-error={};',
+            f':do {{ /ip firewall nat add chain=srcnat src-address="{hotspot_network}" action=masquerade comment="billing-saas hotspot masquerade" }} on-error={{}};',
             ':log info "Billing SaaS: Hotspot service is active on the Expressnet bridge.";',
         ))
         lines.extend(_agent_hotspot_redirect_setup(portal_url))
@@ -4782,8 +4790,10 @@ def router_provision_script(request, token):
         :do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot dns"] }} on-error={{}}
         :do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot dhcp"] }} on-error={{}}
         :do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot web-proxy"] }} on-error={{}}
+        :do {{ /ip firewall filter remove [find comment="billing-saas allow hotspot internet"] }} on-error={{}}
         :do {{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=udp dst-port=67,68 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dhcp" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }}
         :do {{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=tcp dst-port=80,443,64872-64875 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot web-proxy" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface=$billingBridge protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }}
+        :do {{ /ip firewall filter add chain=forward action=accept in-interface=$billingBridge hotspot=auth comment="billing-saas allow hotspot internet" }} on-error={{ :log warning "Billing SaaS: authenticated Hotspot forward rule failed" }}
         {hotspot_abuse_protection_script}
         :do {{ /ip dns static remove [find comment="billing-saas hotspot dns"] }} on-error={{}}
         :do {{ /system ntp client set enabled=yes servers=pool.ntp.org }} on-error={{}}
