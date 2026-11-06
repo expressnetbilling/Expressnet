@@ -961,6 +961,7 @@ def auth_register(request):
                 "mikrotik_user": "",
                 "mikrotik_pass": "",
                 "mikrotik_port": 8728,
+                "mikrotik_api_mode": "auto",
                 "sms_balance": 10,
                 "sms_sent_count": 0,
                 "theme_color": data.get("theme_color") or "#fa8200",
@@ -1377,7 +1378,7 @@ def admin_tenants(request, tenant_id=None, child=None):
             return ok({"error": "Business name is required"}, 400)
         if _business_name_exists(business_name):
             return ok({"error": "A business with this name already exists"}, 409)
-        new_ref = ref("tenants").push({**{field: data.get(field) for field in required if field != "password"}, "business_name": business_name, "email": data["email"].lower().strip(), "password": hash_password(data["password"]), "mikrotik_port": int(data.get("mikrotik_port") or 8728), "status": "active", "created_by": f"admin:{request.admin['adminId']}", "created_at": iso_now()})
+        new_ref = ref("tenants").push({**{field: data.get(field) for field in required if field != "password"}, "business_name": business_name, "email": data["email"].lower().strip(), "password": hash_password(data["password"]), "mikrotik_port": int(data.get("mikrotik_port") or 8728), "mikrotik_api_mode": "auto", "status": "active", "created_by": f"admin:{request.admin['adminId']}", "created_at": iso_now()})
         tenant_instance = Tenant.objects.get(pk=new_ref.key)
         ensure_subscription(tenant_instance, data.get("plan") or "basic")
         write_audit_log(request.admin["adminId"], request.admin["email"], "CREATE_TENANT", new_ref.key, "tenant", request, {"business_name": data["business_name"], "email": data["email"].lower().strip()}, tenant_id=new_ref.key)

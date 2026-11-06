@@ -125,6 +125,9 @@ class Tenant(ExtraFieldsModel):
     mikrotik_user = models.CharField(max_length=255, blank=True, default="")
     mikrotik_pass = models.CharField(max_length=255, blank=True, default="")
     mikrotik_port = models.IntegerField(default=8728)
+    # Prefer the direct RouterOS binary API when credentials are configured;
+    # the agent remains the automatic fallback for unreachable routers.
+    mikrotik_api_mode = models.CharField(max_length=20, blank=True, default="auto")
 
     provision_token_expires_at = models.DateTimeField(null=True, blank=True)
     logo_url = models.CharField(max_length=500, blank=True, default="")
