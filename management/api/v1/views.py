@@ -4263,7 +4263,19 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         "tenant_settlement_status": payment.get("tenant_settlement_status") or "queued",
     }
     tenant_data = ref(f"tenants/{tenant_id}").get() or {}
-    mark_customer_invoice_paid(tenant_id, payment.get("customer_id"), {"id": payment_id, **payment, **update})
+    # Persist payment success before any optional invoice, settlement or
+    # notification work.  A failure in one of those integrations must never
+    # leave a customer who has paid stuck in the portal's "waiting for
+    # confirmation" state.
+    ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
+    try:
+        mark_customer_invoice_paid(tenant_id, payment.get("customer_id"), {"id": payment_id, **payment, **update})
+    except Exception:
+        logger.exception(
+            "Could not mark customer invoice paid after confirmed Daraja payment tenant=%s payment=%s",
+            tenant_id,
+            payment_id,
+        )
     collection_account = str(update.get("collection_account") or "").strip().lower()
     platform_collected = collection_account != "tenant_daraja"
     payout = tenant_payout_details(tenant_data)

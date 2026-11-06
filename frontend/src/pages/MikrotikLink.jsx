@@ -208,8 +208,11 @@ export default function MikrotikSettings() {
   };
 
   const goToConfiguration = async () => {
+    // Switch views immediately so the operator sees a dedicated loading
+    // state while the router inventory is fetched over the binary API.
+    setActiveStep('configure');
     const data = await pullRouterStatus();
-    if (data) setActiveStep('configure');
+    if (!data) setRouterStatus(null);
   };
 
   const togglePort = (portName) => {
@@ -546,8 +549,18 @@ export default function MikrotikSettings() {
             </div>
           </div>
         ) : (
-          <div className="rounded-3xl border border-slate-400 bg-white p-8 text-center">
-            <p className="text-sm font-semibold text-slate-700">Live router configuration was not available yet. Go back and click Next after the router has reported in.</p>
+          <div className="flex min-h-72 items-center justify-center rounded-3xl border border-slate-300 bg-white p-8 text-center">
+            {pullingStatus ? (
+              <div className="flex flex-col items-center gap-3" role="status" aria-live="polite">
+                <RefreshCw className="h-9 w-9 animate-spin text-[var(--app-accent)]" aria-hidden="true" />
+                <div>
+                  <p className="text-sm font-semibold text-slate-800">Pulling customer ports from the router…</p>
+                  <p className="mt-1 text-xs text-slate-500">This normally takes a few seconds.</p>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm font-semibold text-slate-700">Live router configuration was not available yet. Return to the link step and try again after the router has reported in.</p>
+            )}
           </div>
         )}
       </section>
