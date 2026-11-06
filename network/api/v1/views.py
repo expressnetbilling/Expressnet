@@ -2806,10 +2806,10 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
     """Return an idempotent agent script for a customer port assignment.
 
     This is imported by RouterOS as a single command. It must therefore remain
-    deliberately parser-conservative: bridge membership is required and WLAN
-    cleanup is best-effort; portal/profile repair is handled separately by the
-    normal provisioning command. A port command must never contain nested
-    ``on-error`` blocks because RouterOS 7.12 rejects that whole import.
+    deliberately parser-conservative.  In addition to bridge membership, a
+    Hotspot assignment repairs the Hotspot service on that bridge.  Moving a
+    WLAN into the bridge alone gives clients DHCP but leaves them with "No
+    internet" instead of a captive redirect.
     """
     bridge = _rsc_escape(bridge_name or "Expressnet-bridge")
     lines = [
@@ -2821,6 +2821,24 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
     ]
     hotspot_requested = str(service_type or "").lower() in {"hotspot", "both"}
     tenant = tenant or {}
+    try:
+        lan_config = _router_lan_config(tenant)
+    except ValueError:
+        # The main provisioning endpoint validates the configured LAN values.
+        # Keep an already-linked agent recoverable even if a later settings
+        # change contains an invalid value.
+        lan_config = {
+            "lan_cidr": "192.168.88.1/24",
+            "lan_gateway": "192.168.88.1",
+            "lan_network": "192.168.88.0/24",
+            "dhcp_pool": "192.168.88.2-192.168.88.254",
+        }
+    hotspot_gateway = _rsc_escape(lan_config["lan_gateway"])
+    hotspot_cidr = _rsc_escape(lan_config["lan_cidr"])
+    hotspot_network = _rsc_escape(lan_config["lan_network"])
+    hotspot_pool_range = _rsc_escape(lan_config["dhcp_pool"])
+    hotspot_pool = "Expressnet-pool"
+    hotspot_dns_name = _rsc_escape(str(tenant.get("mikrotik_hotspot_dns_name") or "hot.spot").strip() or "hot.spot")
     names = dict.fromkeys(
         str(value or "").strip()
         for value in (interface_names or [])
@@ -2853,6 +2871,22 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
             ':do { /interface bridge port set [find interface=$billingPort bridge=$billingBridge] disabled=no } on-error={};',
             ':if ([:len [/interface bridge port find interface=$billingPort bridge=$billingBridge disabled=no]] = 0) do={ :error ("Could not attach port to Expressnet bridge: " . $billingPort) };',
             ':log info ("Billing SaaS: assigned customer port " . $billingPort . " to " . $billingBridge . ".");',
+        ))
+    if hotspot_requested:
+        # Keep this repair small enough for RouterOS's scheduler/import parser.
+        # The complete provisioning routine owns files and walled-garden rules;
+        # these commands make the configured bridge immediately captive again.
+        lines.extend((
+            ':do { /ip dns set allow-remote-requests=yes } on-error={};',
+            f':if ([:len [/ip pool find name={hotspot_pool}]] = 0) do={{ /ip pool add name={hotspot_pool} ranges="{hotspot_pool_range}" comment="Created by Expressnet" }} else={{ /ip pool set [find name={hotspot_pool}] ranges="{hotspot_pool_range}" }};',
+            f':do {{ /ip address add address="{hotspot_cidr}" interface=$billingBridge comment="Added by Expressnet" }} on-error={{}};',
+            f':if ([:len [/ip dhcp-server find name=Expressnet-dhcp]] = 0) do={{ /ip dhcp-server add name=Expressnet-dhcp interface=$billingBridge address-pool={hotspot_pool} disabled=no lease-time=4h }} else={{ /ip dhcp-server set [find name=Expressnet-dhcp] interface=$billingBridge address-pool={hotspot_pool} disabled=no lease-time=4h }};',
+            f':if ([:len [/ip dhcp-server network find address="{hotspot_network}"]] = 0) do={{ /ip dhcp-server network add address="{hotspot_network}" gateway="{hotspot_gateway}" dns-server="{hotspot_gateway}" }} else={{ /ip dhcp-server network set [find address="{hotspot_network}"] gateway="{hotspot_gateway}" dns-server="{hotspot_gateway}" }};',
+            f':if ([:len [/ip hotspot profile find name="Expressnet-profile"]] = 0) do={{ /ip hotspot profile add name=Expressnet-profile hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie html-directory=Expressnet-hotspot }} else={{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie html-directory=Expressnet-hotspot }};',
+            ':local billingHotspot [/ip hotspot find name="Expressnet-hotspot"];',
+            f':if ([:len $billingHotspot] > 0) do={{ /ip hotspot set $billingHotspot interface=$billingBridge address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }} else={{ /ip hotspot add name=Expressnet-hotspot interface=$billingBridge address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }};',
+            ':if ([:len [/ip hotspot find interface=$billingBridge disabled=no]] = 0) do={ :error "Hotspot service is not active on the Expressnet bridge" };',
+            ':log info "Billing SaaS: Hotspot service is active on the Expressnet bridge.";',
         ))
     return " ".join(lines)
 
@@ -2981,7 +3015,11 @@ def router_delete(request):
 def _customer_secret_script(customer):
     """Generate an .rsc snippet that upserts a single customer into /ppp secret or /ip hotspot user."""
     service_type = customer.get("service_type") or "hotspot"
-    fasttrack_script = _rate_limit_fasttrack_exemption_script()
+    # Native API writes maintain FastTrack exemptions through
+    # ``ensure_rate_limit_fasttrack_exemptions``.  Do not embed the former
+    # multi-kilobyte firewall script in an agent-imported customer command:
+    # RouterOS 7 rejects that nested script before it creates the user.
+    fasttrack_script = ""
     static_setup_script = ""
     if service_type == "static":
         ip_address = _rsc_escape(customer.get("ip_address") or "")
@@ -3088,12 +3126,6 @@ def _customer_secret_script(customer):
         f'profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }} '
         f'else={{ /ip hotspot user set [find name="{username}"] password="{password}" '
         f'profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed" }};'
-        f':if ("{disabled}" = "no" && "{client_ip}" != "" && [:len [/ip hotspot host find address="{client_ip}"]] > 0) do={{ '
-        f':local billingHostId [:pick [/ip hotspot host find address="{client_ip}"] 0]; '
-        f':local billingHostMac ""; '
-        f':do {{ :set billingHostMac [/ip hotspot host get $billingHostId mac-address] }} on-error={{}}; '
-        f':if ([:len $billingHostMac] > 0) do={{ :do {{ /ip hotspot active login user="{username}" password="{password}" ip="{client_ip}" mac-address=$billingHostMac }} on-error={{ :log warning "Billing SaaS agent: automatic Hotspot login failed for {username}" }} }}; '
-        f'}} else={{ :log info "Billing SaaS agent: skipped automatic Hotspot login because client {username} is not currently connected" }};'
     )
 
 
@@ -3439,24 +3471,14 @@ def _delete_voucher_from_router(request, voucher):
 
 
 def _rate_limit_fasttrack_exemption_script():
-    """Ensure customer queues are evaluated before any RouterOS FastTrack rule."""
-    return (
-        ':local billingFasttrack [/ip firewall filter find where action=fasttrack-connection];'
-        ':if ([:len $billingFasttrack] > 0) do={ '
-        ':if ([:len [/ip firewall filter find comment="billing-saas rate-limit bypass fasttrack src"]] = 0 || '
-        '[:len [/ip firewall filter find comment="billing-saas rate-limit bypass fasttrack dst"]] = 0 || '
-        '[:len [/ip firewall filter find comment="billing-saas static bypass fasttrack src"]] = 0 || '
-        '[:len [/ip firewall filter find comment="billing-saas static bypass fasttrack dst"]] = 0) do={ '
-        ':do { /ip firewall filter remove [find comment="billing-saas rate-limit bypass fasttrack src"] } on-error={};'
-        ':do { /ip firewall filter remove [find comment="billing-saas rate-limit bypass fasttrack dst"] } on-error={};'
-        ':do { /ip firewall filter remove [find comment="billing-saas static bypass fasttrack src"] } on-error={};'
-        ':do { /ip firewall filter remove [find comment="billing-saas static bypass fasttrack dst"] } on-error={};'
-        ':local billingFasttrackId [:pick $billingFasttrack 0];'
-        '/ip firewall filter add chain=forward action=accept connection-state=established,related src-address=172.30.0.0/15 place-before=$billingFasttrackId comment="billing-saas rate-limit bypass fasttrack src";'
-        '/ip firewall filter add chain=forward action=accept connection-state=established,related dst-address=172.30.0.0/15 place-before=$billingFasttrackId comment="billing-saas rate-limit bypass fasttrack dst";'
-        '/ip firewall filter add chain=forward action=accept connection-state=established,related src-address-list=Expressnet-bandwidth-clients place-before=$billingFasttrackId comment="billing-saas static bypass fasttrack src";'
-        '/ip firewall filter add chain=forward action=accept connection-state=established,related dst-address-list=Expressnet-bandwidth-clients place-before=$billingFasttrackId comment="billing-saas static bypass fasttrack dst"; }};'
-    )
+    """Compatibility placeholder for legacy agent payloads.
+
+    FastTrack ordering is maintained through the native binary API in
+    ``ensure_rate_limit_fasttrack_exemptions``.  Keeping its old deeply nested
+    RouterOS script in customer/package imports caused ``expected end of
+    command`` errors and prevented access activation entirely.
+    """
+    return ""
 
 
 def _package_profile_script(package):
@@ -3464,7 +3486,7 @@ def _package_profile_script(package):
     name = _rsc_escape(package.get("name") or "")
     if not name:
         return ""
-    fasttrack_script = _rate_limit_fasttrack_exemption_script()
+    fasttrack_script = ""
     service_type = package_service_type(package)
     if service_type == "static":
         return fasttrack_script
@@ -3593,6 +3615,56 @@ def _queue_router_command_for_tenant(tenant_id, command_data, tenant_data=None):
         "message": "Command queued and will be applied on next router poll (usually within 30s).",
         "command_id": command_id,
     })
+
+
+def _rebuild_agent_sync_script(tenant_id, command):
+    """Replace legacy oversized package/customer commands before import.
+
+    Pending commands are persisted in Tenant.extra.  Without rebuilding them,
+    routers continue fetching the old nested FastTrack/autologin payload even
+    after the server has been upgraded, which is exactly the parse error seen
+    in the supplied RouterOS log.
+    """
+    command_type = command.get("type")
+    if command_type == "sync_packages":
+        package_ids = [str(value) for value in (command.get("package_ids") or []) if str(value)]
+        packages = InternetPackage.objects.filter(tenant_id=tenant_id)
+        if package_ids:
+            packages = packages.filter(pk__in=package_ids)
+        rebuilt = "".join(_package_profile_script(package.as_dict()) for package in packages)
+        if rebuilt:
+            logger.info(
+                "Rebuilt legacy MikroTik package command tenant=%s command=%s packages=%s",
+                tenant_id,
+                command.get("id"),
+                packages.count(),
+            )
+        return rebuilt or str(command.get("script") or "")
+    if command_type != "sync_secrets":
+        return str(command.get("script") or "")
+    customer_ids = [str(value) for value in (command.get("customer_ids") or []) if str(value)]
+    if not customer_ids:
+        return str(command.get("script") or "")
+    customers = Customer.objects.filter(tenant_id=tenant_id, pk__in=customer_ids)
+    packages = {
+        str(package.name or "").strip().casefold(): package.as_dict()
+        for package in InternetPackage.objects.filter(tenant_id=tenant_id)
+    }
+    parts = []
+    for customer in customers:
+        payload = customer.as_dict()
+        package = packages.get(str(payload.get("package") or "").strip().casefold()) or {}
+        payload["speed"] = package.get("speed") or payload.get("speed")
+        parts.append(_customer_secret_script(payload))
+    rebuilt = "".join(part for part in parts if part)
+    if rebuilt:
+        logger.info(
+            "Rebuilt legacy MikroTik customer command tenant=%s command=%s customers=%s",
+            tenant_id,
+            command.get("id"),
+            len(parts),
+        )
+    return rebuilt or str(command.get("script") or "")
 
 
 def _tenant_value(tenant, *keys):
@@ -4192,7 +4264,7 @@ def router_provision_script(request, token):
 
     hotspot_file_script = _hotspot_captive_file_script(tenant, app_base_url)
     tenant_packages = [pkg for pkg in list_children(f"tenants/{tenant_id}/packages") if pkg.get("name")]
-    package_profile_script = _rate_limit_fasttrack_exemption_script() + "".join(_package_profile_script(pkg) for pkg in tenant_packages)
+    package_profile_script = "".join(_package_profile_script(pkg) for pkg in tenant_packages)
     package_profile_ids = [str(pkg.get("id")) for pkg in tenant_packages if pkg.get("id")]
     package_by_name = {str(pkg.get("name") or ""): pkg for pkg in tenant_packages}
     tenant_customers = [
@@ -4440,7 +4512,10 @@ def router_provision_script(request, token):
             "radius_enabled": radius_enabled_for_router,
             "radius_nas_configured": radius_enabled_for_router,
             "mikrotik_vpn_tunnel_ip": wg_router_tunnel_ip if vpn_interface_enabled else "",
-            "mikrotik_host": wg_router_api_ip if vpn_interface_enabled else tenant.get("mikrotik_host", ""),
+            # Do not point direct binary API calls at a tunnel address until
+            # the peer is actually configured. An interface without a peer is
+            # unreachable from Railway and silently forces slow agent polling.
+            "mikrotik_host": wg_router_api_ip if vpn_peer_enabled else tenant.get("mikrotik_host", ""),
             "mikrotik_port": int(tenant.get("mikrotik_port") or 8728),
             "mikrotik_bridge_name": bridge_name,
             "mikrotik_wan_interface": wan_interface,
@@ -4464,7 +4539,7 @@ def router_provision_script(request, token):
                 "radius_enabled": radius_enabled_for_router,
                 "radius_nas_configured": radius_enabled_for_router,
                 "mikrotik_vpn_tunnel_ip": wg_router_tunnel_ip if vpn_interface_enabled else "",
-                "mikrotik_host": wg_router_api_ip if vpn_interface_enabled else tenant.get("mikrotik_host", ""),
+                "mikrotik_host": wg_router_api_ip if vpn_peer_enabled else tenant.get("mikrotik_host", ""),
                 "mikrotik_port": int(tenant.get("mikrotik_port") or 8728),
                 "mikrotik_bridge_name": bridge_name,
                 "mikrotik_wan_interface": wan_interface,
@@ -4721,7 +4796,7 @@ def router_agent_poll(request, token):
     delivered_ids = {command.get("id") for command in commands if command.get("id")}
     for command in commands:
         command_id = command.get("id") or secrets.token_hex(8)
-        script = str(command.get("script") or "").strip()
+        script = _rebuild_agent_sync_script(tenant_id, command).strip()
         if command.get("type") == "configure_ports":
             # Rebuild queued commands too, so existing cards stuck at Pending
             # confirmation are retried without their old broad setup scripts.
@@ -4763,16 +4838,20 @@ def router_agent_poll(request, token):
         # Snapshot calls make many HTTP requests and can fail independently;
         # they must never keep a successfully configured bridge port in the
         # dashboard's "Pending confirmation" state.
+        # RouterOS imports one command line at a time.  Wrapping a queued
+        # command in another ``:do { ... } on-error`` block turns customer
+        # scripts into several levels of nested braces; RouterOS 7 then aborts
+        # the whole file with "expected end of command" before the bridge or
+        # Hotspot user can be changed.  Emit the validated command directly;
+        # an unhandled runtime error stops the import, so the acknowledgement
+        # below is still sent only after a successful command.
+        lines.append(script)
         lines.append(
-            f':do {{ '
-            f':local billingCommandOk true; '
-            f':do {{ {script} }} on-error={{ :set billingCommandOk false; :log warning "Billing SaaS agent: command {command_id} failed" }}; '
-            f':if ($billingCommandOk) do={{ '
-            f':do {{ /tool fetch check-certificate=no keep-result=no url="{base_url}/api/router/agent/{token}/ack/{command_id}" }} on-error={{ :log warning "Billing SaaS agent: command {command_id} acknowledgement failed" }}; '
-            f':do {{ {post_script} }} on-error={{ :log warning "Billing SaaS agent: command {command_id} post-check failed" }}; '
-            f'}} '
-            f'}}'
+            f':do {{ /tool fetch check-certificate=no keep-result=no url="{base_url}/api/router/agent/{token}/ack/{command_id}" }} '
+            f'on-error={{ :log warning "Billing SaaS agent: command {command_id} acknowledgement failed" }};'
         )
+        if post_script:
+            lines.append(post_script)
     # Re-read under a row lock before writing delivery state. The agent can be
     # polling at the same moment the dashboard queues a port; writing the
     # stale all_commands list here was deleting that newly queued assignment.
