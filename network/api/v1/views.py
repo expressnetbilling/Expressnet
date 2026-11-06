@@ -2048,10 +2048,11 @@ def public_voucher_login(request, tenant_id):
         )
     )
     if wants_html:
+        accepted_label = "Voucher accepted" if credential_kind == "voucher" else "Login accepted"
         logger.info(
-            "Voucher login accepted tenant=%s voucher=%s username=%s mode=%s link_login_present=%s",
+            "Hotspot login accepted tenant=%s kind=%s username=%s mode=%s link_login_present=%s",
             tenant_id,
-            (voucher or {}).get("code"),
+            credential_kind,
             result.get("username"),
             "radius" if tenant.get("radius_enabled") else "local_router",
             bool(result.get("link_login")),
@@ -2062,11 +2063,14 @@ def public_voucher_login(request, tenant_id):
             router_ip=result.get("router_ip"),
             link_login=result.get("link_login"),
             dst=result.get("dst"),
-            delay_ms=4000 if result.get("router_status") == "queued" else 300,
+            # The on-router agent polls every 10 seconds.  Submitting after
+            # four seconds frequently attempted login before the voucher or
+            # user existed, producing the misleading no-internet loop.
+            delay_ms=12000 if result.get("router_status") == "queued" else 300,
         )
         if not login_form:
-            return _html_page("Voucher accepted", "<main><div class='card'>Voucher accepted. Please open the router login page to connect.</div></main>")
-        return _html_page("Connecting", f"<main><div class='card'>Voucher accepted. Connecting you to the internet...</div>{login_form}</main>")
+            return _html_page(accepted_label, f"<main><div class='card'>{accepted_label}. Please open the router login page to connect.</div></main>")
+        return _html_page("Connecting", f"<main><div class='card'>{accepted_label}. Connecting you to the internet...</div>{login_form}</main>")
     return ok(result)
 
 
@@ -2563,7 +2567,7 @@ def vouchers(request, voucher_id=None):
         voucher["router_error"] = str(exc)
         script = _voucher_hotspot_user_script(voucher, package)
         try:
-            _queue_router_command(request, {"type": "sync_voucher", "script": script})
+            _queue_router_command(request, {"type": "sync_voucher", "voucher_id": voucher_id, "script": script})
         except Exception as queue_exc:
             voucher["router_error"] = f"{voucher['router_error']}; queue failed: {queue_exc}"
         ref(f"{voucher_path}/{voucher_id}").update({"router_status": voucher["router_status"], "router_error": voucher.get("router_error")})
@@ -3066,7 +3070,7 @@ def _customer_secret_script(customer):
     username = _rsc_escape(customer.get("username") or "")
     password = _rsc_escape(customer.get("password") or customer.get("radius_secret") or "")
     profile = _rsc_escape(customer.get("package") or customer.get("package_name") or "default")
-    client_ip = _rsc_escape(customer.get("router_client_ip") or customer.get("client_ip") or customer.get("ip") or "")
+    client_ip_raw = str(customer.get("router_client_ip") or customer.get("client_ip") or customer.get("ip") or "").strip()
     client_mac = _rsc_escape(normalize_mac(customer.get("router_client_mac") or customer.get("mac_address") or customer.get("mac") or ""))
     if not username:
         return ""
@@ -3077,6 +3081,19 @@ def _customer_secret_script(customer):
         disabled = "no" if status == "active" else "yes"
     rate_limit = _rsc_escape(normalize_rate_limit(customer.get("speed")) or "")
     rate_limit_field = f' rate-limit="{rate_limit}"'
+    simple_queue_lines = []
+    if service_type == "hotspot" and rate_limit:
+        try:
+            queue_address = ipaddress.ip_address(client_ip_raw)
+            if queue_address.version == 4 and not queue_address.is_unspecified and not queue_address.is_multicast:
+                queue_name = _rsc_escape(f"Expressnet-hotspot-{username}"[:120])
+                queue_target = _rsc_escape(f"{queue_address}/32")
+                simple_queue_lines = [
+                    f'/queue simple remove [find name="{queue_name}"];',
+                    f'/queue simple add name="{queue_name}" target="{queue_target}" max-limit="{rate_limit}" disabled={disabled} comment="billing-saas hotspot bandwidth";',
+                ]
+        except ValueError:
+            pass
     limit_uptime = _rsc_escape(routeros_duration(customer.get("duration_seconds") or customer.get("limit_seconds")) or "")
     limit_uptime_field = f' limit-uptime="{limit_uptime}"' if limit_uptime and service_type == "hotspot" else ""
     try:
@@ -3123,6 +3140,7 @@ def _customer_secret_script(customer):
     lines.extend([
         f'/ip hotspot user remove [find name="{username}"];',
         f'/ip hotspot user add name="{username}" password="{password}" profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed";',
+        *simple_queue_lines,
     ])
     return "\n".join(lines)
 
@@ -3389,15 +3407,16 @@ def _voucher_hotspot_user_script(voucher, package=None):
     rate_limit = f' rate-limit="{_rsc_escape(speed)}"' if speed else ""
     if not username:
         return ""
-    return (
-        f':do {{ :if ([:len [/ip hotspot user profile find name="{profile_name}"]] = 0) do={{'
-        f' /ip hotspot user profile add name="{profile_name}"{rate_limit} }} else={{'
-        f' /ip hotspot user profile set [find name="{profile_name}"]{rate_limit} }} }} on-error={{}};'
-        f':if ([:len [/ip hotspot user find name="{username}"]] = 0) do={{'
-        f' /ip hotspot user add name="{username}" password="{password}" '
-        f'profile="{profile_name}" disabled=no comment="billing-saas-voucher:{code}" }} else={{'
-        f' /ip hotspot user set [find name="{username}"] password="{password}" profile="{profile_name}" disabled=no comment="billing-saas-voucher:{code}" }};'
-    )
+    lines = []
+    if profile_name != "default":
+        lines.append(f':do {{ /ip hotspot user profile add name="{profile_name}"{rate_limit} }} on-error={{}};')
+        if speed:
+            lines.append(f'/ip hotspot user profile set [find name="{profile_name}"] rate-limit="{_rsc_escape(speed)}";')
+    lines.extend([
+        f'/ip hotspot user remove [find name="{username}"];',
+        f'/ip hotspot user add name="{username}" password="{password}" profile="{profile_name}" disabled=no comment="billing-saas-voucher:{code}";',
+    ])
+    return "\n".join(lines)
 
 
 def _voucher_disable_script(voucher):
@@ -4779,7 +4798,7 @@ def router_agent_poll(request, token):
         # delivered but was never acknowledged: a RouterOS inventory fetch
         # (or a brief WAN interruption) must not leave a configured port
         # permanently labelled as "Pending confirmation" in the dashboard.
-        if command.get("status") != "delivered" or command.get("type") not in {"sync_secrets", "sync_packages", "configure_ports", "pull_configuration"}:
+        if command.get("status") != "delivered" or command.get("type") not in {"sync_secrets", "sync_packages", "sync_voucher", "sync_hotspot_login", "configure_ports", "pull_configuration"}:
             continue
         try:
             delivered_at = datetime.fromisoformat(str(command.get("delivered_at") or "").replace("Z", "+00:00"))
@@ -4997,6 +5016,12 @@ def router_agent_ack(request, token, command_id):
                 )
             if payment_ids:
                 Payment.objects.filter(tenant_id=tenant_id, pk__in=payment_ids).update(access_status="active")
+        if (applied_command or {}).get("type") == "sync_voucher":
+            voucher_id = str((applied_command or {}).get("voucher_id") or "")
+            if voucher_id:
+                voucher_update = {"router_status": "provisioned", "router_error": "", "router_synced_at": iso_now()}
+                ref(f"tenants/{tenant_id}/vouchers/{voucher_id}").update(voucher_update)
+                Voucher.objects.filter(tenant_id=tenant_id, pk=voucher_id).update(router_status="provisioned", router_error="")
         if (applied_command or {}).get("type") == "suspend_router":
             ref(f"tenants/{tenant_id}").update({"mikrotik_router_suspended": True})
             _update_linked_router(tenant_id, {**tenant, "mikrotik_router_suspended": True, "mikrotik_last_seen_at": iso_now()}, status="suspended")

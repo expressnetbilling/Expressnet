@@ -2,6 +2,7 @@ import atexit
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -1766,6 +1767,8 @@ def upsert_customer_access(tenant, customer, disabled=False):
                 fields["limit-bytes-total"] = str(limit_bytes_total)
         if existing and existing.get(".id"):
             router_path.update(**{".id": existing[".id"], **fields})
+            if service_type == "hotspot":
+                _upsert_hotspot_simple_queue(api, customer, disabled)
             if service_type == "hotspot" and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
                 try:
                     api.command("/ip/hotspot/user/reset-counters", {"numbers": existing[".id"]})
@@ -1773,6 +1776,8 @@ def upsert_customer_access(tenant, customer, disabled=False):
                     pass
             return existing[".id"]
         item_id = router_path.add(**fields)
+        if service_type == "hotspot":
+            _upsert_hotspot_simple_queue(api, customer, disabled)
         if service_type == "hotspot" and item_id and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
             try:
                 api.command("/ip/hotspot/user/reset-counters", {"numbers": item_id})
@@ -1781,6 +1786,47 @@ def upsert_customer_access(tenant, customer, disabled=False):
         return item_id
     finally:
         api.close()
+
+
+def _upsert_hotspot_simple_queue(api, customer, disabled=False):
+    """Create a per-user simple queue only when the Hotspot client has an IP."""
+    raw_address = str(
+        customer.get("router_client_ip")
+        or customer.get("client_ip")
+        or customer.get("ip_address")
+        or customer.get("ip")
+        or ""
+    ).strip()
+    try:
+        address = ipaddress.ip_address(raw_address)
+    except ValueError:
+        return None
+    if address.version != 4 or address.is_unspecified or address.is_multicast:
+        return None
+    rate_limit = normalize_rate_limit(customer.get("speed") or customer.get("rate_limit") or "")
+    username = str(customer.get("username") or "").strip()
+    if not rate_limit or not username:
+        return None
+    queue_name = f"Expressnet-hotspot-{username}"[:120]
+    path = ("queue", "simple")
+    fields = {
+        "name": queue_name,
+        "target": f"{address}/32",
+        "max-limit": rate_limit,
+        "disabled": "yes" if disabled else "no",
+        "comment": f"billing-saas hotspot bandwidth:{username}"[:250],
+    }
+    queue_path = api.path(*path)
+    existing = find_router_item(api, path, queue_name)
+    try:
+        if existing and existing.get(".id"):
+            return queue_path.update(**{".id": existing[".id"], **fields})
+        return queue_path.add(**fields)
+    except Exception as exc:
+        # The Hotspot profile rate-limit remains active if a queue cannot be
+        # created. Shaping must never prevent a customer from authenticating.
+        logger.warning("Could not sync Hotspot simple queue username=%s address=%s: %s", username, address, exc)
+        return None
 
 
 def set_customer_enabled(tenant, username, service_type="hotspot", enabled=True):
