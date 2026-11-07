@@ -930,6 +930,30 @@ def ensure_hotspot_captive_portal(tenant, base_url=None, radius_enabled=None):
                 "comment": f"Expressnet captive portal: {portal_url}",
             },
         )
+        # Defconf commonly drops traffic arriving from a bridge that is not in
+        # its LAN interface list.  Hotspot needs local DHCP, DNS and proxy
+        # traffic before it can send the unauthenticated browser to login.html.
+        managed_bridge = mikrotik_managed_bridge_name(tenant)
+        for suffix, protocol, ports in (
+            ("dns-udp", "udp", "53"),
+            ("dns-tcp", "tcp", "53"),
+            ("dhcp", "udp", "67,68"),
+            ("web", "tcp", "80,443,64872-64875"),
+        ):
+            comment = f"billing-saas allow hotspot {suffix}"
+            upsert_router_item(
+                api,
+                ("ip", "firewall", "filter"),
+                {"comment": comment},
+                {
+                    "chain": "input",
+                    "action": "accept",
+                    "in-interface": managed_bridge,
+                    "protocol": protocol,
+                    "dst-port": ports,
+                    "comment": comment,
+                },
+            )
         for host in walled_garden_hosts(tenant, portal_host):
             if not host:
                 continue
@@ -1223,6 +1247,26 @@ def _enable_router_interface(api, interface):
         pass
 
 
+def _ensure_managed_hotspot_address(api, bridge_name):
+    """Move the Hotspot gateway from a default bridge onto Expressnet's bridge.
+
+    A fresh MikroTik normally already owns 192.168.88.1/24 on ``bridge``.
+    Adding the same address to Expressnet-bridge then fails silently, leaving
+    the assigned customer port without the gateway that Hotspot interception
+    requires.  Reuse that address instead of creating a duplicate.
+    """
+    path = ("ip", "address")
+    fields = {
+        "address": "192.168.88.1/24",
+        "interface": bridge_name,
+        "comment": "Added by Expressnet",
+    }
+    existing = find_router_item_by_fields(api, path, {"address": fields["address"]})
+    if existing and existing.get(".id"):
+        return api.path(*path).update(**{".id": existing[".id"], **fields})
+    return api.path(*path).add(**fields)
+
+
 def configure_router_port(tenant, interface_name, service_type, profile_name="default", base_url=None):
     service_type = str(service_type or "").lower().strip()
     if service_type not in {"pppoe", "hotspot"}:
@@ -1263,10 +1307,7 @@ def configure_router_port(tenant, interface_name, service_type, profile_name="de
             api, ("ip", "pool"), {"name": "Expressnet-pool"},
             {"name": "Expressnet-pool", "ranges": "192.168.88.2-192.168.88.254", "comment": "IP Pool created by Expressnet"},
         ))
-        supporting_step("bridge address setup", lambda: upsert_router_item(
-            api, ("ip", "address"), {"interface": managed_bridge, "comment": "Added by Expressnet"},
-            {"address": "192.168.88.1/24", "interface": managed_bridge, "comment": "Added by Expressnet"},
-        ))
+        supporting_step("bridge address setup", lambda: _ensure_managed_hotspot_address(api, managed_bridge))
         supporting_step("DHCP server setup", lambda: upsert_router_item(
             api, ("ip", "dhcp-server"), {"name": "Expressnet-dhcp"},
             {"name": "Expressnet-dhcp", "interface": managed_bridge, "address-pool": "Expressnet-pool", "lease-time": "4h", "disabled": "no"},

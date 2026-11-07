@@ -7,7 +7,6 @@ export const PAGE_PERMISSIONS = {
   vouchers: ['/vouchers'],
   requisitions: ['/requisitions'],
   expenses: ['/expenses'],
-  salary: ['/salary'],
   invoices: ['/invoices'],
   reports: ['/reports', '/reports/finance', '/reports/management', '/reports/network'],
   messages: ['/messages'],

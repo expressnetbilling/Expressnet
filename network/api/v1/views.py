@@ -2954,13 +2954,17 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
             ':do { /ip dns set allow-remote-requests=yes } on-error={};',
             f':do {{ /ip pool add name={hotspot_pool} ranges="{hotspot_pool_range}" comment="Created by Expressnet" }} on-error={{}};',
             f':do {{ /ip pool set [find name={hotspot_pool}] ranges="{hotspot_pool_range}" }} on-error={{}};',
-            f':do {{ /ip address add address="{hotspot_cidr}" interface="{bridge}" comment="Added by Expressnet" }} on-error={{}};',
+            # A freshly reset router already has this gateway on its defconf
+            # bridge. Move it to the managed bridge if the add reports a
+            # duplicate address; otherwise Hotspot has no local gateway on
+            # the selected customer port and cannot redirect clients.
+            f':do {{ /ip address add address="{hotspot_cidr}" interface="{bridge}" comment="Added by Expressnet" }} on-error={{ :do {{ /ip address set [find address="{hotspot_cidr}"] interface="{bridge}" comment="Added by Expressnet" }} on-error={{}} }};',
             f':do {{ /ip dhcp-server add name=Expressnet-dhcp interface="{bridge}" address-pool={hotspot_pool} disabled=no lease-time=4h }} on-error={{}};',
             f':do {{ /ip dhcp-server set [find name=Expressnet-dhcp] interface="{bridge}" address-pool={hotspot_pool} disabled=no lease-time=4h }} on-error={{}};',
             f':do {{ /ip dhcp-server network add address="{hotspot_network}" gateway="{hotspot_gateway}" dns-server="{hotspot_gateway}" }} on-error={{}};',
             f':do {{ /ip dhcp-server network set [find address="{hotspot_network}"] gateway="{hotspot_gateway}" dns-server="{hotspot_gateway}" }} on-error={{}};',
-            f':do {{ /ip hotspot profile add name=Expressnet-profile hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie html-directory=Expressnet-hotspot }} on-error={{}};',
-            f':do {{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie html-directory=Expressnet-hotspot }} on-error={{}};',
+            f':do {{ /ip hotspot profile add name=Expressnet-profile hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie use-radius=no radius-accounting=no html-directory=Expressnet-hotspot }} on-error={{}};',
+            f':do {{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address="{hotspot_gateway}" dns-name="{hotspot_dns_name}" login-by=cookie,http-pap,trial,mac-cookie use-radius=no radius-accounting=no html-directory=Expressnet-hotspot }} on-error={{}};',
             f':do {{ /ip hotspot add name=Expressnet-hotspot interface="{bridge}" address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }} on-error={{}};',
             f':do {{ /ip hotspot set [find name="Expressnet-hotspot"] interface="{bridge}" address-pool={hotspot_pool} profile=Expressnet-profile disabled=no }} on-error={{}};',
             # Agent-only port assignments do not run the full provisioning
@@ -2969,6 +2973,13 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
             # even when the customer bridge is deliberately outside `LAN`.
             ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot internet"] } on-error={};',
             f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" hotspot=auth comment="billing-saas allow hotspot internet" }} on-error={{}};',
+            ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot dns"] } on-error={};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=53 comment="billing-saas allow hotspot dns" }} on-error={{}};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=53 comment="billing-saas allow hotspot dns" }} on-error={{}};',
+            ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot dhcp"] } on-error={};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }} on-error={{}};',
+            ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot web-proxy"] } on-error={};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }} on-error={{}};',
             ':do { /ip firewall nat remove [find comment="billing-saas hotspot masquerade"] } on-error={};',
             f':do {{ /ip firewall nat add chain=srcnat src-address="{hotspot_network}" action=masquerade comment="billing-saas hotspot masquerade" }} on-error={{}};',
             ':log info "Billing SaaS: Hotspot service is active on the Expressnet bridge.";',
