@@ -4868,7 +4868,10 @@ def router_provision_script(request, token):
         :do {{ /interface list member remove [find interface=$billingBridge] }} on-error={{}}
         :do {{ /interface list add name=EXPRESSNET-CUSTOMER comment="Expressnet customer-only interfaces" }} on-error={{}}
         :do {{ /interface list member add list=EXPRESSNET-CUSTOMER interface=$billingBridge comment="billing-saas customer bridge" }} on-error={{ /interface list member set [find interface=$billingBridge] list=EXPRESSNET-CUSTOMER comment="billing-saas customer bridge" }}
-        :do {{ /ip address add address={_rsc_escape(lan_cidr)} interface=$billingBridge comment="Added by Expressnet" }} on-error={{ /ip address set [find address={_rsc_escape(lan_cidr)}] address={_rsc_escape(lan_cidr)} interface=$billingBridge comment="Added by Expressnet" }}
+        # A factory-reset router already owns this gateway on its default
+        # bridge.  On duplicate, move that item; setting its address field to
+        # the same CIDR raises "already have such address" and stops /import.
+        :do {{ /ip address add address={_rsc_escape(lan_cidr)} interface=$billingBridge comment="Added by Expressnet" }} on-error={{ :do {{ /ip address set [find address={_rsc_escape(lan_cidr)}] interface=$billingBridge comment="Added by Expressnet" }} on-error={{ :log warning "Billing SaaS: gateway move failed" }} }}
         :do {{ /ip pool add name={hotspot_pool_name} ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }} on-error={{ /ip pool set [find name={hotspot_pool_name}] ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }}
         :do {{ /ip dhcp-server add name=Expressnet-dhcp interface=$billingBridge address-pool={hotspot_pool_name} disabled=no lease-time=4h }} on-error={{ /ip dhcp-server set [find name=Expressnet-dhcp] interface=$billingBridge address-pool={hotspot_pool_name} disabled=no lease-time=4h }}
         :do {{ /ip dhcp-server network add address={_rsc_escape(lan_network)} gateway={_rsc_escape(lan_gateway)} dns-server={_rsc_escape(lan_gateway)} }} on-error={{ /ip dhcp-server network set [find address={_rsc_escape(lan_network)}] gateway={_rsc_escape(lan_gateway)} dns-server={_rsc_escape(lan_gateway)} }}

@@ -1728,7 +1728,11 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
         f':do {{ /interface bridge port remove [find interface="{interface_name}"] }} on-error={{}}; '
         f':if ([:len [/interface bridge find name="{bridge_name}"]] = 0) do={{ /interface bridge add name="{bridge_name}" comment="Created by Expressnet" }}; '
         f':do {{ /ip pool add name=Expressnet-pool ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }} on-error={{ /ip pool set [find name=Expressnet-pool] ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }}; '
-        f':do {{ /ip address add address={_rsc_escape(lan_cidr)} interface="{bridge_name}" comment="Added by Expressnet" }} on-error={{ /ip address set [find interface="{bridge_name}" comment="Added by Expressnet"] address={_rsc_escape(lan_cidr)} interface="{bridge_name}" }}; '
+        # A reset RB951 already has the gateway on its default bridge.  Do
+        # not set the address value again after ``add`` reports a duplicate:
+        # RouterOS rejects that as "already have such address" and aborts an
+        # imported agent command.  Move the existing address by interface.
+        f':do {{ /ip address add address={_rsc_escape(lan_cidr)} interface="{bridge_name}" comment="Added by Expressnet" }} on-error={{ :do {{ /ip address set [find address={_rsc_escape(lan_cidr)}] interface="{bridge_name}" comment="Added by Expressnet" }} on-error={{ :log warning "Billing SaaS: gateway move failed" }} }}; '
         f':do {{ /ip dhcp-server add name=Expressnet-dhcp interface="{bridge_name}" address-pool=Expressnet-pool lease-time=4h disabled=no }} on-error={{ /ip dhcp-server set [find name=Expressnet-dhcp] interface="{bridge_name}" address-pool=Expressnet-pool lease-time=4h disabled=no }}; '
         f':do {{ /ip dhcp-server network add address={_rsc_escape(lan_network)} gateway={_rsc_escape(lan_gateway)} dns-server={_rsc_escape(lan_gateway)} }} on-error={{ /ip dhcp-server network set [find address={_rsc_escape(lan_network)}] gateway={_rsc_escape(lan_gateway)} dns-server={_rsc_escape(lan_gateway)} }}; '
         f'{customer_bridge_isolation}'
