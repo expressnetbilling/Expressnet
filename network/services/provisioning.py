@@ -1798,6 +1798,7 @@ def upsert_customer_access(tenant, customer, disabled=False):
             router_path.update(**{".id": existing[".id"], **fields})
             if service_type == "hotspot":
                 _upsert_hotspot_simple_queue(api, customer, disabled)
+                _upsert_paid_hotspot_binding(api, customer, disabled)
             if service_type == "hotspot" and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
                 try:
                     api.command("/ip/hotspot/user/reset-counters", {"numbers": existing[".id"]})
@@ -1807,6 +1808,7 @@ def upsert_customer_access(tenant, customer, disabled=False):
         item_id = router_path.add(**fields)
         if service_type == "hotspot":
             _upsert_hotspot_simple_queue(api, customer, disabled)
+            _upsert_paid_hotspot_binding(api, customer, disabled)
         if service_type == "hotspot" and item_id and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
             try:
                 api.command("/ip/hotspot/user/reset-counters", {"numbers": item_id})
@@ -1856,6 +1858,56 @@ def _upsert_hotspot_simple_queue(api, customer, disabled=False):
         # created. Shaping must never prevent a customer from authenticating.
         logger.warning("Could not sync Hotspot simple queue username=%s address=%s: %s", username, address, exc)
         return None
+
+
+def _paid_hotspot_binding_comment(username):
+    return f"billing-saas paid hotspot:{str(username or '').strip()}"
+
+
+def _upsert_paid_hotspot_binding(api, customer, disabled=False):
+    """Authorize the paying captive device immediately, with its simple queue.
+
+    The Hotspot login form is still posted by the captive browser, but Android
+    and iOS can close or block that form after a successful STK push.  A
+    short-lived, payment-owned MAC binding makes the already-present device
+    eligible for internet straight away.  It is disabled together with the
+    customer at expiry, while the per-IP simple queue created above continues
+    to enforce the bought package speed.
+    """
+    if not customer.get("auto_authorize_mac"):
+        return None
+    username = str(customer.get("username") or "").strip()
+    mac_address = str(customer.get("router_client_mac") or customer.get("mac_address") or "").strip().upper()
+    if not username or not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac_address):
+        return None
+    path = ("ip", "hotspot", "ip-binding")
+    router_path = api.path(*path)
+    comment = _paid_hotspot_binding_comment(username)
+    existing = find_router_item_by_fields(api, path, {"comment": comment})
+    fields = {
+        "mac-address": mac_address,
+        "type": "bypassed",
+        "disabled": "yes" if disabled else "no",
+        "comment": comment,
+    }
+    if existing and existing.get(".id"):
+        result = router_path.update(**{".id": existing[".id"], **fields})
+    else:
+        result = router_path.add(**fields)
+
+    # Re-evaluate the current captive session after adding the binding.  This
+    # is what turns a completed payment into live connectivity without waiting
+    # for a browser retry, a Celery worker, or a RADIUS request.
+    if not disabled:
+        for active in api.path("ip", "hotspot", "active").select(
+            proplist=(".id", "mac-address"), **{"mac-address": mac_address}
+        ):
+            if active.get(".id"):
+                try:
+                    api.path("ip", "hotspot", "active").remove(active[".id"])
+                except RouterOSAPIError:
+                    logger.warning("Could not refresh paid Hotspot session username=%s", username, exc_info=True)
+    return result
 
 
 def set_customer_enabled(tenant, username, service_type="hotspot", enabled=True):
@@ -1909,6 +1961,19 @@ def set_customer_enabled(tenant, username, service_type="hotspot", enabled=True)
         if not existing or not existing.get(".id"):
             return None
         result = api.path(*path).update(**{".id": existing[".id"], "disabled": "no" if enabled else "yes"})
+
+        if service_type == "hotspot":
+            # Captive-payment MAC bypass is strictly tied to the customer
+            # lifecycle.  Turning a user off must turn off its immediate
+            # access binding too, including after package expiry.
+            binding_path = api.path("ip", "hotspot", "ip-binding")
+            binding = find_router_item_by_fields(
+                api,
+                ("ip", "hotspot", "ip-binding"),
+                {"comment": _paid_hotspot_binding_comment(username)},
+            )
+            if binding and binding.get(".id"):
+                binding_path.update(**{".id": binding[".id"], "disabled": "no" if enabled else "yes"})
 
         active_path = ("ppp", "active") if service_type == "pppoe" else ("ip", "hotspot", "active")
         match_field = "name" if service_type == "pppoe" else "user"
@@ -1977,9 +2042,17 @@ def delete_router_customer(tenant, username, service_type="pppoe"):
             return api.path(*path).remove(existing[".id"])
         path = ("ppp", "secret") if service_type == "pppoe" else ("ip", "hotspot", "user")
         existing = find_router_item(api, path, username)
-        if not existing or not existing.get(".id"):
-            return None
-        return api.path(*path).remove(existing[".id"])
+        result = api.path(*path).remove(existing[".id"]) if existing and existing.get(".id") else None
+        if service_type == "hotspot":
+            binding_path = api.path("ip", "hotspot", "ip-binding")
+            binding = find_router_item_by_fields(
+                api,
+                ("ip", "hotspot", "ip-binding"),
+                {"comment": _paid_hotspot_binding_comment(username)},
+            )
+            if binding and binding.get(".id"):
+                binding_path.remove(binding[".id"])
+        return result
     finally:
         api.close()
 

@@ -3234,6 +3234,19 @@ def _customer_secret_script(customer):
         f'/ip hotspot user add name="{username}" password="{password}" profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed";',
         *simple_queue_lines,
     ])
+    # Do not depend on Android/iOS keeping the captive browser open long
+    # enough to submit the RouterOS login form.  For a paid portal checkout,
+    # the router-provided client MAC is authorized immediately.  The binding
+    # is disabled by the normal customer expiry flow and the simple queue
+    # above keeps the purchased speed limit in effect.
+    raw_client_mac = normalize_mac(customer.get("router_client_mac") or customer.get("mac_address") or customer.get("mac") or "")
+    if customer.get("auto_authorize_mac") and raw_client_mac:
+        binding_comment = _rsc_escape(f"billing-saas paid hotspot:{customer.get('username') or ''}")
+        lines.extend([
+            f':do {{ /ip hotspot ip-binding remove [find comment="{binding_comment}"] }} on-error={{}};',
+            f'/ip hotspot ip-binding add mac-address="{_rsc_escape(raw_client_mac)}" type=bypassed disabled={disabled} comment="{binding_comment}";',
+            f':do {{ /ip hotspot active remove [find mac-address="{_rsc_escape(raw_client_mac)}"] }} on-error={{}};',
+        ])
     return "\n".join(lines)
 
 

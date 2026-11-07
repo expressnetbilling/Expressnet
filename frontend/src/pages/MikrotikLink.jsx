@@ -46,6 +46,7 @@ export default function MikrotikSettings() {
   const [migrationMode, setMigrationMode] = useState(false);
   const [routerRealtimeTick, setRouterRealtimeTick] = useState(0);
   const provisionRequestRef = useRef({ key: '', promise: null, data: null });
+  const routerStatusRequestRef = useRef(null);
 
   const configured = useMemo(
     () => Boolean(
@@ -70,24 +71,38 @@ export default function MikrotikSettings() {
   const allSelectablePortsSelected = selectablePorts.length > 0
     && selectablePorts.every((portName) => selectedPorts.includes(portName));
 
-  const pullRouterStatus = async (options = {}) => {
+  const pullRouterStatus = (options = {}) => {
+    // The status endpoint returns a complete interface inventory.  Coalesce
+    // all callers (Next, websocket updates, and initial loading) onto one
+    // promise so an older response can never paint a partial/stale grid over
+    // the completed inventory.
+    if (routerStatusRequestRef.current) return routerStatusRequestRef.current;
     setPullingStatus(true);
-    try {
-      const { data } = await api.get('/router/status');
-      setRouterStatus(data);
-      if (!options.silent) {
-        const fromSnapshot = data.source === 'provisioning_snapshot' || data.source === 'provisioning_seen';
-        toast.success(fromSnapshot ? 'Loaded router provisioning state' : 'Router status pulled');
-      }
-      return data;
-    } catch (error) {
-      if (!options.silent) {
-        toast.error(error.response?.data?.message || 'Failed to pull router status');
-      }
-      return null;
-    } finally {
-      setPullingStatus(false);
-    }
+    const request = api.get('/router/status')
+      .then(({ data }) => {
+        // Set the entire inventory in one state update.  Ports therefore
+        // appear together only after the binary API request has completed.
+        setRouterStatus(data);
+        if (!options.silent) {
+          const fromSnapshot = data.source === 'provisioning_snapshot' || data.source === 'provisioning_seen';
+          toast.success(fromSnapshot ? 'Loaded router provisioning state' : 'Router status pulled');
+        }
+        return data;
+      })
+      .catch((error) => {
+        if (!options.silent) {
+          toast.error(error.response?.data?.message || 'Failed to pull router status');
+        }
+        return null;
+      })
+      .finally(() => {
+        if (routerStatusRequestRef.current === request) {
+          routerStatusRequestRef.current = null;
+          setPullingStatus(false);
+        }
+      });
+    routerStatusRequestRef.current = request;
+    return request;
   };
 
   async function loadConfig() {
@@ -208,9 +223,12 @@ export default function MikrotikSettings() {
   };
 
   const goToConfiguration = async () => {
-    // Switch views immediately so the operator sees a dedicated loading
-    // state while the router inventory is fetched over the binary API.
+    // Switch views immediately and deliberately clear the previous snapshot.
+    // The centered spinner remains visible until the single shared promise
+    // has received the complete interface inventory.
     setActiveStep('configure');
+    setRouterStatus(null);
+    setSelectedPorts([]);
     const data = await pullRouterStatus();
     if (!data) setRouterStatus(null);
   };

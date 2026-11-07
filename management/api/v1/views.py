@@ -4004,14 +4004,15 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code, notif
     username = mac_address if service_type == "tv" else (payment.get("access_username") or payment.get("username") or (customer or {}).get("username") or to_access_username(phone))
     password = str(payment.get("pending_access_password") or payment.get("access_password") or (customer or {}).get("password") or payment_code)
     customer_name = _payment_customer_name({**(customer or {}), **payment}, phone, username)
+    auto_authorize_mac = service_type == "hotspot" and bool(router_client_mac)
     if customer:
-        updates = {"name": customer_name, "phone": phone, "username": username, "password": password, "package": package_for_access, "service_type": service_type, "status": "active", "expiry_date": expiry.isoformat(), "last_payment_id": payment_id, "last_payment_code": payment_code, "auto_reconnect": True, "updated_at": iso_now()}
+        updates = {"name": customer_name, "phone": phone, "username": username, "password": password, "package": package_for_access, "service_type": service_type, "status": "active", "expiry_date": expiry.isoformat(), "last_payment_id": payment_id, "last_payment_code": payment_code, "auto_reconnect": True, "router_client_mac": router_client_mac, "router_client_ip": router_client_ip, "auto_authorize_mac": auto_authorize_mac, "updated_at": iso_now()}
         if mac_address:
             updates["mac_address"] = mac_address
         ref(f"tenants/{tenant_id}/customers/{customer['id']}").update(updates)
         customer_id = customer["id"]
     else:
-        new_ref = ref(f"tenants/{tenant_id}/customers").push({"name": customer_name, "phone": phone, "username": username, "password": password, "package": package_for_access, "service_type": service_type, "status": "active", "expiry_date": expiry.isoformat(), "last_payment_id": payment_id, "last_payment_code": payment_code, "auto_reconnect": True, "mac_address": mac_address, "created_at": iso_now()})
+        new_ref = ref(f"tenants/{tenant_id}/customers").push({"name": customer_name, "phone": phone, "username": username, "password": password, "package": package_for_access, "service_type": service_type, "status": "active", "expiry_date": expiry.isoformat(), "last_payment_id": payment_id, "last_payment_code": payment_code, "auto_reconnect": True, "mac_address": mac_address, "router_client_mac": router_client_mac, "router_client_ip": router_client_ip, "auto_authorize_mac": auto_authorize_mac, "created_at": iso_now()})
         customer_id = new_ref.key
     if service_type == "tv" and not mac_address:
         raise ValueError("TV MAC address is required for activation")
@@ -4035,6 +4036,7 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code, notif
                 "mac_address": mac_address,
                 "router_client_mac": router_client_mac,
                 "router_client_ip": router_client_ip,
+                "auto_authorize_mac": auto_authorize_mac,
             },
         )
     except Exception as exc:
@@ -4071,6 +4073,10 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code, notif
         "mac_address": mac_address,
         "router_client_mac": router_client_mac,
         "router_client_ip": router_client_ip,
+        # Captive clients have already supplied this MAC in the router's
+        # redirect.  Authorize it locally as soon as M-Pesa confirms payment;
+        # this removes dependence on a captive-browser auto-submit retry.
+        "auto_authorize_mac": auto_authorize_mac,
         "ip_address": static_ip_address,
         "subnet_mask": ((customer or {}).get("subnet_mask") or "255.255.0.0") if service_type == "static" else (customer or {}).get("subnet_mask"),
         "gateway": ((customer or {}).get("gateway") or "172.30.0.1") if service_type == "static" else (customer or {}).get("gateway"),

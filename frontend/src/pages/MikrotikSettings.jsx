@@ -57,12 +57,18 @@ export default function MikrotikSettings() {
   const [deleteTarget, setDeleteTarget] = useState('');
   const [deletePassword, setDeletePassword] = useState('');
   const [routerRealtimeTick, setRouterRealtimeTick] = useState(0);
+  const [hiddenRouterIds, setHiddenRouterIds] = useState(() => new Set());
   const [page, setPage] = useState(1);
   const pageSize = 10;
 
   const rows = useMemo(() => {
     const linked = config?.linked_routers || {};
-    return Object.entries(linked).map(([id, item]) => ({
+    return Object.entries(linked)
+      // A settings refresh can arrive after a successful delete with the old
+      // Firebase snapshot. Keep deleted rows hidden immediately instead of
+      // asking the tenant to delete the same router again.
+      .filter(([id]) => !hiddenRouterIds.has(id))
+      .map(([id, item]) => ({
       id,
       routerName: item.name || item.mikrotik_name || config?.mikrotik_name || config?.router_name || '',
       boardName: routerStatus?.device?.board_name || item.board_name || item.identity || 'MikroTik Router',
@@ -80,8 +86,8 @@ export default function MikrotikSettings() {
       source: routerStatus?.source || 'stored',
       ports: routerStatus?.interfaces?.length ?? item.interface_count,
       version: routerStatus?.device?.version || item.version,
-    }));
-  }, [config, routerStatus]);
+      }));
+  }, [config, hiddenRouterIds, routerStatus]);
 
   const counts = useMemo(() => ({
     all: rows.length,
@@ -201,6 +207,12 @@ export default function MikrotikSettings() {
           mikrotik_last_seen_at: '',
           mikrotik_last_seen_ip: '',
         };
+      });
+      setHiddenRouterIds((current) => {
+        const next = new Set(current);
+        Object.keys(config?.linked_routers || {}).forEach((id) => next.add(id));
+        next.add(routerId);
+        return next;
       });
       setRouterStatus(null);
       setDeleteTarget('');
