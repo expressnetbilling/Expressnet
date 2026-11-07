@@ -4414,6 +4414,35 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
 
 @csrf_exempt
 @api_view(["POST"])
+def local_daraja_test_callback(request, event_type):
+    """Accept an ngrok callback from the isolated local Daraja test tool.
+
+    This route is deliberately disabled outside Django DEBUG mode and never
+    touches payment, customer, or settlement records.  Production payments
+    continue to use their signed per-payment callback route below.
+    """
+    local_test_callbacks_enabled = str(os.getenv("LOCAL_DARAJA_TEST_CALLBACKS") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not settings.DEBUG and not local_test_callbacks_enabled:
+        raise Http404
+    if event_type not in {"stk-result", "b2b-result", "b2b-timeout"}:
+        raise Http404
+    event = body(request)
+    root = (event or {}).get("Body") if isinstance((event or {}).get("Body"), dict) else (event or {})
+    result = root.get("stkCallback") or root.get("Result") or root
+    result = result if isinstance(result, dict) else {}
+    logger.info(
+        "Local Daraja test callback received type=%s result_code=%s checkout=%s conversation=%s detail=%s",
+        event_type,
+        result.get("ResultCode"),
+        result.get("CheckoutRequestID"),
+        result.get("ConversationID"),
+        str(result.get("ResultDesc") or "")[:250],
+    )
+    return ok({"success": True, "test_callback": event_type})
+
+
+@csrf_exempt
+@api_view(["POST"])
 def daraja_callback(request, tenant_id, payment_id, token):
     # Daraja has no request-signing mechanism — the per-payment token
     # embedded in the callback URL at STK push time is what stops this

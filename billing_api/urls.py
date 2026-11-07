@@ -129,6 +129,7 @@ urlpatterns = [
     path("tickets", management_views.tickets),
     path("tickets/add", management_views.tickets),
     path("tickets/<str:ticket_id>", management_views.tickets),
+    path("daraja/test/<str:event_type>", management_views.local_daraja_test_callback),
     path("daraja/callback/<str:tenant_id>/<str:payment_id>/<str:token>", management_views.daraja_callback),
     path("paystack/callback", management_views.paystack_callback),
     path("paystack/webhook", management_views.paystack_webhook),
