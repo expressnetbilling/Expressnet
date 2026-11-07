@@ -1882,6 +1882,8 @@ def upsert_customer_access(tenant, customer, disabled=False):
             if service_type == "hotspot":
                 _upsert_hotspot_simple_queue(api, customer, disabled)
                 _upsert_paid_hotspot_binding(api, customer, disabled)
+            if service_type in {"hotspot", "pppoe"}:
+                _sync_customer_access_expiry(api, customer, service_type, disabled)
             if service_type == "hotspot" and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
                 try:
                     api.command("/ip/hotspot/user/reset-counters", {"numbers": existing[".id"]})
@@ -1892,6 +1894,8 @@ def upsert_customer_access(tenant, customer, disabled=False):
         if service_type == "hotspot":
             _upsert_hotspot_simple_queue(api, customer, disabled)
             _upsert_paid_hotspot_binding(api, customer, disabled)
+        if service_type in {"hotspot", "pppoe"}:
+            _sync_customer_access_expiry(api, customer, service_type, disabled)
         if service_type == "hotspot" and item_id and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
             try:
                 api.command("/ip/hotspot/user/reset-counters", {"numbers": item_id})
@@ -1945,6 +1949,99 @@ def _upsert_hotspot_simple_queue(api, customer, disabled=False):
 
 def _paid_hotspot_binding_comment(username):
     return f"billing-saas paid hotspot:{str(username or '').strip()}"
+
+
+def _access_expiry_scheduler_name(username):
+    """Return a short, stable RouterOS scheduler name for a customer."""
+    digest = hashlib.sha256(str(username or "").encode("utf-8")).hexdigest()[:20]
+    return f"billing-exp-{digest}"
+
+
+def _parse_access_expiry(value):
+    """Parse the database/Firebase expiry representation as an aware UTC time."""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _sync_customer_access_expiry(api, customer, service_type, disabled=False):
+    """Enforce a Hotspot or PPPoE package expiry locally on the router.
+
+    A Hotspot ``limit-uptime`` only counts time actually spent online.  That
+    is correct for a voucher, but it is not enough for a paid captive device
+    authorized with an IP binding: that binding deliberately skips the login
+    profile.  A one-shot router scheduler is therefore the authoritative
+    wall-clock expiry.  It continues to work if a worker, webhook, or the
+    application server is temporarily unavailable.
+    """
+    username = str(customer.get("username") or "").strip()
+    if not username:
+        return None
+
+    scheduler_name = _access_expiry_scheduler_name(username)
+    scheduler_path = api.path("system", "scheduler")
+    existing = find_router_item(api, ("system", "scheduler"), scheduler_name)
+    if existing and existing.get(".id"):
+        try:
+            scheduler_path.remove(existing[".id"])
+        except RouterOSAPIError:
+            logger.warning("Could not replace access expiry scheduler username=%s", username, exc_info=True)
+            return None
+
+    expires_at = _parse_access_expiry(customer.get("expires_at") or customer.get("expiry_date"))
+    if disabled or not expires_at:
+        return None
+
+    # RouterOS stores scheduler clock times in its configured local timezone.
+    # Provisioning configures Africa/Nairobi; using an explicit EAT offset
+    # keeps expiry correct on routers that do not report their clock timezone.
+    router_time = expires_at.astimezone(timezone(timedelta(hours=3)))
+    if router_time <= datetime.now(timezone(timedelta(hours=3))):
+        logger.warning("Refusing to create already-expired access username=%s", username)
+        return None
+
+    escaped_username = _rsc_escape(username)
+    escaped_scheduler_name = _rsc_escape(scheduler_name)
+    if service_type == "pppoe":
+        on_event = (
+            f':do {{ /ppp secret disable [find name="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /ppp active remove [find name="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /system scheduler remove [find name="{escaped_scheduler_name}"] }} on-error={{}};'
+        )
+    else:
+        binding_comment = _rsc_escape(_paid_hotspot_binding_comment(username))
+        queue_name = _rsc_escape(f"Expressnet-hotspot-{username}"[:120])
+        on_event = (
+            f':do {{ /ip hotspot user disable [find name="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /ip hotspot ip-binding disable [find comment="{binding_comment}"] }} on-error={{}}; '
+            f':do {{ /queue simple disable [find name="{queue_name}"] }} on-error={{}}; '
+            f':do {{ /ip hotspot active remove [find user="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /system scheduler remove [find name="{escaped_scheduler_name}"] }} on-error={{}};'
+        )
+    fields = {
+        "name": scheduler_name,
+        "start-date": router_time.strftime("%b/%d/%Y").lower(),
+        "start-time": router_time.strftime("%H:%M:%S"),
+        "interval": "0s",
+        "on-event": on_event,
+        "comment": f"billing-saas {service_type} expiry:{username}"[:250],
+        "disabled": "no",
+    }
+    try:
+        return scheduler_path.add(**fields)
+    except RouterOSAPIError:
+        logger.warning("Could not create access expiry scheduler username=%s", username, exc_info=True)
+        return None
 
 
 def _upsert_paid_hotspot_binding(api, customer, disabled=False):
@@ -2057,6 +2154,13 @@ def set_customer_enabled(tenant, username, service_type="hotspot", enabled=True)
             )
             if binding and binding.get(".id"):
                 binding_path.update(**{".id": binding[".id"], "disabled": "no" if enabled else "yes"})
+        if service_type in {"hotspot", "pppoe"} and not enabled:
+            scheduler = find_router_item(api, ("system", "scheduler"), _access_expiry_scheduler_name(username))
+            if scheduler and scheduler.get(".id"):
+                try:
+                    api.path("system", "scheduler").remove(scheduler[".id"])
+                except RouterOSAPIError:
+                    logger.warning("Could not remove access expiry scheduler username=%s", username, exc_info=True)
 
         active_path = ("ppp", "active") if service_type == "pppoe" else ("ip", "hotspot", "active")
         match_field = "name" if service_type == "pppoe" else "user"
@@ -2135,6 +2239,13 @@ def delete_router_customer(tenant, username, service_type="pppoe"):
             )
             if binding and binding.get(".id"):
                 binding_path.remove(binding[".id"])
+        if service_type in {"hotspot", "pppoe"}:
+            scheduler = find_router_item(api, ("system", "scheduler"), _access_expiry_scheduler_name(username))
+            if scheduler and scheduler.get(".id"):
+                try:
+                    api.path("system", "scheduler").remove(scheduler[".id"])
+                except RouterOSAPIError:
+                    logger.warning("Could not remove access expiry scheduler username=%s", username, exc_info=True)
         return result
     finally:
         api.close()

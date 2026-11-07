@@ -4094,8 +4094,11 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code, notif
             if service_type == "pppoe" and pkg:
                 create_ppp_profile(tenant, pkg["name"], pkg.get("speed"), duration_seconds)
             upsert_customer_access(tenant, access_payload)
-            if service_type != "static":
-                set_customer_enabled(tenant, username, service_type, True)
+            # ``upsert_customer_access`` creates the RouterOS user enabled,
+            # refreshes the active Hotspot MAC binding, and applies the speed
+            # queue in the same pooled binary-API session.  A second enable
+            # call only added network round trips and could interrupt the
+            # just-authorized client.
             router_access_status = "active"
         except Exception as exc:
             if _router_is_agent_linked(tenant):

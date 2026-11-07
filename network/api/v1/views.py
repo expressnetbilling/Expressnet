@@ -3132,6 +3132,56 @@ def router_delete(request):
     return ok({"success": True, "message": "Linked MikroTik router deleted from this account."})
 
 
+def _access_expiry_scheduler_script(customer, username, service_type, disabled):
+    """Build the agent-side equivalent of the native RouterOS expiry timer.
+
+    Agent mode must enforce the exact same wall-clock expiry as direct binary
+    API mode.  This is particularly important for an auto-authorized captive
+    MAC, because a bypass binding does not consume a Hotspot user's
+    ``limit-uptime`` counter.
+    """
+    scheduler_name = f"billing-exp-{hashlib.sha256(str(username).encode('utf-8')).hexdigest()[:20]}"
+    scheduler_name = _rsc_escape(scheduler_name)
+    cleanup = f':do {{ /system scheduler remove [find name="{scheduler_name}"] }} on-error={{}};'
+    if disabled == "yes":
+        return [cleanup]
+
+    raw_expiry = customer.get("expires_at") or customer.get("expiry_date")
+    try:
+        expires_at = datetime.fromisoformat(str(raw_expiry or "").replace("Z", "+00:00"))
+    except ValueError:
+        return [cleanup]
+    if timezone.is_naive(expires_at):
+        expires_at = timezone.make_aware(expires_at, timezone.get_current_timezone())
+    expires_at = timezone.localtime(expires_at)
+    if expires_at <= timezone.now():
+        return [cleanup]
+
+    escaped_username = _rsc_escape(username)
+    if service_type == "pppoe":
+        on_event = (
+            f':do {{ /ppp secret disable [find name="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /ppp active remove [find name="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /system scheduler remove [find name="{scheduler_name}"] }} on-error={{}};'
+        )
+    else:
+        binding_comment = _rsc_escape(f"billing-saas paid hotspot:{username}")
+        queue_name = _rsc_escape(f"Expressnet-hotspot-{username}"[:120])
+        on_event = (
+            f':do {{ /ip hotspot user disable [find name="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /ip hotspot ip-binding disable [find comment="{binding_comment}"] }} on-error={{}}; '
+            f':do {{ /queue simple disable [find name="{queue_name}"] }} on-error={{}}; '
+            f':do {{ /ip hotspot active remove [find user="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /system scheduler remove [find name="{scheduler_name}"] }} on-error={{}};'
+        )
+    return [
+        cleanup,
+        f'/system scheduler add name="{scheduler_name}" start-date={expires_at.strftime("%b/%d/%Y").lower()} '
+        f'start-time={expires_at.strftime("%H:%M:%S")} interval=0s '
+        f'on-event="{_rsc_escape(on_event)}" comment="billing-saas {service_type} expiry" disabled=no;',
+    ]
+
+
 def _customer_secret_script(customer):
     """Generate an .rsc snippet that upserts a single customer into /ppp secret or /ip hotspot user."""
     service_type = customer.get("service_type") or "hotspot"
@@ -3189,7 +3239,8 @@ def _customer_secret_script(customer):
         )
     if service_type not in {"pppoe", "hotspot"}:
         service_type = "hotspot"
-    username = _rsc_escape(customer.get("username") or "")
+    raw_username = str(customer.get("username") or "")
+    username = _rsc_escape(raw_username)
     password = _rsc_escape(customer.get("password") or customer.get("radius_secret") or "")
     profile = _rsc_escape(customer.get("package") or customer.get("package_name") or "default")
     client_ip_raw = str(customer.get("router_client_ip") or customer.get("client_ip") or customer.get("ip") or "").strip()
@@ -3257,6 +3308,7 @@ def _customer_secret_script(customer):
             f'/ppp secret remove [find name="{username}"];',
             f'/ppp secret add name="{username}" password="{password}" service=pppoe profile="{profile}" disabled={disabled} comment="billing-saas-managed";',
         ])
+        lines.extend(_access_expiry_scheduler_script(customer, raw_username, service_type, disabled))
         return "\n".join(lines)
     lines = [part for part in (fasttrack_script, static_setup_script, *profile_lines) if part]
     lines.extend([
@@ -3277,6 +3329,7 @@ def _customer_secret_script(customer):
             f'/ip hotspot ip-binding add mac-address="{_rsc_escape(raw_client_mac)}" type=bypassed disabled={disabled} comment="{binding_comment}";',
             f':do {{ /ip hotspot active remove [find mac-address="{_rsc_escape(raw_client_mac)}"] }} on-error={{}};',
         ])
+    lines.extend(_access_expiry_scheduler_script(customer, raw_username, service_type, disabled))
     return "\n".join(lines)
 
 
