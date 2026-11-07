@@ -895,6 +895,42 @@ def walled_garden_hosts(tenant, portal_host=None):
     return unique
 
 
+def _upsert_forward_rule_before_default_drop(api, fields):
+    """Replace a managed forward rule ahead of RouterOS's default LAN drop.
+
+    Customer ports intentionally live outside the operator's ``LAN`` list.
+    RouterOS's stock ``drop all not coming from LAN`` forward rule therefore
+    also matches an unauthenticated device trying to reach the hosted portal.
+    Updating an existing rule preserves its old position, so explicitly
+    replace it in front of that drop instead of relying on a normal upsert.
+    """
+    comment = str(fields.get("comment") or "").strip()
+    if not comment:
+        raise ValueError("A managed firewall rule requires a comment")
+    path = ("ip", "firewall", "filter")
+    router_path = api.path(*path)
+    items = list(router_path.select())
+    existing = next((item for item in items if item.get("comment") == comment and item.get(".id")), None)
+    default_drop = next(
+        (
+            item.get(".id")
+            for item in items
+            if item.get("comment") == "defconf: drop all not coming from LAN" and item.get(".id")
+        ),
+        None,
+    )
+    if existing:
+        try:
+            router_path.remove(existing[".id"])
+        except Exception:
+            # Keep an existing allow rule enabled even on older RouterOS
+            # versions that reject removal while a connection is active.
+            return router_path.update(**{".id": existing[".id"], **fields})
+    if default_drop:
+        fields = {**fields, "place-before": default_drop}
+    return router_path.add(**fields)
+
+
 def ensure_hotspot_captive_portal(tenant, base_url=None, radius_enabled=None):
     if not has_mikrotik_credentials(tenant):
         return None
@@ -982,10 +1018,8 @@ def ensure_hotspot_captive_portal(tenant, base_url=None, radius_enabled=None):
                         "comment": "billing-saas captive portal access",
                     },
                 )
-                upsert_router_item(
+                _upsert_forward_rule_before_default_drop(
                     api,
-                    ("ip", "firewall", "filter"),
-                    {"comment": f"billing-saas allow captive portal {port}"},
                     {
                         "chain": "forward",
                         "action": "accept",

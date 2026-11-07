@@ -2831,8 +2831,8 @@ def _agent_hotspot_redirect_setup(portal_url, bridge_name=""):
     ]
     if bridge:
         rules.extend([
-            f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=80 place-before=0 comment="billing-saas allow captive portal 80" }} on-error={{}};',
-            f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=443 place-before=0 comment="billing-saas allow captive portal 443" }} on-error={{}};',
+            f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=80 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow captive portal 80" }} on-error={{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=80 comment="billing-saas allow captive portal 80" }};',
+            f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=443 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow captive portal 443" }} on-error={{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=443 comment="billing-saas allow captive portal 443" }};',
         ])
     rules.extend([
         f':do {{ /tool fetch check-certificate=no url="{source}" dst-path="Expressnet-hotspot/login.html" }} on-error={{ :log warning "Billing SaaS: captive login page fetch failed" }};',
@@ -4868,7 +4868,7 @@ def router_provision_script(request, token):
         :do {{ /interface list member remove [find interface=$billingBridge] }} on-error={{}}
         :do {{ /interface list add name=EXPRESSNET-CUSTOMER comment="Expressnet customer-only interfaces" }} on-error={{}}
         :do {{ /interface list member add list=EXPRESSNET-CUSTOMER interface=$billingBridge comment="billing-saas customer bridge" }} on-error={{ /interface list member set [find interface=$billingBridge] list=EXPRESSNET-CUSTOMER comment="billing-saas customer bridge" }}
-        :do {{ /ip address add address={_rsc_escape(lan_cidr)} interface=$billingBridge comment="Added by Expressnet" }} on-error={{ /ip address set [find comment="Added by Expressnet" interface=$billingBridge] address={_rsc_escape(lan_cidr)} interface=$billingBridge }}
+        :do {{ /ip address add address={_rsc_escape(lan_cidr)} interface=$billingBridge comment="Added by Expressnet" }} on-error={{ /ip address set [find address={_rsc_escape(lan_cidr)}] address={_rsc_escape(lan_cidr)} interface=$billingBridge comment="Added by Expressnet" }}
         :do {{ /ip pool add name={hotspot_pool_name} ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }} on-error={{ /ip pool set [find name={hotspot_pool_name}] ranges={_rsc_escape(dhcp_pool)} comment="IP Pool created by Expressnet" }}
         :do {{ /ip dhcp-server add name=Expressnet-dhcp interface=$billingBridge address-pool={hotspot_pool_name} disabled=no lease-time=4h }} on-error={{ /ip dhcp-server set [find name=Expressnet-dhcp] interface=$billingBridge address-pool={hotspot_pool_name} disabled=no lease-time=4h }}
         :do {{ /ip dhcp-server network add address={_rsc_escape(lan_network)} gateway={_rsc_escape(lan_gateway)} dns-server={_rsc_escape(lan_gateway)} }} on-error={{ /ip dhcp-server network set [find address={_rsc_escape(lan_network)}] gateway={_rsc_escape(lan_gateway)} dns-server={_rsc_escape(lan_gateway)} }}
