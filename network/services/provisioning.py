@@ -954,6 +954,48 @@ def ensure_hotspot_captive_portal(tenant, base_url=None, radius_enabled=None):
                     "comment": comment,
                 },
             )
+        # A Hotspot walled-garden entry controls authentication, but a
+        # customer bridge outside the router's LAN list can still be dropped
+        # by the forward firewall before the hosted portal is reached. Keep a
+        # narrow FQDN-backed address list and permit only HTTP(S) to it.
+        if portal_host:
+            upsert_router_item(
+                api,
+                ("ip", "firewall", "address-list"),
+                {"list": "Expressnet-portal-ips", "address": portal_host},
+                {
+                    "list": "Expressnet-portal-ips",
+                    "address": portal_host,
+                    "comment": "billing-saas captive portal access",
+                },
+            )
+            for port in ("80", "443"):
+                upsert_router_item(
+                    api,
+                    ("ip", "hotspot", "walled-garden", "ip"),
+                    {"dst-address-list": "Expressnet-portal-ips", "dst-port": port, "protocol": "tcp"},
+                    {
+                        "action": "accept",
+                        "dst-address-list": "Expressnet-portal-ips",
+                        "dst-port": port,
+                        "protocol": "tcp",
+                        "comment": "billing-saas captive portal access",
+                    },
+                )
+                upsert_router_item(
+                    api,
+                    ("ip", "firewall", "filter"),
+                    {"comment": f"billing-saas allow captive portal {port}"},
+                    {
+                        "chain": "forward",
+                        "action": "accept",
+                        "in-interface": managed_bridge,
+                        "dst-address-list": "Expressnet-portal-ips",
+                        "protocol": "tcp",
+                        "dst-port": port,
+                        "comment": f"billing-saas allow captive portal {port}",
+                    },
+                )
         for host in walled_garden_hosts(tenant, portal_host):
             if not host:
                 continue

@@ -2795,7 +2795,7 @@ def _repair_legacy_router_port_script(script):
     )
 
 
-def _agent_hotspot_redirect_setup(portal_url):
+def _agent_hotspot_redirect_setup(portal_url, bridge_name=""):
     """Return the small, import-safe part of captive setup needed by agents.
 
     The full provisioning command writes every Hotspot page, but an agent-only
@@ -2815,11 +2815,30 @@ def _agent_hotspot_redirect_setup(portal_url):
         login_url += "&ngrok-skip-browser-warning=true" if "?" in login_url else "?ngrok-skip-browser-warning=true"
     source = _rsc_escape(login_url)
     host = _rsc_escape(parsed.hostname)
-    return [
+    bridge = _rsc_escape(bridge_name)
+    rules = [
         f':do {{ /ip hotspot walled-garden add action=allow dst-host="{host}" comment="billing-saas captive portal access" }} on-error={{}};',
+        # Hotspot's dst-host rule handles the authentication bypass.  Add an
+        # FQDN address list and a narrow forward permit too: customer bridges
+        # are intentionally outside the router's LAN list and otherwise a
+        # default forward drop can time out the redirected HTTPS request.
+        f':do {{ /ip firewall address-list add list=Expressnet-portal-ips address="{host}" comment="billing-saas captive portal access" }} on-error={{}};',
+        ':do { /ip hotspot walled-garden ip remove [find comment="billing-saas captive portal access"] } on-error={};',
+        ':do { /ip firewall filter remove [find comment="billing-saas allow captive portal 80"] } on-error={};',
+        ':do { /ip firewall filter remove [find comment="billing-saas allow captive portal 443"] } on-error={};',
+        ':do { /ip hotspot walled-garden ip add action=accept dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=80 comment="billing-saas captive portal access" } on-error={};',
+        ':do { /ip hotspot walled-garden ip add action=accept dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=443 comment="billing-saas captive portal access" } on-error={};',
+    ]
+    if bridge:
+        rules.extend([
+            f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=80 place-before=0 comment="billing-saas allow captive portal 80" }} on-error={{}};',
+            f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=443 place-before=0 comment="billing-saas allow captive portal 443" }} on-error={{}};',
+        ])
+    rules.extend([
         f':do {{ /tool fetch check-certificate=no url="{source}" dst-path="Expressnet-hotspot/login.html" }} on-error={{ :log warning "Billing SaaS: captive login page fetch failed" }};',
         f':do {{ /tool fetch check-certificate=no url="{source}" dst-path="hotspot/login.html" }} on-error={{}};',
-    ]
+    ])
+    return rules
 
 
 def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
@@ -2984,7 +3003,7 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
             f':do {{ /ip firewall nat add chain=srcnat src-address="{hotspot_network}" action=masquerade comment="billing-saas hotspot masquerade" }} on-error={{}};',
             ':log info "Billing SaaS: Hotspot service is active on the Expressnet bridge.";',
         ))
-        lines.extend(_agent_hotspot_redirect_setup(portal_url))
+        lines.extend(_agent_hotspot_redirect_setup(portal_url, bridge))
     return "\n".join(lines)
 
 
