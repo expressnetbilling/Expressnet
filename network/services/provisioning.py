@@ -1945,7 +1945,36 @@ def upsert_customer_access(tenant, customer, disabled=False):
 
 
 def _upsert_hotspot_simple_queue(api, customer, disabled=False):
-    """Create a per-user simple queue only when the Hotspot client has an IP."""
+    """Shape only an auto-authorized Hotspot MAC-bypass client.
+
+    Standard Hotspot logins are already limited by their user-profile
+    ``rate-limit``.  Applying a simple queue to those same sessions makes
+    RouterOS classify every packet twice and can make a busy RB951 feel slow.
+    A bypass binding skips that native Hotspot profile, so it alone needs the
+    per-IP queue below.
+    """
+    username = str(customer.get("username") or "").strip()
+    queue_name = f"Expressnet-hotspot-{username}"[:120]
+    bandwidth_comment = f"billing-saas hotspot bandwidth:{username}"[:250]
+    queue_path = api.path("queue", "simple")
+    if not customer.get("auto_authorize_mac") or disabled:
+        existing = find_router_item(api, ("queue", "simple"), queue_name)
+        if existing and existing.get(".id"):
+            try:
+                queue_path.remove(existing[".id"])
+            except RouterOSAPIError:
+                logger.warning("Could not remove unused Hotspot queue username=%s", username, exc_info=True)
+        address_item = find_router_item_by_fields(
+            api,
+            ("ip", "firewall", "address-list"),
+            {"comment": bandwidth_comment},
+        )
+        if address_item and address_item.get(".id"):
+            try:
+                api.path("ip", "firewall", "address-list").remove(address_item[".id"])
+            except RouterOSAPIError:
+                logger.warning("Could not remove unused Hotspot bandwidth address username=%s", username, exc_info=True)
+        return None
     raw_address = str(
         customer.get("router_client_ip")
         or customer.get("client_ip")
@@ -1960,21 +1989,31 @@ def _upsert_hotspot_simple_queue(api, customer, disabled=False):
     if address.version != 4 or address.is_unspecified or address.is_multicast:
         return None
     rate_limit = normalize_rate_limit(customer.get("speed") or customer.get("rate_limit") or "")
-    username = str(customer.get("username") or "").strip()
     if not rate_limit or not username:
         return None
-    queue_name = f"Expressnet-hotspot-{username}"[:120]
     path = ("queue", "simple")
     fields = {
         "name": queue_name,
         "target": f"{address}/32",
         "max-limit": rate_limit,
         "disabled": "yes" if disabled else "no",
-        "comment": f"billing-saas hotspot bandwidth:{username}"[:250],
+        "comment": bandwidth_comment,
     }
-    queue_path = api.path(*path)
     existing = find_router_item(api, path, queue_name)
     try:
+        # The bypass binding deliberately avoids Hotspot processing. Keep its
+        # queue visible to the existing FastTrack-exemption rules so the
+        # package cap is enforced without slowing unrelated traffic.
+        upsert_router_item(
+            api,
+            ("ip", "firewall", "address-list"),
+            {"list": "Expressnet-bandwidth-clients", "address": str(address)},
+            {
+                "list": "Expressnet-bandwidth-clients",
+                "address": str(address),
+                "comment": bandwidth_comment,
+            },
+        )
         if existing and existing.get(".id"):
             return queue_path.update(**{".id": existing[".id"], **fields})
         return queue_path.add(**fields)
@@ -2098,6 +2137,18 @@ def _upsert_paid_hotspot_binding(api, customer, disabled=False):
     mac_address = str(customer.get("router_client_mac") or customer.get("mac_address") or "").strip().upper()
     if not username or not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac_address):
         return None
+    # A MAC bypass does not use the Hotspot profile. If this is a capped
+    # package, require the router-reported client IP so its per-IP queue is
+    # created first; otherwise a malformed portal redirect could give an
+    # uncapped session.
+    if normalize_rate_limit(customer.get("speed") or customer.get("rate_limit")):
+        try:
+            client_ip = ipaddress.ip_address(str(customer.get("router_client_ip") or customer.get("client_ip") or customer.get("ip_address") or "").strip())
+        except ValueError:
+            client_ip = None
+        if not client_ip or client_ip.version != 4 or client_ip.is_unspecified or client_ip.is_multicast:
+            logger.warning("Skipping capped Hotspot MAC bypass without a valid client IP username=%s", username)
+            return None
     path = ("ip", "hotspot", "ip-binding")
     router_path = api.path(*path)
     comment = _paid_hotspot_binding_comment(username)

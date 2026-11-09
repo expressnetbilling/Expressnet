@@ -3255,14 +3255,27 @@ def _customer_secret_script(customer):
     rate_limit = _rsc_escape(normalize_rate_limit(customer.get("speed")) or "")
     rate_limit_field = f' rate-limit="{rate_limit}"'
     simple_queue_lines = []
-    if service_type == "hotspot" and rate_limit:
+    queue_cleanup_lines = []
+    bypass_queue_ready = False
+    queue_name = _rsc_escape(f"Expressnet-hotspot-{username}"[:120])
+    if service_type == "hotspot":
+        queue_cleanup_lines = [
+            f':do {{ /queue simple remove [find name="{queue_name}"] }} on-error={{}};',
+            f':do {{ /ip firewall address-list remove [find comment="billing-saas hotspot bandwidth:{username}"] }} on-error={{}};',
+        ]
+    if service_type == "hotspot" and rate_limit and customer.get("auto_authorize_mac") and disabled == "no":
         try:
             queue_address = ipaddress.ip_address(client_ip_raw)
             if queue_address.version == 4 and not queue_address.is_unspecified and not queue_address.is_multicast:
-                queue_name = _rsc_escape(f"Expressnet-hotspot-{username}"[:120])
                 queue_target = _rsc_escape(f"{queue_address}/32")
+                bypass_queue_ready = True
                 simple_queue_lines = [
-                    f'/queue simple remove [find name="{queue_name}"];',
+                    *queue_cleanup_lines,
+                    f':do {{ /ip firewall address-list add list=Expressnet-bandwidth-clients address="{_rsc_escape(queue_address)}" comment="billing-saas hotspot bandwidth:{username}" }} on-error={{}};',
+                    ':do { /ip firewall filter remove [find comment="billing-saas hotspot bypass fasttrack src"] } on-error={};',
+                    ':do { /ip firewall filter remove [find comment="billing-saas hotspot bypass fasttrack dst"] } on-error={};',
+                    ':do { /ip firewall filter add chain=forward action=accept connection-state=established,related src-address-list=Expressnet-bandwidth-clients place-before=[find action=fasttrack-connection] comment="billing-saas hotspot bypass fasttrack src" } on-error={};',
+                    ':do { /ip firewall filter add chain=forward action=accept connection-state=established,related dst-address-list=Expressnet-bandwidth-clients place-before=[find action=fasttrack-connection] comment="billing-saas hotspot bypass fasttrack dst" } on-error={};',
                     f'/queue simple add name="{queue_name}" target="{queue_target}" max-limit="{rate_limit}" disabled={disabled} comment="billing-saas hotspot bandwidth";',
                 ]
         except ValueError:
@@ -3314,6 +3327,7 @@ def _customer_secret_script(customer):
     lines.extend([
         f'/ip hotspot user remove [find name="{username}"];',
         f'/ip hotspot user add name="{username}" password="{password}" profile="{profile}" disabled={disabled}{address_field}{limit_uptime_field}{limit_bytes_field} comment="billing-saas-managed";',
+        *(queue_cleanup_lines if queue_cleanup_lines and not simple_queue_lines else []),
         *simple_queue_lines,
     ])
     # Do not depend on Android/iOS keeping the captive browser open long
@@ -3322,13 +3336,14 @@ def _customer_secret_script(customer):
     # is disabled by the normal customer expiry flow and the simple queue
     # above keeps the purchased speed limit in effect.
     raw_client_mac = normalize_mac(customer.get("router_client_mac") or customer.get("mac_address") or customer.get("mac") or "")
-    if customer.get("auto_authorize_mac") and raw_client_mac:
+    if raw_client_mac:
         binding_comment = _rsc_escape(f"billing-saas paid hotspot:{customer.get('username') or ''}")
-        lines.extend([
-            f':do {{ /ip hotspot ip-binding remove [find comment="{binding_comment}"] }} on-error={{}};',
-            f'/ip hotspot ip-binding add mac-address="{_rsc_escape(raw_client_mac)}" type=bypassed disabled={disabled} comment="{binding_comment}";',
-            f':do {{ /ip hotspot active remove [find mac-address="{_rsc_escape(raw_client_mac)}"] }} on-error={{}};',
-        ])
+        lines.append(f':do {{ /ip hotspot ip-binding remove [find comment="{binding_comment}"] }} on-error={{}};')
+        if customer.get("auto_authorize_mac") and disabled == "no" and (not rate_limit or bypass_queue_ready):
+            lines.extend([
+                f'/ip hotspot ip-binding add mac-address="{_rsc_escape(raw_client_mac)}" type=bypassed disabled=no comment="{binding_comment}";',
+                f':do {{ /ip hotspot active remove [find mac-address="{_rsc_escape(raw_client_mac)}"] }} on-error={{}};',
+            ])
     lines.extend(_access_expiry_scheduler_script(customer, raw_username, service_type, disabled))
     return "\n".join(lines)
 
@@ -4832,8 +4847,12 @@ def router_provision_script(request, token):
         for h in portal_wg_hosts
     ) + """
         :do { /ip hotspot walled-garden ip remove [find comment="billing-saas captive portal access"] } on-error={}
+        :do { /ip firewall filter remove [find comment="billing-saas allow captive portal 80"] } on-error={}
+        :do { /ip firewall filter remove [find comment="billing-saas allow captive portal 443"] } on-error={}
         :do { /ip hotspot walled-garden ip add action=accept dst-address-list=Expressnet-portal-ips dst-port=80 protocol=tcp comment=Expressnet-hotspot-ip-wg } on-error={}
         :do { /ip hotspot walled-garden ip add action=accept dst-address-list=Expressnet-portal-ips dst-port=443 protocol=tcp comment=Expressnet-hotspot-ip-wg } on-error={}
+        :do { /ip firewall filter add chain=forward action=accept in-interface=$billingBridge dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=80 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow captive portal 80" } on-error={ /ip firewall filter add chain=forward action=accept in-interface=$billingBridge dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=80 comment="billing-saas allow captive portal 80" }
+        :do { /ip firewall filter add chain=forward action=accept in-interface=$billingBridge dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=443 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow captive portal 443" } on-error={ /ip firewall filter add chain=forward action=accept in-interface=$billingBridge dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=443 comment="billing-saas allow captive portal 443" }
         """
 
     # Keep RouterOS's Hotspot proxy reachable from the customer bridge.  A raw
