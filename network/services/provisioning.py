@@ -1920,6 +1920,8 @@ def upsert_customer_access(tenant, customer, disabled=False):
             if service_type == "hotspot":
                 _upsert_hotspot_simple_queue(api, customer, disabled)
                 _upsert_paid_hotspot_binding(api, customer, disabled)
+                if customer.get("auto_authorize_mac") and not disabled and not _router_customer_access_ready(api, customer):
+                    raise RouterOSAPIError("RouterOS did not confirm the paid Hotspot MAC authorization")
             if service_type in {"hotspot", "pppoe"}:
                 _sync_customer_access_expiry(api, customer, service_type, disabled)
             if service_type == "hotspot" and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
@@ -1932,6 +1934,8 @@ def upsert_customer_access(tenant, customer, disabled=False):
         if service_type == "hotspot":
             _upsert_hotspot_simple_queue(api, customer, disabled)
             _upsert_paid_hotspot_binding(api, customer, disabled)
+            if customer.get("auto_authorize_mac") and not disabled and not _router_customer_access_ready(api, customer):
+                raise RouterOSAPIError("RouterOS did not confirm the paid Hotspot MAC authorization")
         if service_type in {"hotspot", "pppoe"}:
             _sync_customer_access_expiry(api, customer, service_type, disabled)
         if service_type == "hotspot" and item_id and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
@@ -1940,6 +1944,58 @@ def upsert_customer_access(tenant, customer, disabled=False):
             except Exception:
                 pass
         return item_id
+    finally:
+        api.close()
+
+
+def hotspot_bypass_eligible(customer):
+    """True only when a payment can safely authorize a Hotspot device by MAC."""
+    mac_address = str((customer or {}).get("router_client_mac") or (customer or {}).get("mac_address") or "").strip().upper()
+    if not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac_address):
+        return False
+    # A capped bypass must have a router client address for its per-IP queue.
+    # Without it, retain the ordinary Hotspot login instead of granting an
+    # unshaped device or recording a false active state.
+    if not normalize_rate_limit((customer or {}).get("speed") or (customer or {}).get("rate_limit")):
+        return True
+    try:
+        address = ipaddress.ip_address(str((customer or {}).get("router_client_ip") or (customer or {}).get("client_ip") or (customer or {}).get("ip_address") or "").strip())
+    except ValueError:
+        return False
+    return address.version == 4 and not address.is_unspecified and not address.is_multicast
+
+
+def _router_customer_access_ready(api, customer):
+    """Verify the RouterOS objects required for a paid access session."""
+    service_type = str((customer or {}).get("service_type") or "hotspot").lower()
+    username = str((customer or {}).get("username") or "").strip()
+    if not username:
+        return False
+    path = ("ppp", "secret") if service_type == "pppoe" else ("ip", "hotspot", "user")
+    user = next(iter(api.path(*path).select(proplist=(".id", "name", "disabled"), name=username)), None)
+    if not user or str(user.get("disabled") or "").lower() in {"yes", "true", "1"}:
+        return False
+    if service_type != "hotspot" or not (customer or {}).get("auto_authorize_mac"):
+        return True
+    binding = next(
+        iter(
+            api.path("ip", "hotspot", "ip-binding").select(
+                proplist=(".id", "comment", "disabled"),
+                comment=_paid_hotspot_binding_comment(username),
+            )
+        ),
+        None,
+    )
+    return bool(binding and str(binding.get("disabled") or "").lower() not in {"yes", "true", "1"})
+
+
+def router_customer_access_ready(tenant, customer):
+    """Read-only readiness probe used to avoid trusting stale DB status."""
+    if not has_mikrotik_credentials(tenant):
+        return None
+    api = router_connect(tenant)
+    try:
+        return _router_customer_access_ready(api, customer)
     finally:
         api.close()
 
@@ -2141,14 +2197,9 @@ def _upsert_paid_hotspot_binding(api, customer, disabled=False):
     # package, require the router-reported client IP so its per-IP queue is
     # created first; otherwise a malformed portal redirect could give an
     # uncapped session.
-    if normalize_rate_limit(customer.get("speed") or customer.get("rate_limit")):
-        try:
-            client_ip = ipaddress.ip_address(str(customer.get("router_client_ip") or customer.get("client_ip") or customer.get("ip_address") or "").strip())
-        except ValueError:
-            client_ip = None
-        if not client_ip or client_ip.version != 4 or client_ip.is_unspecified or client_ip.is_multicast:
-            logger.warning("Skipping capped Hotspot MAC bypass without a valid client IP username=%s", username)
-            return None
+    if not hotspot_bypass_eligible(customer):
+        logger.warning("Skipping Hotspot MAC bypass without valid router client details username=%s", username)
+        return None
     path = ("ip", "hotspot", "ip-binding")
     router_path = api.path(*path)
     comment = _paid_hotspot_binding_comment(username)

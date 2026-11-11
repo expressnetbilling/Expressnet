@@ -96,11 +96,13 @@ from billing_api.services import (
     router_connect,
     router_interface_status,
     router_items,
+    router_customer_access_ready,
     send_sms_message,
     send_whatsapp_message,
     set_customer_enabled,
     tenant_token,
     upsert_customer_access,
+    hotspot_bypass_eligible,
     utcnow,
     write_audit_log,
 )
@@ -4004,7 +4006,11 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code, notif
     username = mac_address if service_type == "tv" else (payment.get("access_username") or payment.get("username") or (customer or {}).get("username") or to_access_username(phone))
     password = str(payment.get("pending_access_password") or payment.get("access_password") or (customer or {}).get("password") or payment_code)
     customer_name = _payment_customer_name({**(customer or {}), **payment}, phone, username)
-    auto_authorize_mac = service_type == "hotspot" and bool(router_client_mac)
+    auto_authorize_mac = service_type == "hotspot" and hotspot_bypass_eligible({
+        "router_client_mac": router_client_mac,
+        "router_client_ip": router_client_ip,
+        "speed": (pkg or {}).get("speed"),
+    })
     if customer:
         updates = {"name": customer_name, "phone": phone, "username": username, "password": password, "package": package_for_access, "service_type": service_type, "status": "active", "expiry_date": expiry.isoformat(), "last_payment_id": payment_id, "last_payment_code": payment_code, "auto_reconnect": True, "router_client_mac": router_client_mac, "router_client_ip": router_client_ip, "auto_authorize_mac": auto_authorize_mac, "updated_at": iso_now()}
         if mac_address:
@@ -4141,6 +4147,7 @@ def activate_paid_access(tenant, payment_id, payment, phone, payment_code, notif
         "access_status": router_access_status,
         "access_error": router_access_error,
         "auto_reconnect": True,
+        "auto_authorize_mac": auto_authorize_mac,
     }
     ref(f"tenants/{tenant_id}/payments/{payment_id}").update(payment_access_updates)
     try:
@@ -4241,10 +4248,34 @@ def _activate_paid_access_immediately(tenant_id, payment_id, reason="payment con
     payment = ref(payment_path).get() or {}
     if payment.get("status") != "success":
         return False
-    if str(payment.get("access_status") or "").lower() == "active":
-        return True
-
     tenant = {"id": str(tenant_id), **(ref(f"tenants/{tenant_id}").get() or {})}
+    if str(payment.get("access_status") or "").lower() == "active":
+        # Never treat a database/agent acknowledgement as proof of internet
+        # access when the native binary API is available.  This catches a
+        # partial RouterOS import or a lost MAC binding and repairs it on a
+        # later callback or portal verification request.
+        if has_mikrotik_credentials(tenant):
+            try:
+                ready = router_customer_access_ready(
+                    tenant,
+                    {
+                        "username": payment.get("access_username") or payment.get("username"),
+                        "service_type": payment.get("service_type") or "hotspot",
+                        "router_client_mac": payment.get("router_client_mac") or payment.get("router_mac"),
+                        "router_client_ip": payment.get("router_client_ip") or payment.get("ip"),
+                        "auto_authorize_mac": bool(payment.get("auto_authorize_mac")),
+                    },
+                )
+                if ready is True:
+                    return True
+                if ready is False:
+                    logger.warning("Repairing stale paid-access status tenant=%s payment=%s", tenant_id, payment_id)
+            except Exception:
+                # An unavailable router is handled by the normal recovery
+                # route below; do not incorrectly confirm the session.
+                logger.warning("Could not verify paid router access tenant=%s payment=%s", tenant_id, payment_id, exc_info=True)
+        else:
+            return True
     # Explicitly bypass any stale tenant flag from an old RADIUS deployment.
     tenant["radius_enabled"] = False
     try:
@@ -4347,6 +4378,13 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
     # leave a customer who has paid stuck in the portal's "waiting for
     # confirmation" state.
     ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
+    # Customer authorization is the only latency-sensitive post-payment
+    # action. Run it before invoice and settlement bookkeeping so a slow
+    # database, B2B configuration lookup, or payout dispatcher cannot keep a
+    # confirmed customer in the captive portal.
+    access_activated = _activate_paid_access_immediately(tenant_id, payment_id, "Daraja callback")
+    if not access_activated:
+        _queue_paid_access_activation(tenant_id, payment_id, "Daraja callback router recovery")
     try:
         mark_customer_invoice_paid(tenant_id, payment.get("customer_id"), {"id": payment_id, **payment, **update})
     except Exception:
@@ -4390,12 +4428,6 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
         "tenant_settlement_queued_at": iso_now() if platform_collected else "",
     })
     ref(f"tenants/{tenant_id}/payments/{payment_id}").update(update)
-    # The customer must be online as soon as the STK callback confirms
-    # payment.  Use the local RouterOS binary API now; settlement remains a
-    # separate background concern.  If the router is briefly unavailable, the
-    # durable queue below is recovery only, never the normal access path.
-    if not _activate_paid_access_immediately(tenant_id, payment_id, "Daraja callback"):
-        _queue_paid_access_activation(tenant_id, payment_id, "Daraja callback router recovery")
     current_balance = float(tenant_data.get("settlement_pending_amount") or 0)
     tenant_balance_update = {
         "settlement_pending_amount": round(current_balance + tenant_net_amount, 2) if platform_collected else current_balance,
