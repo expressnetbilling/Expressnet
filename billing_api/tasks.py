@@ -6,7 +6,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from .models import Customer, Payment, Tenant, TenantSubscription
+from .models import Customer, InternetPackage, Payment, Tenant, TenantSubscription
 from .services import iso_now, list_children, normalize_phone, ref, send_sms_message, send_whatsapp_message, set_customer_enabled, upsert_customer_access, write_audit_log
 
 logger = logging.getLogger(__name__)
@@ -230,38 +230,47 @@ def send_subscription_reminder_sms():
 
 
 @shared_task
-def expire_customer_access():
+def expire_customer_access(batch_size=500):
+    """Expire only due records, in a bounded batch.
+
+    This task runs every five minutes.  Scanning every tenant and serializing
+    every customer made its runtime proportional to the entire installation,
+    even when no account had expired.
+    """
     now = iso_now()
     count = 0
-    for tenant in list_children("tenants"):
-        tenant_id = tenant.get("id")
-        if not tenant_id:
-            continue
-        for customer in list_children(f"tenants/{tenant_id}/customers"):
-            expiry = str(customer.get("expiry_date") or "")
-            if not expiry or expiry > now or customer.get("status") == "expired":
-                continue
-            service_type = customer.get("service_type") or "hotspot"
-            username = customer.get("mac_address") if service_type == "tv" else customer.get("username")
-            if service_type == "static":
-                try:
-                    upsert_customer_access({"id": tenant_id, **tenant}, customer, disabled=True)
-                except Exception:
-                    pass
-            elif service_type != "pppoe":
-                try:
-                    set_customer_enabled({"id": tenant_id, **tenant}, username, service_type, False)
-                except Exception:
-                    pass
-            ref(f"tenants/{tenant_id}/customers/{customer['id']}").update(
-                {
-                    "status": "expired",
-                    "auto_reconnect": False,
-                    "expired_at": now,
-                    "updated_at": now,
-                }
-            )
-            count += 1
+    due_customers = (
+        Customer.objects.select_related("tenant")
+        .filter(expiry_date__lte=now)
+        .exclude(expiry_date__isnull=True)
+        .exclude(expiry_date="")
+        .exclude(status="expired")
+        .order_by("expiry_date", "id")[:batch_size]
+    )
+    for customer_record in due_customers:
+        tenant = customer_record.tenant.as_dict()
+        customer = customer_record.as_dict()
+        service_type = customer.get("service_type") or "hotspot"
+        username = customer.get("mac_address") if service_type == "tv" else customer.get("username")
+        if service_type == "static":
+            try:
+                upsert_customer_access(tenant, customer, disabled=True)
+            except Exception:
+                logger.warning("Could not disable expired static customer=%s", customer_record.pk, exc_info=True)
+        elif service_type != "pppoe":
+            try:
+                set_customer_enabled(tenant, username, service_type, False)
+            except Exception:
+                logger.warning("Could not disable expired customer=%s", customer_record.pk, exc_info=True)
+        customer_record.apply_data(
+            {
+                "status": "expired",
+                "auto_reconnect": False,
+                "expired_at": now,
+            }
+        )
+        customer_record.save()
+        count += 1
     return count
 
 
@@ -275,6 +284,10 @@ def generate_expired_customer_invoices(self, batch_size=200):
     for tenant_record in Tenant.objects.only("id", "extra").iterator(chunk_size=100):
         tenant_id = str(tenant_record.pk)
         tenant = {"id": tenant_id, **(tenant_record.extra or {})}
+        packages_by_name = {
+            str(package.name or "").strip().lower(): package
+            for package in InternetPackage.objects.filter(tenant_id=tenant_id).only("name", "price", "extra")
+        }
         customers = Customer.objects.filter(
             tenant_id=tenant_id, service_type__in=["pppoe", "static"], expiry_date__lte=cutoff,
         ).exclude(expiry_date__isnull=True).exclude(expiry_date="").order_by("expiry_date", "id")
@@ -295,9 +308,9 @@ def generate_expired_customer_invoices(self, batch_size=200):
                     continue
                 amount = customer.get("amount_payable")
                 if amount in {None, ""}:
-                    package = next((item for item in list_children(f"tenants/{tenant_id}/packages")
-                                    if str(item.get("name") or "").strip().lower() == str(customer.get("package") or "").strip().lower()), {})
-                    amount = package.get("amount_payable") or package.get("price") or 0
+                    package = packages_by_name.get(str(customer.get("package") or "").strip().lower())
+                    package_data = package.as_dict() if package else {}
+                    amount = package_data.get("amount_payable") or package_data.get("price") or 0
                 invoice = create_customer_invoice(tenant, customer, amount, reason="subscription_expired", due_at=expiry.isoformat())
                 if invoice:
                     ref(f"tenants/{tenant_id}/customers/{customer['id']}").update({marker: invoice["id"], "last_expiry_invoice_at": iso_now()})

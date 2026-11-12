@@ -17,6 +17,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from django.db.models import Sum
 import pyrad.packet
 from pyrad.server import Server, RemoteHost
 from pyrad.dictionary import Dictionary
@@ -183,8 +184,21 @@ def _package_policy(package):
 
 
 def _usage_bytes(tenant, username):
-    totals = RadiusSession.objects.filter(tenant=tenant, customer__username=username).values("input_octets", "output_octets")
-    return sum(int(row["input_octets"] or 0) + int(row["output_octets"] or 0) for row in totals)
+    """Return usage without transferring every historical session to Python.
+
+    RADIUS authentication is on the critical path.  The former implementation
+    fetched every matching accounting row and summed it in Python, making an
+    old customer's login progressively slower as session history accumulated.
+    PostgreSQL can perform the aggregate using the session indexes instead.
+    """
+    totals = RadiusSession.objects.filter(
+        tenant=tenant,
+        customer__username=username,
+    ).aggregate(
+        input_total=Sum("input_octets"),
+        output_total=Sum("output_octets"),
+    )
+    return int(totals["input_total"] or 0) + int(totals["output_total"] or 0)
 
 
 def _customer_usage_bytes(customer):

@@ -100,12 +100,21 @@
 .tenant-app .hover\\:bg-slate-100:hover { background-color: var(--app-panel-muted) !important; }
 .tenant-app .hover\\:bg-slate-50:hover { background-color: var(--app-panel-muted) !important; }
 .tenant-sidebar-nav-button {
-  font-family: var(--app-font-family, Inter), Inter, Roboto, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
-  font-size: 12px !important;
-  font-weight: 400 !important;
+  /* Match the compact humanist sans used by the sidebar reference. */
+  font-family: Inter, Roboto, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+  font-weight: 500 !important;
   letter-spacing: 0 !important;
   -webkit-font-smoothing: antialiased;
   text-rendering: geometricPrecision;
+}
+
+.tenant-sidebar-section-label {
+  font-family: Inter, Roboto, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  letter-spacing: .035em !important;
+  text-transform: uppercase;
+  -webkit-font-smoothing: antialiased;
 }
 
 html[data-theme="dark"] .tenant-app .table-cell { color: var(--app-text); }

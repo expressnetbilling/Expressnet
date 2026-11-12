@@ -127,7 +127,7 @@ export default function Sidebar({ open, onClose }) {
 
   const navClass = ({ isActive }) =>
     [
-      'tenant-sidebar-nav-button flex h-9 items-center gap-2.5 rounded-md px-2.5 text-sm font-medium tracking-[0.01em] transition',
+      'tenant-sidebar-nav-button flex h-10 items-center gap-2.5 rounded-md px-2.5 text-[15px] font-medium leading-none transition',
       isActive
         ? 'bg-[var(--sidebar-active)] text-white shadow-[inset_3px_0_0_rgba(255,255,255,0.28)]'
         : 'text-white/88 hover:bg-white/10 hover:text-white',
@@ -154,14 +154,14 @@ export default function Sidebar({ open, onClose }) {
               {tenantInitial(tenant)}
             </span>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-bold tracking-[0.01em] text-white">{tenant?.business_name || tenant?.name || 'Expressnet'}</p>
+              <p className="truncate text-[15px] font-semibold tracking-[-0.01em] text-white">{tenant?.business_name || tenant?.name || 'Expressnet'}</p>
             </div>
             <ChevronDown size={14} className="text-white/75" />
           </div>
         </div>
 
 
-        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1 tracking-[0.01em]">
+        <nav className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
           {sections.map((section, index) => {
             if (section.staffOnly && isTenantAdmin(tenant)) return null;
             const links = visibleLinks(section.links);
@@ -185,10 +185,10 @@ export default function Sidebar({ open, onClose }) {
             }
 
             return (
-              <div key={section.title} className="border-t border-white/10 pt-2 first:border-t-0 first:pt-0">
+              <div key={section.title} className="pt-2 first:pt-0">
                 <button
                   type="button"
-                  className={`tenant-sidebar-nav-button flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-sm font-medium tracking-[0.01em] transition hover:bg-white/10 ${groupActive ? 'text-white' : 'text-white/84'}`}
+                  className={`tenant-sidebar-section-label flex h-7 w-full items-center gap-2.5 rounded-md px-2.5 text-left transition hover:bg-white/10 ${groupActive ? 'text-white/85' : 'text-white/65'}`}
                   onClick={() => toggleSection(section.title)}
                   aria-expanded={expanded}
                 >
@@ -203,12 +203,12 @@ export default function Sidebar({ open, onClose }) {
                         key={`${section.title}-${label}-${to}`}
                         to={to}
                         className={({ isActive }) => [
-                          'tenant-sidebar-nav-button ml-6 flex h-8 items-center gap-2 rounded-md px-2 text-[13px] font-medium tracking-[0.01em] transition',
+                          'tenant-sidebar-nav-button ml-1 flex h-9 items-center gap-3 rounded-md px-2.5 text-[15px] font-medium leading-none transition',
                           isActive ? 'bg-[var(--sidebar-active)] text-white' : 'text-white/84 hover:bg-white/10 hover:text-white',
                         ].join(' ')}
                         onClick={onClose}
                       >
-                        <Icon size={12} strokeWidth={1.5} />
+                        <Icon size={16} strokeWidth={1.5} />
                         <span className="min-w-0 flex-1 truncate">{label}</span>
                       </NavLink>
                     ))}

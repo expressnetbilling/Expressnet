@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: expressnet-web
+  labels:
+    app.kubernetes.io/name: expressnet-web
+spec:
+  # The HPA owns replica count after it is applied.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: expressnet-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: expressnet-web
+    spec:
+      containers:
+        - name: web
+          # Replace this in kustomization.yaml or your deployment pipeline.
+          image: ghcr.io/your-org/expressnet:latest
+          imagePullPolicy: IfNotPresent
+          command: ["daphne"]
+          args: ["--bind", "0.0.0.0", "--port", "8000", "billing_saas_django.asgi:application"]
+          env:
+            - name: DJANGO_SETTINGS_MODULE
+              value: billing_saas_django.Settings.production
+          envFrom:
+            - secretRef:
+                name: expressnet-runtime
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: expressnet-web
+spec:
+  selector:
+    app.kubernetes.io/name: expressnet-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  # Kubernetes distributes requests across ready web pods automatically.
+  sessionAffinity: None
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: expressnet-web
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: expressnet-web
+  minReplicas: 2
+  maxReplicas: 20
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: expressnet-web
+  annotations:
+    # Supported by ingress-nginx; it also preserves WebSocket upgrades.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: expressnet-web
+                port:
+                  name: http

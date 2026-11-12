@@ -16,6 +16,7 @@ from urllib.parse import urlencode, urlparse
 
 import jwt
 from django.conf import settings
+from django.core.cache import cache
 from django.core.files.storage import FileSystemStorage
 from django.core.management import call_command
 from django.core.mail import send_mail
@@ -26,6 +27,7 @@ from django.db.models import Count, Q, Sum
 from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import redirect
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.decorators import api_view, permission_classes, renderer_classes
 from rest_framework.renderers import JSONRenderer
@@ -4331,9 +4333,18 @@ def router_resources(request):
             return ok(resource_payload(snapshot, "agent_report", "Showing the latest resource snapshot reported by the linked MikroTik agent."))
         return ok({"message": "Live MikroTik resources require reachable RouterOS API credentials or a linked router agent."}, 503)
 
+    # A live sample makes several RouterOS calls, including one traffic
+    # monitor command per interface.  Coalesce simultaneous dashboard polls
+    # across browser tabs/users for the same tenant.
+    cache_key = f"router-status:{request.tenant['id']}"
+    cached = cache.get(cache_key)
+    if cached:
+        return ok({**cached, "cached": True})
     try:
         status = router_interface_status(request.tenant)
-        return ok(resource_payload(status))
+        payload = resource_payload(status)
+        cache.set(cache_key, payload, timeout=max(1, settings.ROUTER_STATUS_CACHE_SECONDS))
+        return ok(payload)
     except (TimeoutError, OSError) as exc:
         snapshot = request.tenant.get("mikrotik_router_snapshot") or {}
         return ok(resource_payload(snapshot, "provisioning_snapshot", f"Live API unreachable, showing last snapshot: {exc}"))
@@ -4994,10 +5005,20 @@ def router_agent_poll(request, token):
         or request.META.get("REMOTE_ADDR")
         or ""
     ).split(",")[0].strip()
-    ref(f"tenants/{tenant_id}").update({
-        "mikrotik_last_seen_at": iso_now(),
-        "mikrotik_last_seen_ip": client_ip,
-    })
+    # The scheduler polls every ten seconds.  Persisting a large tenant JSON
+    # document for every heartbeat creates needless write amplification; only
+    # persist it when the visible health value is due or the source IP changes.
+    last_seen = parse_datetime(str(tenant.get("mikrotik_last_seen_at") or ""))
+    if last_seen and timezone.is_naive(last_seen):
+        last_seen = timezone.make_aware(last_seen, timezone.get_current_timezone())
+    heartbeat_due = not last_seen or (timezone.now() - last_seen).total_seconds() >= max(
+        10, settings.ROUTER_AGENT_HEARTBEAT_SECONDS
+    )
+    if heartbeat_due or client_ip != str(tenant.get("mikrotik_last_seen_ip") or ""):
+        ref(f"tenants/{tenant_id}").update({
+            "mikrotik_last_seen_at": iso_now(),
+            "mikrotik_last_seen_ip": client_ip,
+        })
 
     all_commands = tenant.get("pending_router_commands") or []
     now = timezone.now()

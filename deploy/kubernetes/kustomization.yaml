@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - web.yaml
+  - workers.yaml
+
+# CI should replace this with the immutable image tag it built.
+images:
+  - name: ghcr.io/your-org/expressnet
+    newName: ghcr.io/your-org/expressnet
+    newTag: latest

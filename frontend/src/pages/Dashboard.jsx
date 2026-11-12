@@ -250,7 +250,7 @@ export default function Dashboard() {
         if (silent) setRefreshing(true);
         const [statsResult, paymentsResult, subscriptionResult] = await Promise.all([
           api.get('/dashboard/stats'),
-          api.get('/payments?all=1').catch(() => ({ data: [] })),
+          api.get('/payments?page=1&page_size=5').catch(() => ({ data: [] })),
           api.get('/subscription/status').catch(() => ({ data: null })),
         ]);
         if (!mounted) return;
@@ -278,7 +278,7 @@ export default function Dashboard() {
     }
 
     loadInitial();
-    const routerTimer = window.setInterval(() => loadRouterResources({ silent: true }), 5000);
+    const routerTimer = window.setInterval(() => loadRouterResources({ silent: true }), 15000);
     const dashboardTimer = window.setInterval(() => loadDashboard({ silent: true }), 30000);
     return () => {
       mounted = false;
@@ -391,7 +391,7 @@ export default function Dashboard() {
         <KpiCard icon={Activity} title="Connected Users" value={connectedUsers.toLocaleString('en-KE')} helper="Currently online" action="Live sessions" to="/mikrotik">
           <Sparkline />
         </KpiCard>
-        {canViewEarnings && <KpiCard icon={Wallet} title="Daily Earnings" value={formatKES(summary.daraja_revenue_today ?? summary.revenue_today)} helper="Successful Daraja payments today" action="View payments" to="/payments" />}
+        {canViewEarnings && <KpiCard icon={Wallet} title="Daily Earnings" value={formatKES(summary.revenue_today)} helper="Successful payments today" action="View payments" to="/payments" />}
         <KpiCard icon={Box} title="Active Packages" value={activePackages.toLocaleString('en-KE')} helper="Total active packages" action="Manage packages" to="/packages" />
       </section>
 

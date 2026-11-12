@@ -2275,77 +2275,45 @@ def paystack_withdrawal_otp(request, withdrawal_id):
 @tenant_required
 def payments(request):
     if method(request, "GET"):
-        payments_data = list_children(f"tenants/{request.tenant['id']}/payments")
-        paystack_refs = {
-            str(item.get("paystack_reference") or ""): item
-            for item in payments_data
-            if item.get("provider") == "paystack" and item.get("paystack_reference")
-        }
-        sql_paystack_payments = Payment.objects.filter(
-            tenant_id=request.tenant["id"], provider="paystack"
-        ).order_by("-id")
-        for sql_payment in sql_paystack_payments:
-            sql_item = sql_payment.as_dict()
-            reference = str(sql_item.get("paystack_reference") or "")
-            ref_item = paystack_refs.get(reference)
-            if ref_item is None:
-                payments_data.append(sql_item)
-                if reference:
-                    paystack_refs[reference] = sql_item
-                continue
-            for field in (
-                "customer_name", "package_name", "service_type", "amount", "payment_code",
-                "currency", "phone", "paid_at", "initiated_at", "access_username",
-                "access_password", "access_expires_at", "access_status",
-            ):
-                if ref_item.get(field) in (None, "") and sql_item.get(field) not in (None, ""):
-                    ref_item[field] = sql_item[field]
-            if sql_item.get("status") == "success":
-                ref_item["status"] = "success"
-                ref_item["paid_at"] = sql_item.get("paid_at") or ref_item.get("paid_at")
-        sql_other_payments = Payment.objects.filter(tenant_id=request.tenant["id"]).exclude(provider="paystack").order_by("-id")
-        known_ids = {str(item.get("id") or "") for item in payments_data}
-        for sql_payment in sql_other_payments:
-            sql_item = sql_payment.as_dict()
-            ref_item = next((item for item in payments_data if str(item.get("id") or "") == str(sql_payment.pk)), None)
-            if ref_item is None:
-                payments_data.append(sql_item)
-                known_ids.add(str(sql_payment.pk))
-                continue
-            for field in ("customer_name", "package_name", "service_type", "amount", "payment_code", "currency", "phone", "paid_at", "initiated_at", "access_username", "access_password", "access_expires_at", "access_status"):
-                if ref_item.get(field) in (None, "") and sql_item.get(field) not in (None, ""):
-                    ref_item[field] = sql_item[field]
-            if sql_item.get("status") == "success":
-                ref_item["status"] = "success"
-                ref_item["paid_at"] = sql_item.get("paid_at") or ref_item.get("paid_at")
-            for field, value in (sql_item.get("extra") or {}).items():
-                ref_item.setdefault(field, value)
-
-        # Return persisted SQL records only when the reference ledger contains
-        # no payment for this tenant (the payment row remains authoritative).
-        if not payments_data:
-            payments_data = [item.as_dict() for item in Payment.objects.filter(tenant_id=request.tenant["id"]).order_by("-id")]
+        # ``ref()`` is now backed by the same SQL Payment table.  Loading it
+        # first and then loading Payment again made this endpoint scan every
+        # payment twice; the old merge also performed a linear lookup for each
+        # SQL row.  Keep filtering and pagination in PostgreSQL instead.
+        queryset = Payment.objects.filter(tenant_id=request.tenant["id"]).order_by("-id")
         status_filter = request.GET.get("status")
         from_date = parse_date(request.GET.get("from"))
         to_date = parse_date(request.GET.get("to"))
-        from_day = from_date.date() if from_date else None
-        to_day = to_date.date() if to_date else None
         if status_filter and status_filter != "all":
-            payments_data = [item for item in payments_data if item.get("status") == status_filter]
+            queryset = queryset.filter(status=status_filter)
         if from_date or to_date:
-            filtered = []
-            for item in payments_data:
-                current = payment_date(item)
-                if not current:
-                    continue
-                current_day = current.date()
-                if from_day and current_day < from_day:
-                    continue
-                if to_day and current_day > to_day:
-                    continue
-                filtered.append(item)
-            payments_data = filtered
-        return as_collection_response(request, payments_data)
+            # Payment timestamps are legacy ISO-8601 strings.  ISO ordering is
+            # chronological, so this remains indexable until they are migrated
+            # to DateTimeField values.
+            if from_date:
+                lower = from_date.isoformat()
+                queryset = queryset.filter(
+                    Q(paid_at__gte=lower)
+                    | ((Q(paid_at__isnull=True) | Q(paid_at="")) & Q(initiated_at__gte=lower))
+                )
+            if to_date:
+                upper = (to_date + timedelta(days=1)).isoformat()
+                queryset = queryset.filter(
+                    Q(paid_at__lt=upper)
+                    | ((Q(paid_at__isnull=True) | Q(paid_at="")) & Q(initiated_at__lt=upper))
+                )
+        if request.GET.get("all") == "1" or request.GET.get("format") == "legacy":
+            return ok([item.as_dict() for item in queryset])
+        page, page_size = parse_page(request)
+        total = queryset.count()
+        start = (page - 1) * page_size
+        rows = [item.as_dict() for item in queryset[start:start + page_size]]
+        pages = max(1, (total + page_size - 1) // page_size)
+        query = request.GET.copy()
+        query["page"] = str(page + 1)
+        next_url = f"{request.path}?{query.urlencode()}" if page < pages else None
+        query["page"] = str(max(1, page - 1))
+        previous_url = f"{request.path}?{query.urlencode()}" if page > 1 else None
+        return ok({"results": rows, "count": total, "pages": pages, "next": next_url, "previous": previous_url})
     data = body(request)
     if str(data.get("provider") or data.get("payment_provider") or "").strip().lower() == "paystack":
         return ok({"message": "Paystack is unavailable. Use the configured M-Pesa settlement method."}, 410)
@@ -2608,16 +2576,6 @@ def dashboard_stats(request):
     now = utcnow()
     today = now.date()
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    def is_daraja_payment(payment):
-        method = str(payment.get("payment_method") or payment.get("method") or "").strip().lower()
-        provider = str(payment.get("provider") or "").strip().lower()
-        return (
-            method in {"daraja_paybill", "daraja_buygoods"}
-            or bool(payment.get("daraja_receipt_number") or payment.get("mpesa_receipt_number"))
-            or bool(payment.get("daraja_checkout_request_id") or payment.get("daraja_merchant_request_id"))
-            or (provider == "mpesa" and str(payment.get("collection_account") or "").strip().lower() == "platform_daraja")
-        )
-
     paid_payments = payments_qs.filter(status="success").annotate(
         report_date=Case(
             When(paid_at__isnull=False, paid_at__gt="", then="paid_at"),
@@ -2637,13 +2595,9 @@ def dashboard_stats(request):
         Q(expiry_date__isnull=True) | Q(expiry_date="") | Q(expiry_date__gt=now.isoformat())
     )
     revenue_this_month = float(paid_payments.filter(report_date__gte=month_start.isoformat()).aggregate(total=Sum("amount"))["total"] or 0)
-    daraja_condition = (
-        Q(extra__payment_method__in=["daraja_paybill", "daraja_buygoods"])
-        | Q(extra__daraja_receipt_number__gt="") | Q(extra__mpesa_receipt_number__gt="")
-        | Q(extra__daraja_checkout_request_id__gt="") | Q(extra__daraja_merchant_request_id__gt="")
-        | Q(provider="mpesa", extra__collection_account="platform_daraja")
+    revenue_today = float(
+        paid_payments.filter(report_date__startswith=today.isoformat()).aggregate(total=Sum("amount"))["total"] or 0
     )
-    revenue_today = float(paid_payments.filter(daraja_condition, report_date__startswith=today.isoformat()).aggregate(total=Sum("amount"))["total"] or 0)
     twelve_month_start = (now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) - timedelta(days=335)).replace(day=1)
     monthly_payment_rows = paid_payments.filter(report_date__gte=twelve_month_start.isoformat()).annotate(month=Substr("report_date", 1, 7)).values("month").annotate(total=Sum("amount"))
     monthly_payment_map = {item["month"]: float(item["total"] or 0) for item in monthly_payment_rows}
@@ -2886,7 +2840,6 @@ def dashboard_stats(request):
                 "active_customers": enabled_customers_count,
                 "enabled_customers": enabled_customers_count,
                 "connected_users": connected_users_count,
-                "daraja_revenue_today": round(revenue_today, 2),
             },
             "router_health": {
                 "status": router_status,

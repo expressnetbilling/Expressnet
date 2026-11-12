@@ -1158,18 +1158,22 @@ def public_site(request):
 @csrf_exempt
 @api_view(["GET"])
 def public_stats(request):
-    tenants = list_children("tenants")
-    active_tenants = [tenant for tenant in tenants if tenant.get("status") == "active"]
-    customers = []
-    for tenant in tenants:
-        customers.extend(list_children(f"tenants/{tenant['id']}/customers"))
-    active_customers = [customer for customer in customers if customer.get("status") == "active"]
+    # This endpoint is public and can be called frequently.  Do not serialize
+    # every tenant and then every customer just to produce four counters.
+    tenant_counts = Tenant.objects.aggregate(
+        total=Count("id"),
+        active=Count("id", filter=Q(status="active")),
+    )
+    customer_counts = Customer.objects.aggregate(
+        total=Count("id"),
+        active=Count("id", filter=Q(status="active")),
+    )
     return ok(
         {
-            "totalTenants": len(tenants),
-            "activeTenants": len(active_tenants),
-            "totalCustomers": len(customers),
-            "activeCustomers": len(active_customers),
+            "totalTenants": tenant_counts["total"],
+            "activeTenants": tenant_counts["active"],
+            "totalCustomers": customer_counts["total"],
+            "activeCustomers": customer_counts["active"],
         }
     )
 
@@ -1454,10 +1458,14 @@ def admin_system_stats(request):
     month_payments = SubscriptionPayment.objects.filter(paid_at__year=now.year, paid_at__month=now.month).aggregate(total=Sum("amount"))["total"] or 0
     payments_today = Payment.objects.filter(paid_at__startswith=today.isoformat()).aggregate(total=Sum("amount"))["total"] or 0
     tenants_qs = Tenant.objects.all()
-    top_tenants = []
-    for tenant in tenants_qs:
-        top_tenants.append({"id": str(tenant.pk), "business_name": tenant.business_name, "customer_count": Customer.objects.filter(tenant=tenant).count()})
-    top_tenants = sorted(top_tenants, key=lambda item: item["customer_count"], reverse=True)[:5]
+    top_tenants = [
+        {
+            "id": str(tenant.pk),
+            "business_name": tenant.business_name,
+            "customer_count": tenant.customer_count,
+        }
+        for tenant in tenants_qs.annotate(customer_count=Count("customers")).order_by("-customer_count", "id")[:5]
+    ]
     return ok(
         {
             "totalTenants": tenants_qs.count(),

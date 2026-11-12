@@ -120,6 +120,9 @@ class Tenant(ExtraFieldsModel):
                 name="unique_tenant_business_name_ci",
             ),
         ]
+        indexes = [
+            models.Index(fields=["status", "created_at"], name="tenant_status_created_idx"),
+        ]
 
     mikrotik_host = models.CharField(max_length=255, blank=True, default="")
     mikrotik_user = models.CharField(max_length=255, blank=True, default="")
@@ -196,6 +199,12 @@ class Voucher(ExtraFieldsModel):
     router_status = models.CharField(max_length=40, default="pending")
     router_error = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["tenant", "status", "created_at"], name="voucher_tenant_state_idx"),
+            models.Index(fields=["tenant", "service_type"], name="voucher_tenant_service_idx"),
+        ]
 
     def save(self, *args, **kwargs):
         if self.router_error is None:
@@ -298,6 +307,7 @@ class Payment(ExtraFieldsModel):
         indexes = [
             models.Index(fields=["tenant", "status", "initiated_at"], name="payment_tenant_status_init_idx"),
             models.Index(fields=["tenant", "status", "paid_at"], name="payment_tenant_status_paid_idx"),
+            models.Index(fields=["tenant", "paid_at"], name="payment_tenant_paid_idx"),
         ]
 
     def apply_data(self, data):
@@ -393,6 +403,12 @@ class AdminAuditLog(models.Model):
     ip = models.CharField(max_length=80, blank=True, null=True)
     user_agent = models.TextField(blank=True, null=True)
     metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["timestamp", "id"], name="audit_timestamp_id_idx"),
+            models.Index(fields=["tenant_id", "timestamp"], name="audit_tenant_time_idx"),
+        ]
 
     def as_dict(self, include_id=True):
         data = {
@@ -543,6 +559,10 @@ class RadiusSession(models.Model):
         verbose_name = "RADIUS Session"
         verbose_name_plural = "RADIUS Sessions"
         ordering = ["-started_at"]
+        indexes = [
+            models.Index(fields=["tenant", "customer", "stopped_at"], name="radius_tenant_customer_idx"),
+            models.Index(fields=["tenant", "acct_session_id", "stopped_at"], name="radius_tenant_acct_idx"),
+        ]
 
     @property
     def total_octets(self):
@@ -580,6 +600,11 @@ class Ticket(ExtraFieldsModel):
     resolved_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["tenant", "status", "created_at"], name="ticket_tenant_state_idx"),
+        ]
 
     def as_dict(self, include_id=True, exclude=None):
         data = super().as_dict(include_id, exclude)

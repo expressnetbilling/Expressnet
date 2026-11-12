@@ -1,49 +1,49 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import Navbar from './components/Navbar';
 import AdminLayout from './components/admin/AdminLayout';
 import AdminProtectedRoute from './components/admin/AdminProtectedRoute';
 import ProtectedRoute from './components/ProtectedRoute';
 import Sidebar from './components/Sidebar';
-import AdminAuditLog from './pages/admin/AdminAuditLog';
-import AdminCommunications from './pages/admin/AdminCommunications';
-import AdminDashboard from './pages/admin/AdminDashboard';
-import AdminIntegrations from './pages/admin/AdminIntegrations';
-import AdminLogin from './pages/admin/AdminLogin';
-import AdminSystem from './pages/admin/AdminSystem';
-import AdminSettings from './pages/admin/AdminSettings';
-import AdminTenantDetail from './pages/admin/AdminTenantDetail';
-import AdminTenants from './pages/admin/AdminTenants';
-import AdminPayments from './pages/admin/AdminPayments';
-import TenantAuditLog from './pages/TenantAuditLog';
-import BusinessSettings from './pages/BusinessSettings';
-import BillingPayment from './pages/BillingPayment';
-import Customers from './pages/Customers';
-import CustomerPortal from './pages/CustomerPortal';
-import Dashboard from './pages/Dashboard';
-import Emails from './pages/Emails';
-import Equipment from './pages/Equipment';
-import Expenses from './pages/Expenses';
-import Home from './pages/Home';
-import Invoices from './pages/Invoices';
-import IspOperations from './pages/IspOperations';
-import Login from './pages/Login';
-import Messages from './pages/Messages';
-import MikrotikLink from './pages/MikrotikLink';
-import MikrotikSettings from './pages/MikrotikSettings';
-import NotFound from './pages/NotFound';
-import Packages from './pages/Packages';
-import Payments from './pages/Payments';
-import Profile from './pages/Profile';
-import PppoeProfile from './pages/PppoeProfile';
-import Register from './pages/Register';
-import Reports from './pages/Reports';
-import Requisitions from './pages/Requisitions';
-import StaffReports from './pages/StaffReports';
-import StaffRequisitions from './pages/StaffRequisitions';
-import StaffTasks from './pages/StaffTasks';
-import Tr069 from './pages/Tr069';
-import Vouchers from './pages/Vouchers';
+const AdminAuditLog = lazy(() => import('./pages/admin/AdminAuditLog'));
+const AdminCommunications = lazy(() => import('./pages/admin/AdminCommunications'));
+const AdminDashboard = lazy(() => import('./pages/admin/AdminDashboard'));
+const AdminIntegrations = lazy(() => import('./pages/admin/AdminIntegrations'));
+const AdminLogin = lazy(() => import('./pages/admin/AdminLogin'));
+const AdminSystem = lazy(() => import('./pages/admin/AdminSystem'));
+const AdminSettings = lazy(() => import('./pages/admin/AdminSettings'));
+const AdminTenantDetail = lazy(() => import('./pages/admin/AdminTenantDetail'));
+const AdminTenants = lazy(() => import('./pages/admin/AdminTenants'));
+const AdminPayments = lazy(() => import('./pages/admin/AdminPayments'));
+const TenantAuditLog = lazy(() => import('./pages/TenantAuditLog'));
+const BusinessSettings = lazy(() => import('./pages/BusinessSettings'));
+const BillingPayment = lazy(() => import('./pages/BillingPayment'));
+const Customers = lazy(() => import('./pages/Customers'));
+const CustomerPortal = lazy(() => import('./pages/CustomerPortal'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Emails = lazy(() => import('./pages/Emails'));
+const Equipment = lazy(() => import('./pages/Equipment'));
+const Expenses = lazy(() => import('./pages/Expenses'));
+const Home = lazy(() => import('./pages/Home'));
+const Invoices = lazy(() => import('./pages/Invoices'));
+const IspOperations = lazy(() => import('./pages/IspOperations'));
+const Login = lazy(() => import('./pages/Login'));
+const Messages = lazy(() => import('./pages/Messages'));
+const MikrotikLink = lazy(() => import('./pages/MikrotikLink'));
+const MikrotikSettings = lazy(() => import('./pages/MikrotikSettings'));
+const NotFound = lazy(() => import('./pages/NotFound'));
+const Packages = lazy(() => import('./pages/Packages'));
+const Payments = lazy(() => import('./pages/Payments'));
+const Profile = lazy(() => import('./pages/Profile'));
+const PppoeProfile = lazy(() => import('./pages/PppoeProfile'));
+const Register = lazy(() => import('./pages/Register'));
+const Reports = lazy(() => import('./pages/Reports'));
+const Requisitions = lazy(() => import('./pages/Requisitions'));
+const StaffReports = lazy(() => import('./pages/StaffReports'));
+const StaffRequisitions = lazy(() => import('./pages/StaffRequisitions'));
+const StaffTasks = lazy(() => import('./pages/StaffTasks'));
+const Tr069 = lazy(() => import('./pages/Tr069'));
+const Vouchers = lazy(() => import('./pages/Vouchers'));
 import { ADMIN_DASHBOARD_PATH, ADMIN_PATH, adminPath } from './config/adminPaths';
 import { TENANT_THEME_EVENT, applyTenantTheme } from './utils/theme';
 import { isAdminHost, isAppHost, isTenantHost } from './config/hostRouting';
@@ -121,6 +121,7 @@ export default function App() {
   const { isAdminAuthenticated } = useAdminAuth();
 
   return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-950" aria-busy="true" />}>
     <Routes>
       <Route path="/" element={onAdminHost
         ? (isAdminAuthenticated ? <Navigate to={ADMIN_DASHBOARD_PATH} replace /> : <AdminLogin />)
@@ -160,5 +161,6 @@ export default function App() {
         <Route path="/*" element={<DashboardLayout />} />
       </Route>
     </Routes>
+    </Suspense>
   );
 }
