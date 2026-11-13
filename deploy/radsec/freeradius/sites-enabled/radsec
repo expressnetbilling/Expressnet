@@ -1,0 +1,47 @@
+tls {
+    expressnet_radsec_tls {
+        private_key_file = ${env:RADIUS_RADSEC_TLS_KEY_FILE}
+        certificate_file = ${env:RADIUS_RADSEC_TLS_CERT_FILE}
+        ca_file = ${env:RADIUS_RADSEC_TLS_CA_FILE}
+        require_client_cert = yes
+        tls_min_version = "1.2"
+    }
+}
+
+server radsec {
+    listen {
+        type = auth+acct
+        ipaddr = *
+        port = ${env:RADIUS_RADSEC_LISTEN_PORT}
+        proto = tcp
+        tls = ${tls.expressnet_radsec_tls}
+        clients = radsec
+    }
+
+    # RadSec carries both authentication and accounting over the same TLS
+    # connection.  Proxy each request to the local Django AAA policy process.
+    authorize {
+        # Carry the mutually-authenticated router identity to the local Django
+        # policy service. This avoids ambiguity when routers share a CGNAT IP.
+        update request {
+            NAS-Identifier := "%{TLS-Client-Cert-Common-Name}"
+        }
+        update control {
+            Proxy-To-Realm := "django_radius"
+        }
+    }
+
+    preacct {
+        update request {
+            NAS-Identifier := "%{TLS-Client-Cert-Common-Name}"
+        }
+        update control {
+            Proxy-To-Realm := "django_radius"
+        }
+    }
+
+    authenticate {}
+    accounting {}
+    post-auth {}
+    post-proxy {}
+}

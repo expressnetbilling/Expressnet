@@ -17,7 +17,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from django.db.models import Sum
+from django.db.models import Q, Sum
 import pyrad.packet
 from pyrad.server import Server, RemoteHost
 from pyrad.dictionary import Dictionary
@@ -35,6 +35,7 @@ ATTR_MIKROTIK_GROUP = "Mikrotik-Group"
 ATTR_USER_NAME = "User-Name"
 ATTR_USER_PASSWORD = "User-Password"
 ATTR_NAS_IP_ADDRESS = "NAS-IP-Address"
+ATTR_NAS_IDENTIFIER = "NAS-Identifier"
 ATTR_CALLED_STATION_ID = "Called-Station-Id"
 ATTR_ACCT_STATUS_TYPE = "Acct-Status-Type"
 ATTR_ACCT_SESSION_ID = "Acct-Session-Id"
@@ -86,6 +87,40 @@ def _get_radius_auth_port():
 def _get_radius_acct_port():
     """Return the accounting port (default 1813)."""
     return int(os.getenv("RADIUS_ACCT_PORT", "1813"))
+
+
+def _radsec_proxy_host():
+    """Private source used by the local FreeRADIUS RadSec gateway."""
+    return str(os.getenv("RADIUS_PROXY_HOST", "127.0.0.1")).strip()
+
+
+def _radsec_proxy_secret():
+    # RouterOS fixes the RADIUS shared secret to ``radsec`` when RadSec is in
+    # use.  This secret protects only the loopback proxy hop; TLS protects the
+    # router-to-gateway connection.
+    return str(os.getenv("RADIUS_PROXY_SHARED_SECRET", "radsec")).strip()
+
+
+def _packet_nas_candidates(pkt):
+    """Return source and NAS-IP-Address candidates for a RADIUS request."""
+    candidates = []
+    source = str((pkt.source or ("",))[0] or "").strip()
+    if source:
+        candidates.append(source)
+    nas_attr = str(_attr(pkt, ATTR_NAS_IP_ADDRESS, "") or "").strip()
+    if nas_attr and nas_attr not in candidates:
+        candidates.append(nas_attr)
+    return candidates
+
+
+def _nas_client_for_packet(pkt):
+    """Resolve the tenant NAS from a direct UDP or proxied RadSec request."""
+    candidates = _packet_nas_candidates(pkt)
+    nas_identifier = str(_attr(pkt, ATTR_NAS_IDENTIFIER, "") or "").strip()
+    lookup = Q(nas_ip__in=candidates)
+    if nas_identifier:
+        lookup |= Q(identifier=nas_identifier)
+    return RadiusNasClient.objects.select_related("tenant").filter(lookup).first()
 
 
 def _attr(pkt, name, default=""):
@@ -356,11 +391,7 @@ class BillingRadiusServer(Server):
 
         # 1. Look up NAS client to validate shared secret
         try:
-            nas_candidates = [nas_ip]
-            nas_attr = str(_attr(pkt, ATTR_NAS_IP_ADDRESS, "") or "").strip()
-            if nas_attr and nas_attr not in nas_candidates:
-                nas_candidates.append(nas_attr)
-            nas_client = RadiusNasClient.objects.select_related("tenant").filter(nas_ip__in=nas_candidates).first()
+            nas_client = _nas_client_for_packet(pkt)
             if not nas_client:
                 raise RadiusNasClient.DoesNotExist()
         except RadiusNasClient.DoesNotExist:
@@ -454,14 +485,17 @@ class BillingRadiusServer(Server):
 
         # Look up NAS client to find the tenant
         try:
-            nas_client = RadiusNasClient.objects.select_related("tenant").get(nas_ip=nas_ip)
+            nas_client = _nas_client_for_packet(pkt)
+            if not nas_client:
+                raise RadiusNasClient.DoesNotExist()
         except RadiusNasClient.DoesNotExist:
-            logger.warning("RADIUS Accounting: unknown NAS IP %s, skipping", nas_ip)
+            logger.warning("RADIUS Accounting: unknown NAS source=%s attribute=%s, skipping", nas_ip, _attr(pkt, ATTR_NAS_IP_ADDRESS, ""))
             reply = self.CreateReplyPacket(pkt)
             reply.code = pyrad.packet.AccountingResponse
             return reply.SendTo(pkt.source)
 
         tenant = nas_client.tenant
+        recorded_nas_ip = nas_client.nas_ip
 
         try:
             customer = Customer.objects.get(tenant=tenant, username=username)
@@ -489,7 +523,7 @@ class BillingRadiusServer(Server):
                 acct_session_id=session_id,
                 defaults={
                     "customer": customer,
-                    "nas_ip": nas_ip,
+                    "nas_ip": recorded_nas_ip,
                     "framed_ip": framed_ip,
                     "service_type": service_type,
                     "started_at": timezone.now(),
@@ -549,6 +583,19 @@ def _register_nas_clients(server):
                         nas_client.nas_ip, nas_client.identifier, nas_client.tenant_id)
         except Exception as exc:
             logger.error("RADIUS: failed to register NAS client %s: %s", nas_client.nas_ip, exc)
+    # FreeRADIUS accepts the public TLS RadSec connection and proxies its
+    # RADIUS packets to this process over localhost UDP.  Register that
+    # one, fixed-secret source in addition to direct NAS clients.  Tenant
+    # selection still uses the original NAS-IP-Address attribute.
+    proxy_host = _radsec_proxy_host()
+    proxy_secret = _radsec_proxy_secret()
+    if proxy_host and proxy_secret:
+        server.hosts[proxy_host] = RemoteHost(
+            proxy_host,
+            proxy_secret.encode("utf-8"),
+            proxy_secret.encode("utf-8"),
+        )
+        logger.info("RADIUS: registered local RadSec proxy %s", proxy_host)
 
 
 def _start_nas_refresh_loop(server, interval=30):

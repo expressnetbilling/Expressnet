@@ -63,13 +63,26 @@ def has_mikrotik_credentials(tenant):
 
 
 def radius_client_enabled(tenant):
-    """RADIUS is deliberately disabled while local RouterOS auth is active.
+    """Return whether this router has a complete RadSec configuration.
 
-    Paid Hotspot users are provisioned directly through the native binary API.
-    Leaving an old ``use-radius=yes`` profile enabled makes RouterOS reject
-    those local users when no RADIUS service is running.
+    Do not enable a RouterOS RADIUS client until both the public TLS endpoint
+    and platform CA are present. The provisioning command imports a unique
+    client certificate automatically. Enabling
+    ``use-radius`` with an unreachable UDP endpoint leaves paid users unable
+    to log in, which is why this used to be hard-disabled.
     """
-    return False
+    transport = str(
+        _tenant_router_option(tenant, "radius_transport", os.getenv("RADIUS_TRANSPORT", "radsec"))
+    ).strip().lower()
+    radsec_host = str(
+        _tenant_router_option(tenant, "radius_radsec_host", os.getenv("RADIUS_RADSEC_HOST", ""))
+    ).strip()
+    platform_ca_ready = bool(
+        str(os.getenv("RADSEC_CA_CERT_PEM_B64") or "").strip()
+        and str(os.getenv("RADSEC_CA_KEY_PEM_B64") or "").strip()
+    )
+    configured = transport == "radsec" and bool(radsec_host and platform_ca_ready)
+    return configured and bool(_tenant_value(tenant, "radius_enabled", True))
 
 
 def normalize_rate_limit(speed):

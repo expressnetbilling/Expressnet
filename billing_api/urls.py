@@ -81,6 +81,8 @@ urlpatterns = [
     path("router/resources", network_views.router_resources),
     path("router/provision-command", network_views.router_provision_command),
     path("router/provision/<str:token>", network_views.router_provision_script),
+    path("router/provision/<str:token>/radsec-ca.pem", network_views.router_provision_radsec_ca),
+    path("router/provision/<str:token>/radsec-client.p12", network_views.router_provision_radsec_client),
     path("router/provision/<str:token>/complete", network_views.router_provision_complete),
     path("router/provision/<str:token>/snapshot/<str:section>", network_views.router_provision_snapshot),
     path("router/agent/<str:token>/poll", network_views.router_agent_poll),

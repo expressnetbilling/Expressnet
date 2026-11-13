@@ -1,3 +1,4 @@
+import base64
 import json
 import html
 import hashlib
@@ -8,13 +9,18 @@ import os
 import re
 import secrets
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
 import jwt
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from django.conf import settings
 from django.core.cache import cache
 from django.core.files.storage import FileSystemStorage
@@ -3950,6 +3956,77 @@ def _is_non_public_ip(value):
     )
 
 
+def _radsec_platform_pki_ready():
+    """Whether the platform can issue a router-specific client bundle."""
+    return bool(
+        str(os.getenv("RADSEC_CA_CERT_PEM_B64") or "").strip()
+        and str(os.getenv("RADSEC_CA_KEY_PEM_B64") or "").strip()
+    )
+
+
+def _radsec_client_common_name(provision_payload):
+    client_id = re.sub(r"[^a-zA-Z0-9-]", "", str((provision_payload or {}).get("radsec_client_id") or ""))
+    if not client_id:
+        return ""
+    return f"expressnet-radsec-{client_id[:32]}"
+
+
+def _radsec_client_bundle(provision_payload):
+    """Issue a per-router PKCS#12 client certificate from platform CA secrets."""
+    if not _radsec_platform_pki_ready():
+        raise ValueError("RadSec platform CA is not configured")
+    try:
+        ca_certificate = x509.load_pem_x509_certificate(base64.b64decode(os.environ["RADSEC_CA_CERT_PEM_B64"]))
+        key_password = str(os.getenv("RADSEC_CA_KEY_PASSWORD") or "").encode() or None
+        ca_private_key = serialization.load_pem_private_key(
+            base64.b64decode(os.environ["RADSEC_CA_KEY_PEM_B64"]),
+            password=key_password,
+        )
+    except Exception as exc:
+        raise ValueError("RadSec platform CA material is invalid") from exc
+    common_name = _radsec_client_common_name(provision_payload)
+    if not common_name:
+        raise ValueError("Provisioning token is missing its RadSec client identity")
+    now = datetime.now(dt_timezone.utc)
+    client_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    client_certificate = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)]))
+        .issuer_name(ca_certificate.subject)
+        .public_key(client_private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+        .sign(ca_private_key, hashes.SHA256())
+    )
+    return pkcs12.serialize_key_and_certificates(
+        common_name.encode(), client_private_key, client_certificate, [ca_certificate], serialization.NoEncryption()
+    )
+
+
+def _radsec_ca_certificate():
+    if not _radsec_platform_pki_ready():
+        raise ValueError("RadSec platform CA is not configured")
+    try:
+        return x509.load_pem_x509_certificate(base64.b64decode(os.environ["RADSEC_CA_CERT_PEM_B64"]))
+    except Exception as exc:
+        raise ValueError("RadSec platform CA certificate is invalid") from exc
+
+
+def _provision_payload_or_response(token):
+    try:
+        payload = jwt.decode(token, _get_jwt_secret("JWT_SECRET"), algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return None, HttpResponse("Provisioning token expired", status=401, content_type="text/plain")
+    except jwt.InvalidTokenError:
+        return None, HttpResponse("Invalid provisioning token", status=401, content_type="text/plain")
+    if payload.get("purpose") != "mikrotik_provision":
+        return None, HttpResponse("Invalid provisioning token purpose", status=403, content_type="text/plain")
+    return payload, None
+
+
 def _wireguard_server_config(tenant, base_url=""):
     public_key = _config_value(
         tenant,
@@ -4000,23 +4077,39 @@ def _wireguard_server_config(tenant, base_url=""):
 
 def _radius_server_config(tenant, wg_config=None, base_url=""):
     wg_config = wg_config or _wireguard_server_config(tenant, base_url)
-    # Do not silently point routers at an old or guessed RADIUS address. A
-    # Hotspot profile with use-radius=yes blocks normal local authentication
-    # while RouterOS waits for that server, which looks like a broken portal.
-    # RADIUS is therefore opt-in and needs an explicit platform/tenant host.
+    # Use RadSec (RADIUS over mutually authenticated TLS) for router-to-cloud
+    # AAA. RouterOS requires a fixed public IP and TCP port 2083 for native
+    # RadSec, so deploy this gateway on a VPS rather than Railway's dynamically
+    # port-mapped TCP proxy. The internal Django policy process remains UDP on
+    # loopback only.
+    transport = _config_value(
+        tenant,
+        ("RADIUS_TRANSPORT",),
+        ("radius_transport",),
+        "radsec",
+    ).lower()
+    radsec = transport == "radsec"
     server_ip = _config_value(
         tenant,
-        ("RADIUS_SERVER_IP", "RADIUS_SERVER_HOST", "RADIUS_HOST_IP"),
-        ("radius_server_ip", "radius_server_host", "radius_host_ip"),
+        ("RADIUS_RADSEC_HOST", "RADIUS_SERVER_IP", "RADIUS_SERVER_HOST", "RADIUS_HOST_IP") if radsec else ("RADIUS_SERVER_IP", "RADIUS_SERVER_HOST", "RADIUS_HOST_IP"),
+        ("radius_radsec_host", "radius_server_ip", "radius_server_host", "radius_host_ip") if radsec else ("radius_server_ip", "radius_server_host", "radius_host_ip"),
         "",
     )
+    platform_pki_ready = _radsec_platform_pki_ready() if radsec else True
     source_ip = _config_value(
         tenant,
         ("RADIUS_SOURCE_IP", "RADIUS_CLIENT_SOURCE_IP"),
         ("radius_source_ip", "radius_client_source_ip"),
     )
-    auth_port = _config_value(tenant, ("RADIUS_AUTH_PORT",), ("radius_auth_port",), "1812")
-    acct_port = _config_value(tenant, ("RADIUS_ACCT_PORT",), ("radius_acct_port",), "1813")
+    configured_auth_port = _config_value(
+        tenant,
+        ("RADIUS_RADSEC_PORT", "RADIUS_AUTH_PORT") if radsec else ("RADIUS_AUTH_PORT",),
+        ("radius_radsec_port", "radius_auth_port") if radsec else ("radius_auth_port",),
+        "2083" if radsec else "1812",
+    )
+    radsec_port_valid = not radsec or configured_auth_port == "2083"
+    auth_port = "2083" if radsec else configured_auth_port
+    acct_port = auth_port if radsec else _config_value(tenant, ("RADIUS_ACCT_PORT",), ("radius_acct_port",), "1813")
     private_without_tunnel = False
     if _is_non_public_ip(server_ip):
         tunnel_ip = str(wg_config.get("tunnel_ip") or "").split("/", 1)[0]
@@ -4036,15 +4129,20 @@ def _radius_server_config(tenant, wg_config=None, base_url=""):
         "source_ip": source_ip,
         "auth_port": auth_port,
         "acct_port": acct_port,
-        "ready": bool(server_ip) and not private_without_tunnel,
+        "transport": "radsec" if radsec else "udp",
+        "ready": bool(server_ip) and not private_without_tunnel and platform_pki_ready and radsec_port_valid,
         "disabled_reason": (
             "private RADIUS address requires a ready WireGuard tunnel"
             if private_without_tunnel
+            else "platform RadSec certificate authority is not configured"
+            if radsec and not platform_pki_ready
+            else "RouterOS native RadSec requires TCP port 2083"
+            if radsec and not radsec_port_valid
             else "RADIUS_SERVER_IP is not configured"
             if not server_ip
             else ""
         ),
-        "mode": "wireguard" if wg_config.get("ready") and server_ip == wg_config.get("tunnel_ip") else "direct",
+        "mode": "radsec" if radsec else "wireguard" if wg_config.get("ready") and server_ip == wg_config.get("tunnel_ip") else "direct",
     }
 
 
@@ -4125,6 +4223,10 @@ def router_provision_command(request):
         # callback can arrive after another router is being linked, so reading
         # only the tenant-wide name at that time can label the wrong router.
         "router_name": requested_router_name or str(request.tenant.get("mikrotik_name") or request.tenant.get("router_name") or "").strip()[:120],
+        # This identity is generated by the platform and becomes the
+        # certificate common name and RADIUS NAS identifier. Tenants never
+        # see or configure it.
+        "radsec_client_id": secrets.token_urlsafe(18),
         "exp": expires_at,
     }
     token = jwt.encode(payload, _get_jwt_secret("JWT_SECRET"), algorithm="HS256")
@@ -4422,6 +4524,46 @@ def _router_snapshot_fetch_script(snapshot_url):
 @csrf_exempt
 @api_view(["GET"])
 @permission_classes([AllowAny])  # Safely opens the wall for MikroTik requests
+def router_provision_radsec_ca(request, token):
+    """Return the platform CA only to a short-lived router provisioning token."""
+    payload, error_response = _provision_payload_or_response(token)
+    if error_response:
+        return error_response
+    try:
+        certificate = _radsec_ca_certificate()
+    except ValueError as exc:
+        logger.error("RadSec CA download unavailable tenant=%s: %s", payload.get("tenant_id"), exc)
+        return HttpResponse("RadSec is not configured", status=503, content_type="text/plain")
+    return HttpResponse(
+        certificate.public_bytes(serialization.Encoding.PEM),
+        content_type="application/x-pem-file",
+        headers={"Content-Disposition": "attachment; filename=expressnet-radsec-ca.pem"},
+    )
+
+
+@csrf_exempt
+@api_view(["GET"])
+@permission_classes([AllowAny])  # The signed, two-hour provisioning token is authorization.
+def router_provision_radsec_client(request, token):
+    """Issue one certificate bundle for the router running this provision command."""
+    payload, error_response = _provision_payload_or_response(token)
+    if error_response:
+        return error_response
+    try:
+        bundle = _radsec_client_bundle(payload)
+    except ValueError as exc:
+        logger.error("RadSec client bundle unavailable tenant=%s: %s", payload.get("tenant_id"), exc)
+        return HttpResponse("RadSec is not configured", status=503, content_type="text/plain")
+    return HttpResponse(
+        bundle,
+        content_type="application/x-pkcs12",
+        headers={"Content-Disposition": "attachment; filename=expressnet-radsec-client.p12"},
+    )
+
+
+@csrf_exempt
+@api_view(["GET"])
+@permission_classes([AllowAny])  # Safely opens the wall for MikroTik requests
 def router_provision_script(request, token):
     user_agent = request.META.get("HTTP_USER_AGENT", "")
     # RouterOS does not guarantee a stable User-Agent across RouterOS versions
@@ -4637,24 +4779,69 @@ def router_provision_script(request, token):
         from billing_api.models import RadiusNasClient
         tenant_obj = Tenant.objects.get(pk=tenant_id)
         existing_extra = tenant_obj.extra or {}
-        radius_shared_secret = existing_extra.get("radius_shared_secret_pending") or RadiusNasClient.generate_secret()
+        radius_shared_secret = "radsec" if radius_config.get("transport") == "radsec" else existing_extra.get("radius_shared_secret_pending") or RadiusNasClient.generate_secret()
         tenant_obj.extra = {**existing_extra, "radius_shared_secret_pending": radius_shared_secret}
         tenant_obj.save(update_fields=["extra"])
 
+    radsec_common_name = _radsec_client_common_name(payload)
+    radsec_ca_common_name = ""
+    radsec_ca_url = ""
+    radsec_bundle_url = ""
+    if radius_enabled_for_router and radius_config.get("transport") == "radsec":
+        try:
+            radsec_ca_common_name = _radsec_ca_certificate().subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+            radsec_ca_url = f"{app_base_url}/api/router/provision/{token}/radsec-ca.pem"
+            radsec_bundle_url = f"{app_base_url}/api/router/provision/{token}/radsec-client.p12"
+        except (IndexError, ValueError) as exc:
+            logger.error("MikroTik provisioning tenant=%s: RadSec certificate issue failed: %s", tenant_id, exc)
+            radius_enabled_for_router = False
+
+    radsec_certificate_script = ""
+    if radius_enabled_for_router and radius_config.get("transport") == "radsec":
+        radsec_certificate_script = f"""
+        :global billingRadSecCert "";
+        :log info "Expressnet: installing platform RadSec certificate";
+        :do {{ /file remove [find name="expressnet-radsec-ca.pem"] }} on-error={{}};
+        :do {{ /file remove [find name="expressnet-radsec-client.p12"] }} on-error={{}};
+        :do {{ /tool fetch check-certificate=no url="{_rsc_escape(radsec_ca_url)}" dst-path="expressnet-radsec-ca.pem" }} on-error={{ :log warning "Expressnet: RadSec CA download failed" }};
+        :do {{ /certificate import file-name="expressnet-radsec-ca.pem" passphrase="" }} on-error={{ :log warning "Expressnet: RadSec CA import failed" }};
+        :foreach billingCa in=[/certificate find where common-name="{_rsc_escape(radsec_ca_common_name)}"] do={{ :do {{ /certificate set $billingCa trusted=yes }} on-error={{}} }};
+        :do {{ /tool fetch check-certificate=no url="{_rsc_escape(radsec_bundle_url)}" dst-path="expressnet-radsec-client.p12" }} on-error={{ :log warning "Expressnet: RadSec client bundle download failed" }};
+        :do {{ /certificate import file-name="expressnet-radsec-client.p12" passphrase="" }} on-error={{ :log warning "Expressnet: RadSec client bundle import failed" }};
+        :foreach billingClientCert in=[/certificate find where common-name="{_rsc_escape(radsec_common_name)}"] do={{
+            :if ([/certificate get $billingClientCert private-key]) do={{
+                :set billingRadSecCert [/certificate get $billingClientCert name];
+                :do {{ /certificate set $billingClientCert trusted=yes }} on-error={{}};
+            }}
+        }};
+        :if ([:len $billingRadSecCert] = 0) do={{ :log warning "Expressnet: RadSec client certificate is unavailable" }};
+        """
+
+    radius_client_fields = (
+        ' protocol=radsec certificate=$billingRadSecCert radsec-timeout=5s'
+        if radius_config.get("transport") == "radsec"
+        else ""
+    )
+    radius_add_script = (
+        f':if ([:len $billingRadSecCert] > 0) do={{ :do {{ /radius add service=ppp,hotspot address="{_rsc_escape(radius_config["server_ip"])}" secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s{radius_client_fields} comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: RadSec setup failed; continuing with local customer access" }} }}'
+        if radius_config.get("transport") == "radsec"
+        else f':do {{ /radius add service=ppp,hotspot address="{_rsc_escape(radius_config["server_ip"])}" secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: RADIUS setup failed; continuing with local customer access" }}'
+    )
     radius_script = f"""
         :log info "Expressnet: configuring RADIUS client for Hotspot and PPPoE";
+        {radsec_certificate_script}
         :do {{ /radius remove [find comment="{radius_comment}"] }} on-error={{}}
-        :do {{ /radius add service=ppp,hotspot address={_rsc_escape(radius_config["server_ip"])} secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=3s comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: RADIUS setup failed; continuing with local customer access" }}
+        {radius_add_script}
         :if ([:len [/radius find comment="{radius_comment}"]] = 0) do={{
             :set billingRadiusFlag "no";
             /ppp aaa set use-radius=no accounting=no;
             :do {{ /ip hotspot profile set [find name="Expressnet-profile"] use-radius=no radius-accounting=no }} on-error={{}}
-            :log warning "Expressnet: online service unavailable; local customer access remains enabled"
+            :log warning "Expressnet: RadSec service unavailable; local customer access remains enabled"
         }} else={{
             :set billingRadiusFlag "yes";
             :do {{ /radius incoming set accept=yes port=1700 }} on-error={{ :log warning "Expressnet: RADIUS incoming setup failed" }}
             /ppp aaa set use-radius=yes interim-update=1h;
-            :log info "Expressnet: RADIUS client configured"
+            :log info "Expressnet: RadSec client configured"
         }};
         """
     if not radius_enabled_for_router:
@@ -5402,7 +5589,11 @@ def router_provision_complete(request, token):
                     nas_ip=nas_ip,
                     defaults={
                         "shared_secret": pending_secret,
-                        "identifier": str(request.GET.get("identity") or "").strip(),
+                        "identifier": (
+                            _radsec_client_common_name(payload)
+                            if current_radius.get("transport") == "radsec"
+                            else str(request.GET.get("identity") or "").strip()
+                        ),
                     },
                 )
                 updates["radius_nas_configured"] = True

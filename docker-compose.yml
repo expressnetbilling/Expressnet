@@ -41,3 +41,21 @@ services:
     ports:
       - "1812:1812/udp"
       - "1813:1813/udp"
+
+  # RADIUS-over-TLS gateway for a VPS with fixed public TCP 2083. Routers
+  # connect outward over RadSec and no public UDP port is required. Mount valid
+  # server, key, and CA files at the configured paths.
+  radsec:
+    build:
+      context: .
+      dockerfile: deploy/radsec/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: billing_saas_django.Settings.production
+      RADIUS_RADSEC_LISTEN_PORT: 2083
+    volumes:
+      - ./secrets/radsec:/run/secrets/radsec:ro
+    ports:
+      - "2083:2083/tcp"
