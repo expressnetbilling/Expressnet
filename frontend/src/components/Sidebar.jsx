@@ -36,13 +36,7 @@ const sections = [
     links: [{ to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard }],
   },
   {
-    title: 'Customers',
-    icon: Users,
-    links: [
-      { to: '/pppoe-customers', label: 'PPPoE', icon: RadioTower },
-      { to: '/hotspot-customers', label: 'Hotspot', icon: Wifi },
-      { to: '/static-customers', label: 'Static', icon: Database },
-    ],
+    links: [{ to: '/customers', label: 'Subscribers', icon: Users }],
   },
   {
     title: 'Plans',
@@ -127,7 +121,7 @@ export default function Sidebar({ open, onClose }) {
 
   const navClass = ({ isActive }) =>
     [
-      'tenant-sidebar-nav-button flex h-10 items-center gap-2.5 rounded-md px-2.5 text-[15px] font-medium leading-none transition',
+      'tenant-sidebar-nav-button flex h-10 items-center gap-2.5 rounded-md px-2.5 text-[15px] font-normal leading-none transition',
       isActive
         ? 'bg-[var(--sidebar-active)] text-white shadow-[inset_3px_0_0_rgba(255,255,255,0.28)]'
         : 'text-white/88 hover:bg-white/10 hover:text-white',
@@ -176,7 +170,7 @@ export default function Sidebar({ open, onClose }) {
                   {links.map(({ to, label, icon: Icon, trailing: Trailing }) => (
                     <NavLink key={`${label}-${to}`} to={to} className={navClass} onClick={onClose}>
                       <Icon size={16} strokeWidth={1.5} />
-                      <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+                      <span className="min-w-0 flex-1 truncate font-normal">{label}</span>
                       {Trailing && <Trailing size={15} />}
                     </NavLink>
                   ))}
@@ -203,7 +197,7 @@ export default function Sidebar({ open, onClose }) {
                         key={`${section.title}-${label}-${to}`}
                         to={to}
                         className={({ isActive }) => [
-                          'tenant-sidebar-nav-button ml-1 flex h-9 items-center gap-3 rounded-md px-2.5 text-[15px] font-medium leading-none transition',
+                          'tenant-sidebar-nav-button ml-1 flex h-9 items-center gap-3 rounded-md px-2.5 text-[13px] font-md leading-none transition',
                           isActive ? 'bg-[var(--sidebar-active)] text-white' : 'text-white/84 hover:bg-white/10 hover:text-white',
                         ].join(' ')}
                         onClick={onClose}
@@ -218,7 +212,6 @@ export default function Sidebar({ open, onClose }) {
             );
           })}
         </nav>
-
       </aside>
     </>
   );

@@ -1398,7 +1398,15 @@ def customers(request, customer_id=None):
         if service_type in {"pppoe", "hotspot", "static"}:
             queryset = queryset.filter(service_type=service_type)
         if status:
-            if status == "inactive":
+            if status == "online":
+                # A customer is online only while RADIUS has an open session.
+                # Requiring a session id prevents customers with no sessions
+                # from being included by the SQL NULL check.
+                queryset = queryset.filter(
+                    radius_sessions__id__isnull=False,
+                    radius_sessions__stopped_at__isnull=True,
+                ).distinct()
+            elif status == "inactive":
                 queryset = queryset.exclude(status="active")
             elif status == "paused":
                 queryset = queryset.filter(status__in=["paused", "suspended", "inactive"])
@@ -1450,6 +1458,10 @@ def customers(request, customer_id=None):
             for item in facet_queryset
             .values("status").annotate(count=Count("id"))
         }
+        online_count = facet_queryset.filter(
+            radius_sessions__id__isnull=False,
+            radius_sessions__stopped_at__isnull=True,
+        ).distinct().count()
         pages = max(1, (total + page_size - 1) // page_size)
         query = request.GET.copy()
         query["page"] = str(page + 1)
@@ -1457,7 +1469,7 @@ def customers(request, customer_id=None):
         query["page"] = str(max(1, page - 1))
         prev_url = f"{request.path}?{query.urlencode()}" if page > 1 else None
         return ok({"results": results, "count": total, "overall_count": facet_queryset.count(), "pages": pages, "next": next_url, "previous": prev_url,
-                   "service_counts": service_counts, "status_counts": status_counts})
+                   "service_counts": service_counts, "status_counts": status_counts, "online_count": online_count})
     if method(request, "GET") and customer_id:
         customer = ref(f"tenants/{tenant['id']}/customers/{customer_id}").get()
         if not customer:
@@ -1494,6 +1506,14 @@ def customers(request, customer_id=None):
         ]
         updates = {field: data[field] for field in allowed if field in data}
         service_type_for_update = str(updates.get("service_type") or customer.get("service_type") or "hotspot").lower()
+        if service_type_for_update == "hotspot":
+            # Hotspot access is tied to the selected MikroTik and time-based
+            # session, not a customer-premises router installation.
+            updates.update({
+                "location": "",
+                "technician": "",
+                "router_serial_number": "",
+            })
         adjustment_applied = False
         if service_type_for_update == "hotspot" and any(field in data for field in ["session_adjustment_value", "session_adjustment_unit", "session_adjustment_direction"]):
             raw_value = data.get("session_adjustment_value")
@@ -1614,7 +1634,7 @@ def customer_add(request):
         provision = True
     linked_routers = request.tenant.get("linked_routers") or {}
     mikrotik_router_id = str(data.get("mikrotik_router_id") or "").strip()
-    if service_type in {"pppoe", "static"} and linked_routers:
+    if service_type in {"pppoe", "hotspot", "static"} and linked_routers:
         if not mikrotik_router_id:
             return ok({"message": "Select the MikroTik for this customer"}, 400)
         if mikrotik_router_id not in linked_routers:
@@ -1642,11 +1662,11 @@ def customer_add(request):
     customer_payload = {
             "name": data["name"],
             "phone": data["phone"],
-            "location": data.get("location") or "",
+            "location": "" if service_type == "hotspot" else data.get("location") or "",
             "username": data["username"],
             "password": data["password"],
-            "technician": data.get("technician") or "",
-            "router_serial_number": data.get("router_serial_number") or "",
+            "technician": "" if service_type == "hotspot" else data.get("technician") or "",
+            "router_serial_number": "" if service_type == "hotspot" else data.get("router_serial_number") or "",
             "mikrotik_router_id": mikrotik_router_id,
             "package": data["package_name"],
             "amount_payable": amount_payable,

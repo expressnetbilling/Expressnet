@@ -1,4 +1,4 @@
-import { ChevronDown, CreditCard, Database, Download, Eye, EyeOff, Pause, Pencil, PlugZap, Plus, RefreshCw, Router, Search, Trash2, Users, Wifi,CircleCheck, CircleX } from 'lucide-react';
+import { ChevronDown, CircleCheck, CreditCard, Database, Download, Eye, EyeOff, Pencil, PlugZap, Plus, RefreshCw, Router, Search, Trash2, Users, Wifi } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import toast from 'react-hot-toast';
@@ -101,6 +101,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
   const isHotspotOnlyPage = serviceLocked === 'hotspot';
   const hideManualAccessActions = serviceLocked === 'pppoe' || serviceLocked === 'hotspot';
   const activeFormService = serviceLocked || form.service_type || 'pppoe';
+  const isHotspotForm = activeFormService === 'hotspot';
   const isStaticView = serviceLocked === 'static' || statusFilter === 'static';
 
   const packageMap = useMemo(() => {
@@ -132,25 +133,19 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
     return packages.filter((pkg) => (pkg.service_type || 'hotspot') === selectedService);
   }, [form.service_type, packages, serviceLocked]);
 
-  const scopedCustomers = customers;
-
   const userStats = useMemo(() => {
     const statuses = customerMeta.status_counts || {};
     const services = customerMeta.service_counts || {};
-    const active = statuses.active || 0;
     const hotspot = services.hotspot || 0;
     const pppoe = services.pppoe || 0;
     const staticUsers = services.static || 0;
-    const paused = (statuses.paused || 0) + (statuses.suspended || 0) + (statuses.inactive || 0);
     const offline = (statuses.offline || 0) + (statuses.expired || 0);
     return {
       total: customerMeta.overall_count || customerMeta.count || 0,
-      active,
-      inactive: scopedCustomers.length - active,
       hotspot,
       pppoe,
       static: staticUsers,
-      paused,
+      online: Number(customerMeta.online_count || 0),
       offline,
     };
   }, [customerMeta]);
@@ -161,14 +156,12 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
 
   const userFilterTabs = useMemo(() => ([
     ['all', 'All', userStats.total, Users],
-    ['hotspot', 'Hotspot', userStats.hotspot, Wifi],
     ['pppoe', 'PPPoE', userStats.pppoe, CreditCard],
     ['static', 'Static', userStats.static, Database],
-    ['active','active',userStats.active,CircleX],
-    ['inactive','inactive',userStats.inactive,CircleCheck],
-    ['paused', 'Paused', userStats.paused, Pause],
+    ['hotspot', 'Hotspot', userStats.hotspot, Wifi],
+    ['online', 'Online', userStats.online, CircleCheck],
     ['offline', 'Offline', userStats.offline, PlugZap],
-  ].filter(([key]) => !serviceLocked || ['all', serviceLocked, 'paused', 'offline'].includes(key))), [serviceLocked, userStats]);
+  ].filter(([key]) => !serviceLocked || ['all', serviceLocked, 'online', 'offline'].includes(key))), [serviceLocked, userStats]);
 
   const filteredCustomerIds = useMemo(() => filteredCustomers.map((customer) => customer.id), [filteredCustomers]);
   const pagedCustomers = filteredCustomers;
@@ -197,13 +190,13 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
     const params = { page, page_size: pageSize };
     if (serviceLocked) params.service_type = serviceLocked;
     else if (['hotspot', 'pppoe', 'static'].includes(statusFilter)) params.service_type = statusFilter;
-    if (['active', 'inactive', 'paused', 'offline'].includes(statusFilter)) params.status = statusFilter;
+    if (['online', 'offline'].includes(statusFilter)) params.status = statusFilter;
     if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
     setLoading(true);
     try {
       const { data } = await api.get('/customers', { params });
       setCustomers(data.results || []);
-      setCustomerMeta({ count: data.count || 0, overall_count: data.overall_count || 0, service_counts: data.service_counts || {}, status_counts: data.status_counts || {} });
+      setCustomerMeta({ count: data.count || 0, overall_count: data.overall_count || 0, service_counts: data.service_counts || {}, status_counts: data.status_counts || {}, online_count: data.online_count || 0 });
     } finally {
       setLoading(false);
     }
@@ -327,7 +320,11 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
     setForm((current) => ({
       ...current,
       [name]: type === 'checkbox' ? checked : value,
-      ...(name === 'service_type' ? { package_name: '', amount_payable: '' } : {}),
+      ...(name === 'service_type' ? {
+        package_name: '',
+        amount_payable: '',
+        ...(value === 'hotspot' ? { location: '', technician: '', router_serial_number: '' } : {}),
+      } : {}),
       ...(name === 'package_name' && selectedPackage ? { amount_payable: selectedPackage.amount_payable ?? selectedPackage.price ?? '' } : {}),
       ...(name === 'mikrotik_router_id' && value ? { provision_mikrotik: true } : {}),
     }));
@@ -346,8 +343,8 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
     if (['pppoe', 'static'].includes(selectedService)) {
       const amount = Number(form.amount_payable);
       if (!Number.isFinite(amount) || amount < 0) nextErrors.amount_payable = 'Enter a valid payable amount';
-      if (mikrotikRouters.length > 0 && !form.mikrotik_router_id) nextErrors.mikrotik_router_id = 'Select the MikroTik for this customer';
     }
+    if (mikrotikRouters.length > 0 && !form.mikrotik_router_id) nextErrors.mikrotik_router_id = 'Select the MikroTik for this customer';
     if (selectedService === 'pppoe' && form.grace_period_enabled) {
       const value = Number(form.grace_period_value);
       if (!Number.isFinite(value) || value <= 0) nextErrors.grace_period_value = 'Enter a grace period greater than zero';
@@ -356,7 +353,6 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
       const value = Number(form.session_adjustment_value);
       if (!Number.isFinite(value) || value <= 0) nextErrors.session_adjustment_value = 'Enter a session adjustment greater than zero';
     }
-    if (!['pppoe', 'static'].includes(selectedService) && (form.provision_mikrotik || form.mikrotik_router_id) && mikrotikRouters.length > 0 && !form.mikrotik_router_id) nextErrors.mikrotik_router_id = 'Select the MikroTik for this customer';
     setErrors(nextErrors);
     return Object.keys(nextErrors).length === 0;
   };
@@ -375,12 +371,12 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
     const payload = {
       name: form.name,
       phone: form.phone,
-      username: form.username,
       mikrotik_router_id: form.mikrotik_router_id,
       package: form.package_name,
       service_type: serviceType,
       provision_mikrotik: serviceType === 'static' || form.provision_mikrotik,
     };
+    if (serviceType !== 'hotspot') payload.username = form.username;
     if (['pppoe', 'static'].includes(serviceType)) payload.amount_payable = Number(form.amount_payable || 0);
     if (serviceType === 'pppoe' && form.grace_period_enabled) {
       payload.grace_period_enabled = form.grace_period_enabled;
@@ -392,12 +388,12 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
       payload.session_adjustment_unit = form.session_adjustment_unit;
       payload.session_adjustment_direction = form.session_adjustment_direction;
     }
-    if (!isHotspotOnlyPage) {
+    if (serviceType !== 'hotspot') {
       payload.location = form.location;
       payload.technician = form.technician;
       payload.router_serial_number = form.router_serial_number;
     }
-    if (serviceType !== 'static') {
+    if (serviceType === 'pppoe') {
       if (!editingId && form.password.trim()) payload.password = form.password;
       if (editingId && form.password.trim() && form.password !== editingOriginalPassword) payload.password = form.password;
     }
@@ -492,7 +488,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
       const params = { page: 1, page_size: 200 };
       if (serviceLocked) params.service_type = serviceLocked;
       else if (['hotspot', 'pppoe', 'static'].includes(statusFilter)) params.service_type = statusFilter;
-      if (['active', 'inactive', 'paused', 'offline'].includes(statusFilter)) params.status = statusFilter;
+      if (['online', 'offline'].includes(statusFilter)) params.status = statusFilter;
       if (search.trim()) params.search = search.trim();
       const first = await api.get('/customers', { params });
       const rows = [...(first.data.results || [])];
@@ -865,12 +861,14 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
               <CustomerDetailField label="Grace Period" value={viewingCustomer.grace_period_enabled ? 'Enabled' : '-'} />
               <CustomerDetailField label="Grace Period Value" value={viewingCustomer.grace_period_value ? `${viewingCustomer.grace_period_value} ${viewingCustomer.grace_period_unit || ''}` : '-'} />
             </CustomerDetailCard>
-            <CustomerDetailCard icon={Database} title="Location & Address" tone="var(--app-focus-ring)">
-              <CustomerDetailField label="Location" value={viewingCustomer.location} />
-              <CustomerDetailField label="IP Address" value={viewingCustomer.ip_address} />
-              <CustomerDetailField label="Technician" value={viewingCustomer.technician} />
-              <CustomerDetailField label="Router Serial Number" value={viewingCustomer.router_serial_number} />
-            </CustomerDetailCard>
+            {serviceTypeOf(viewingCustomer) !== 'hotspot' && (
+              <CustomerDetailCard icon={Database} title="Location & Address" tone="var(--app-focus-ring)">
+                <CustomerDetailField label="Location" value={viewingCustomer.location} />
+                <CustomerDetailField label="IP Address" value={viewingCustomer.ip_address} />
+                <CustomerDetailField label="Technician" value={viewingCustomer.technician} />
+                <CustomerDetailField label="Router Serial Number" value={viewingCustomer.router_serial_number} />
+              </CustomerDetailCard>
+            )}
             <CustomerDetailCard icon={Router} title="MikroTik Information">
               <CustomerDetailField label="IP Pool" value={viewingCustomer.ip_pool} />
               <CustomerDetailField label="Provisioned At" value={formatLocalDateTime(viewingCustomer.provisioned_at)} />
@@ -884,6 +882,21 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
         <Modal title={editingId ? 'Edit Customer' : 'Add Customer'} onClose={closeModal}>
           <form className="space-y-4" onSubmit={addCustomer}>
             <div className="grid gap-4 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <label className="form-label" htmlFor="service_type">Service type</label>
+                <select
+                  id="service_type"
+                  name="service_type"
+                  className="form-input"
+                  value={activeFormService}
+                  onChange={update}
+                  disabled={Boolean(serviceLocked)}
+                >
+                  <option value="pppoe">PPPoE</option>
+                  <option value="hotspot">Hotspot</option>
+                  <option value="static">Static</option>
+                </select>
+              </div>
               <div>
                 <label className="form-label" htmlFor="name">Full name</label>
                 <input id="name" name="name" className="form-input" value={form.name} onChange={update} />
@@ -894,13 +907,13 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                 <input id="phone" name="phone" className="form-input" value={form.phone} onChange={update} />
                 {errors.phone && <p className="form-error">{errors.phone}</p>}
               </div>
-              {!isHotspotOnlyPage && (
+              {!isHotspotForm && (
                 <div>
                   <label className="form-label" htmlFor="location">Location</label>
                   <input id="location" name="location" className="form-input" value={form.location} onChange={update} />
                 </div>
               )}
-              {editingId && activeFormService !== 'static' && (
+              {editingId && activeFormService === 'pppoe' && (
                 <>
                   <div>
                     <label className="form-label" htmlFor="username">Username</label>
@@ -935,7 +948,7 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                   </div>
                 </>
               )}
-              {!isHotspotOnlyPage && (
+              {!isHotspotForm && (
                 <>
                   <div>
                     <label className="form-label" htmlFor="technician">Technician who attended <span className="font-normal text-slate-500">(optional)</span></label>
@@ -966,16 +979,6 @@ export default function Customers({ initialFilter = 'all', serviceLocked = null,
                 </select>
                 {errors.mikrotik_router_id && <p className="form-error">{errors.mikrotik_router_id}</p>}
               </div>
-              {!serviceLocked && (
-                <div className="sm:col-span-2">
-                  <label className="form-label" htmlFor="service_type">Service type</label>
-                  <select id="service_type" name="service_type" className="form-input" value={form.service_type || 'pppoe'} onChange={update}>
-                    <option value="pppoe">PPPoE</option>
-                    <option value="hotspot">Hotspot</option>
-                    <option value="static">Static</option>
-                  </select>
-                </div>
-              )}
               <div className="sm:col-span-2">
                 <label className="form-label" htmlFor="package_name">Package</label>
                 <select id="package_name" name="package_name" className="form-input" value={form.package_name} onChange={update}>

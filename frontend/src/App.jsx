@@ -77,7 +77,7 @@ function DashboardLayout() {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/audit" element={<TenantAuditLog />} />
             <Route path="/billing/payment" element={<BillingPayment />} />
-            <Route path="/customers" element={<Customers title="Users" />} />
+            <Route path="/customers" element={<Customers title="Subscribers" />} />
             <Route path="/pppoe-customers" element={<Customers initialFilter="pppoe" serviceLocked="pppoe" title="PPPoE Customers" />} />
             <Route path="/hotspot-customers" element={<Customers initialFilter="hotspot" serviceLocked="hotspot" title="Hotspot Customers" />} />
             <Route path="/static-customers" element={<Customers initialFilter="static" serviceLocked="static" title="Static Customers" />} />

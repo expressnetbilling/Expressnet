@@ -102,7 +102,7 @@
 .tenant-sidebar-nav-button {
   /* Match the compact humanist sans used by the sidebar reference. */
   font-family: Inter, Roboto, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
-  font-weight: 500 !important;
+  font-weight: 400 !important;
   letter-spacing: 0 !important;
   -webkit-font-smoothing: antialiased;
   text-rendering: geometricPrecision;
@@ -111,7 +111,7 @@
 .tenant-sidebar-section-label {
   font-family: Inter, Roboto, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
   font-size: 11px !important;
-  font-weight: 700 !important;
+  font-weight: 600 !important;
   letter-spacing: .035em !important;
   text-transform: uppercase;
   -webkit-font-smoothing: antialiased;

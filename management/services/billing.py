@@ -916,6 +916,7 @@ def query_daraja_stk_payment(tenant, checkout_request_id, payment_method="daraja
 
 
 def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None, originator_id=None):
+    """Send a mobile-money payout; this is never a Paybill settlement."""
     tenant = tenant_settlement_daraja_config(tenant)
     shortcode = str(os.getenv("DARAJA_B2C_SHORTCODE") or "").strip()
     initiator = str(os.getenv("DARAJA_B2C_INITIATOR_NAME") or "").strip()
@@ -930,6 +931,18 @@ def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None, origina
     if not recipient or not recipient.startswith("254") or len(recipient) != 12:
         raise PaymentProviderError("Tenant payout phone is invalid.", "Invalid Daraja B2C recipient phone", 400)
 
+    # B2C can only pay a phone number.  In particular, the internal
+    # MMF-to-utility transfer command is not a customer/tenant payout and
+    # must never be selected here: it would move funds in the opposite
+    # direction from a bank Paybill settlement.
+    command_id = str(os.getenv("DARAJA_B2C_COMMAND_ID") or "BusinessPayment").strip()
+    if command_id not in {"BusinessPayment", "SalaryPayment", "PromotionPayment"}:
+        raise PaymentProviderError(
+            "The Daraja B2C payout command is invalid.",
+            "DARAJA_B2C_COMMAND_ID must be BusinessPayment, SalaryPayment, or PromotionPayment; use B2B BusinessPayBill for bank Paybill settlements.",
+            503,
+        )
+
     base_url = get_public_base_url()
     if not base_url:
         raise RuntimeError("PUBLIC_APP_URL or DARAJA_CALLBACK_BASE_URL is required for Daraja B2C callbacks")
@@ -941,7 +954,7 @@ def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None, origina
         "OriginatorConversationID": str(originator_id or f"SET{secrets.token_hex(8).upper()}")[:20],
         "InitiatorName": initiator,
         "SecurityCredential": security_credential,
-        "CommandID": str(os.getenv("DARAJA_B2C_COMMAND_ID") or "BusinessPayment"),
+        "CommandID": command_id,
         "Amount": max(1, int(round(float(amount or 0)))),
         "PartyA": shortcode,
         "PartyB": recipient,
@@ -976,10 +989,14 @@ def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None, origina
 
 
 def initiate_daraja_b2b_settlement(tenant, payment_id, amount, destination_type, recipient_shortcode, account_number="", remarks=None, originator_id=None):
-    """Send a tenant settlement to a bank Paybill/account or a Buy Goods till."""
+    """Send a settlement from the configured source shortcode to a bank Paybill/account or Buy Goods till."""
     tenant_id = (tenant or {}).get("id")
     tenant = tenant_settlement_daraja_config(tenant)
-    shortcode = str(os.getenv("DARAJA_B2B_SHORTCODE") or "").strip()
+    # PartyA is the business shortcode that owns the available B2B balance.
+    # Do not substitute a B2C/MMF transfer command for this request: bank
+    # destinations are paid with BusinessPayBill and use AccountReference as
+    # the bank account number.
+    source_shortcode = str(os.getenv("DARAJA_B2B_SHORTCODE") or "").strip()
     initiator = str(os.getenv("DARAJA_B2B_INITIATOR_NAME") or "").strip()
     security_credential = str(os.getenv("DARAJA_B2B_SECURITY_CREDENTIAL") or "").strip()
     recipient_shortcode = "".join(ch for ch in str(recipient_shortcode or "") if ch.isdigit())
@@ -987,13 +1004,13 @@ def initiate_daraja_b2b_settlement(tenant, payment_id, amount, destination_type,
     destination_type = str(destination_type or "").strip().lower()
     if destination_type not in {"bank", "till"}:
         destination_type = "bank"
-    if not all((shortcode, initiator, security_credential, recipient_shortcode)):
+    if not all((source_shortcode, initiator, security_credential, recipient_shortcode)):
         raise PaymentProviderError(
             "B2B settlement is not fully configured.",
             "B2B requires a sender shortcode, B2B initiator credentials, and a receiving bank Paybill shortcode or Buy Goods till",
             503,
         )
-    if len(shortcode) < 5 or len(shortcode) > 10 or len(recipient_shortcode) < 5 or len(recipient_shortcode) > 10 or (destination_type == "bank" and not account_reference):
+    if len(source_shortcode) < 5 or len(source_shortcode) > 10 or len(recipient_shortcode) < 5 or len(recipient_shortcode) > 10 or (destination_type == "bank" and not account_reference):
         raise PaymentProviderError("The B2B settlement destination is invalid.", "Invalid recipient shortcode or bank account reference", 400)
 
     base_url = get_public_base_url()
@@ -1011,7 +1028,7 @@ def initiate_daraja_b2b_settlement(tenant, payment_id, amount, destination_type,
         "SenderIdentifierType": str(os.getenv("DARAJA_B2B_SENDER_IDENTIFIER_TYPE") or "4"),
         "RecieverIdentifierType": str(os.getenv("DARAJA_B2B_TILL_IDENTIFIER_TYPE") or "2") if is_till else str(os.getenv("DARAJA_B2B_RECEIVER_IDENTIFIER_TYPE") or "4"),
         "Amount": max(1, int(round(float(amount or 0)))),
-        "PartyA": shortcode,
+        "PartyA": source_shortcode,
         "PartyB": recipient_shortcode,
         "AccountReference": account_reference if not is_till else "",
         "Remarks": str(remarks or f"Tenant settlement {payment_id}")[:100],
