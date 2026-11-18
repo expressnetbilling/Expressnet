@@ -1160,7 +1160,30 @@ def captive_portal_page(request, tenant_id):
         ]
         if value
     )
-    selected_payment_method = selected_daraja_method(tenant)
+    configured_methods = tenant.get("payment_methods") if isinstance(tenant.get("payment_methods"), list) else []
+    payment_methods = []
+    for configured_method in configured_methods:
+        method = str(configured_method or "").strip().lower()
+        method = {"paybill": "daraja_paybill", "mpesa_paybill": "daraja_paybill", "buygoods": "daraja_buygoods", "buy_goods": "daraja_buygoods", "mpesa_buygoods": "daraja_buygoods"}.get(method, method)
+        if method in {"daraja_paybill", "daraja_buygoods", "till", "phone"} and method not in payment_methods:
+            payment_methods.append(method)
+    if not payment_methods:
+        payment_methods = [selected_daraja_method(tenant)]
+    selected_payment_method = payment_methods[0]
+    payment_labels = {
+        "daraja_paybill": "M-Pesa prompt (Paybill)",
+        "daraja_buygoods": "M-Pesa prompt (Buy Goods)",
+        "till": "Pay tenant's till directly",
+        "phone": "Send money to tenant's phone",
+    }
+    if len(payment_methods) == 1:
+        payment_method_control = f"<input type='hidden' name='payment_method' value='{html.escape(selected_payment_method)}'>"
+    else:
+        options = "".join(
+            f"<option value='{html.escape(method)}'>{html.escape(payment_labels[method])}</option>"
+            for method in payment_methods
+        )
+        payment_method_control = f"<select name='payment_method' required aria-label='Payment method'>{options}</select>"
     tv_packages = [pkg for pkg in packages if pkg.get("service_type") == "hotspot"]
     if packages:
         package_html_v2 = "".join(
@@ -1185,13 +1208,13 @@ def captive_portal_page(request, tenant_id):
                 <div class="pay-head">
                   <div>
                     <h2>{html.escape(str(pkg.get('name') or 'Buy package'))}</h2>
-                    <p>Enter your M-Pesa phone number.</p>
+                    <p>Choose how you want to pay, then enter your M-Pesa phone number.</p>
                   </div>
                   <a class="close-btn" href="#" aria-label="Close">x</a>
                 </div>
                 <input type="hidden" name="package_id" value="{html.escape(str(pkg.get('id')))}">
                 <input type="hidden" name="service_type" value="{html.escape(str(pkg.get('service_type') or 'hotspot'))}">
-                <input type="hidden" name="payment_method" value="{html.escape(selected_payment_method)}">
+                {payment_method_control}
                 {hidden}
                 {('<input name="username" required placeholder="PPPoE username">' if pkg.get('service_type') == 'pppoe' else '')}
                 <input name="phone" inputmode="tel" required placeholder="M-Pesa/phone number" autocomplete="tel">
@@ -1214,7 +1237,7 @@ def captive_portal_page(request, tenant_id):
                 <p class="muted">Select a package, then enter the TV MAC address and your M-Pesa phone number.</p>
                 <form method="post" action="/api/captive/{html.escape(str(tenant_id))}/pay">
                   <input type="hidden" name="service_type" value="tv">
-                  <input type="hidden" name="payment_method" value="{html.escape(selected_payment_method)}">
+                  {payment_method_control}
                   {hidden}
                   <select name="package_id" required aria-label="TV package">
                     <option value="">Select a package</option>
@@ -1516,6 +1539,27 @@ def captive_portal_pay(request, tenant_id):
         if data.get("ip"):
             back = f"{back}?ip={html.escape(str(data.get('ip')))}"
         return _html_page("Payment unavailable", f"<main><div class='alert'>{html.escape(str(payload.get('message') or payload.get('error') or 'Could not start payment'))}</div><p><a href='{back}'>Back to packages</a></p></main>", response.status_code)
+    if payload.get("provider") == "manual_mpesa":
+        query = {
+            "payment_id": payload.get("paymentId"),
+            "ip": data.get("ip") or data.get("router_ip") or "",
+            "mac": data.get("mac") or data.get("router_mac") or "",
+            "router_ip": data.get("router_ip") or data.get("server-address") or "",
+            "link_login": data.get("link_login") or data.get("link-login") or "",
+            "dst": data.get("dst") or data.get("link-orig") or "",
+        }
+        refresh_url = f"/api/captive/{html.escape(str(tenant_id))}?{urlencode({key: value for key, value in query.items() if value})}"
+        return _html_page(
+            "Pay the provider",
+            f"""
+            <main><div class="card connect-card">
+              <strong>Pay Ksh {html.escape(str(payload.get('amount') or ''))}</strong>
+              <p class="muted">{html.escape(str(payload.get('destinationLabel') or 'M-Pesa destination'))}: <strong>{html.escape(str(payload.get('destination') or ''))}</strong></p>
+              <p class="muted">Use reference <strong>{html.escape(str(payload.get('reference') or ''))}</strong>. The provider will confirm your payment and this page will connect your device.</p>
+            </div><script>setTimeout(function(){{window.location.replace('{refresh_url}');}}, 5000);</script></main>
+            """,
+            201,
+        )
     if payload.get("provider") == "mpesa":
         query = {
             "payment_id": payload.get("paymentId"),
@@ -1580,6 +1624,86 @@ def _paid_access_html(title, payload, login_action="", auto_submit=True):
     """
 
 
+def _normal_collection_method(tenant, requested_method=None):
+    """Return a direct tenant M-Pesa method, never a Daraja fallback.
+
+    ``till`` and ``phone`` mean the customer pays the tenant directly in the
+    M-Pesa app. They are separate from STK/Daraja because a direct payment has
+    no callback that can safely prove payment or activate access automatically.
+    """
+    methods = tenant.get("payment_methods") if isinstance((tenant or {}).get("payment_methods"), list) else []
+    enabled = [str(item or "").strip().lower() for item in methods]
+    requested = str(requested_method or "").strip().lower()
+    if requested:
+        return requested if requested in {"till", "phone"} and requested in enabled else ""
+    has_daraja = any(method in {"daraja_paybill", "daraja_buygoods", "paybill", "buygoods", "mpesa_paybill", "mpesa_buygoods"} for method in enabled)
+    return "" if has_daraja else next((method for method in enabled if method in {"till", "phone"}), "")
+
+
+def _normal_collection_destination(tenant, method):
+    if method == "till":
+        # business_number is the tenant's normal Buy Goods till, independent
+        # from the Daraja API shortcode/till fields.
+        value = "".join(ch for ch in str((tenant or {}).get("business_number") or "") if ch.isdigit())
+        label = "M-Pesa Buy Goods till"
+    else:
+        value = str((tenant or {}).get("payout_phone") or (tenant or {}).get("phone") or "").strip()
+        label = "M-Pesa Send Money phone"
+    return label, value
+
+
+def _manual_collection_payment(tenant_id, tenant, pkg, data, customer, phone, amount_payable, service_type,
+                               access_username, pending_access_password, mac_address, router_ip,
+                               router_client_ip, router_client_mac, router_mac, link_login, dst, method):
+    label, destination = _normal_collection_destination(tenant, method)
+    if not destination:
+        return ok({"success": False, "message": f"This provider has not configured a {label.lower()} yet."}, 503)
+    payment_ref = ref(f"tenants/{tenant_id}/payments").push({
+        "customer_id": customer.get("id") if customer else None,
+        "customer_name": customer.get("name") if customer else None,
+        "package_id": data["package_id"],
+        "package_name": pkg.get("name"),
+        "amount": amount_payable,
+        "amount_payable": amount_payable,
+        "payment_code": None,
+        "phone": phone,
+        "status": "pending",
+        "paid_at": None,
+        "initiated_at": iso_now(),
+        "service_type": service_type,
+        "username": access_username,
+        "pending_access_password": pending_access_password,
+        "mac_address": mac_address,
+        "router_ip": router_ip,
+        "router_client_ip": router_client_ip,
+        "router_client_mac": router_client_mac,
+        "router_mac": router_mac,
+        "link_login": link_login,
+        "dst": dst,
+        "source": "customer_portal",
+        "provider": "manual_mpesa",
+        "payment_method": method,
+        "collection_account": "tenant_direct",
+        "tenant_settlement_status": "not_required",
+        "tenant_payout": tenant_payout_details(tenant),
+        "manual_confirmation_required": True,
+    })
+    reference = f"WIFI-{str(payment_ref.key)[-8:].upper()}"
+    payment_ref.update({"manual_payment_reference": reference})
+    return ok({
+        "success": True,
+        "status": "pending_manual_confirmation",
+        "message": "Pay the tenant directly, then wait for the provider to confirm the payment.",
+        "paymentId": payment_ref.key,
+        "provider": "manual_mpesa",
+        "paymentMethod": method,
+        "destinationLabel": label,
+        "destination": destination,
+        "reference": reference,
+        "amount": amount_payable,
+    }, 201)
+
+
 @csrf_exempt
 @api_view(["POST"])
 def _public_pay_impl(request, tenant_id, data=None):
@@ -1632,6 +1756,13 @@ def _public_pay_impl(request, tenant_id, data=None):
             return ok({"message": "Enter a valid TV MAC address"}, 400)
     access_username = mac_address if service_type == "tv" else ((customer or {}).get("username") or username or "".join(ch for ch in str(phone or "") if ch.isdigit()))
     pending_access_password = str((customer or {}).get("password") or secrets.token_hex(3).upper())
+    direct_method = _normal_collection_method(tenant, data.get("payment_method"))
+    if direct_method:
+        return _manual_collection_payment(
+            tenant_id, tenant, pkg, data, customer, phone, amount_payable, service_type,
+            access_username, pending_access_password, mac_address, router_ip, router_client_ip,
+            router_client_mac, router_mac, link_login, dst, direct_method,
+        )
     daraja_method = selected_daraja_method(tenant, data.get("payment_method"))
     try:
         daraja_config = tenant_payment_collection_config(tenant, daraja_method)

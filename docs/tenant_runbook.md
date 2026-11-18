@@ -23,10 +23,12 @@ application and configure wildcard TLS coverage on the hosting platform. Set
 production environment. Production settings fall back to `PUBLIC_BASE_DOMAIN`
 if `TENANT_BASE_DOMAIN` is missing or set to a local host.
 
-MikroTik provisioning uses this same tenant subdomain for its captive-portal
-URL. A router for `citynet` therefore redirects customers to
-`https://citynet.expressnetbilling.com/api/captive/<tenant-id>`, so wildcard
-DNS and TLS must be live before provisioning that router.
+MikroTik provisioning uses `PUBLIC_APP_URL` for the captive-portal URL by
+default. This is deliberately safe on Railway: a DNS CNAME without a matching
+Railway custom-domain route causes the customer redirect to time out. After
+wildcard DNS, TLS, and the hosting route are live, set
+`CAPTIVE_PORTAL_TENANT_SUBDOMAINS_ENABLED=true` to provision a router for
+`citynet` with `https://citynet.expressnetbilling.com/api/captive/<tenant-id>`.
 
 ## Migrate schemas
 

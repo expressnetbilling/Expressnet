@@ -585,9 +585,19 @@ def captive_portal_url(tenant, base_url=None):
             scheme = "http" if hostname == "localhost" or hostname.endswith(".localhost") else "https"
             tenant_subdomain_url = f"{scheme}://{subdomain}.{base_domain}"
 
+    # A DNS CNAME alone does not make a Railway custom domain routable. A
+    # router must never be provisioned with an unverified tenant hostname:
+    # that turns the Hotspot redirect into a connection timeout. Keep the
+    # public application domain as the safe default and opt in only after a
+    # wildcard/custom-domain route has been configured on the hosting edge.
+    tenant_subdomains_enabled = str(
+        getattr(settings, "CAPTIVE_PORTAL_TENANT_SUBDOMAINS_ENABLED", "")
+        or os.getenv("CAPTIVE_PORTAL_TENANT_SUBDOMAINS_ENABLED")
+        or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
     configured = (
         tenant_override
-        or ("" if settings.DEBUG else tenant_subdomain_url)
+        or ("" if settings.DEBUG or not tenant_subdomains_enabled else tenant_subdomain_url)
         or os.getenv("CAPTIVE_PORTAL_PUBLIC_URL")
         or ("" if settings.DEBUG else getattr(settings, "PUBLIC_APP_URL", ""))
         or os.getenv("SAAS_PORTAL_HOST")

@@ -55,7 +55,21 @@ class CaptivePortalFlowTests(SimpleTestCase):
         self.assertIn("dst=$(link-orig)", page)
 
     @override_settings(DEBUG=False, TENANT_BASE_DOMAIN="expressnetbilling.com", PUBLIC_APP_URL="https://expressnetbilling.com")
-    def test_provisioning_uses_the_tenant_subdomain_for_captive_portal(self):
+    def test_provisioning_uses_working_public_portal_until_subdomains_are_enabled(self):
+        portal_url = captive_portal_url({"id": self.tenant_id, "subdomain": "citynet78"})
+
+        self.assertEqual(
+            portal_url,
+            f"https://expressnetbilling.com/api/captive/{self.tenant_id}",
+        )
+
+    @override_settings(
+        DEBUG=False,
+        TENANT_BASE_DOMAIN="expressnetbilling.com",
+        PUBLIC_APP_URL="https://expressnetbilling.com",
+        CAPTIVE_PORTAL_TENANT_SUBDOMAINS_ENABLED=True,
+    )
+    def test_provisioning_uses_tenant_subdomain_only_when_enabled(self):
         portal_url = captive_portal_url({"id": self.tenant_id, "subdomain": "citynet78"})
 
         self.assertEqual(
@@ -123,3 +137,88 @@ class CaptivePortalFlowTests(SimpleTestCase):
         self.assertIn(f"payment_id={self.payment_id}", body)
         self.assertIn("link_login=http%3A%2F%2F192.168.88.1%2Flogin", body)
         self.assertIn("window.location.replace", body)
+
+    def test_captive_payment_page_shows_direct_till_without_starting_daraja(self):
+        request = self.factory.post(f"/api/captive/{self.tenant_id}/pay")
+        provider_response = Response(
+            {
+                "provider": "manual_mpesa",
+                "paymentId": self.payment_id,
+                "amount": 50,
+                "destinationLabel": "M-Pesa Buy Goods till",
+                "destination": "123456",
+                "reference": "WIFI-PAYMENT1",
+            },
+            status=201,
+        )
+        with patch.object(portal_views, "body", return_value={
+            "package_id": "package-1",
+            "phone": "0700000000",
+            "ip": "192.168.88.20",
+            "mac": "AA:BB:CC:DD:EE:FF",
+        }), patch.object(portal_views, "_public_pay_impl", return_value=provider_response):
+            response = portal_views.captive_portal_pay(request, self.tenant_id)
+
+        body = response.content.decode()
+        self.assertEqual(response.status_code, 201)
+        self.assertIn("M-Pesa Buy Goods till", body)
+        self.assertIn("123456", body)
+        self.assertIn("WIFI-PAYMENT1", body)
+        self.assertNotIn("Prompt sent. Check your phone", body)
+
+    def test_direct_till_creates_pending_tenant_payment_without_daraja(self):
+        class PaymentRef:
+            key = "payment-1"
+
+            def __init__(self):
+                self.data = None
+                self.updates = {}
+
+            def update(self, values):
+                self.updates.update(values)
+
+        class PaymentsCollection:
+            def __init__(self, payment):
+                self.payment = payment
+
+            def push(self, values):
+                self.payment.data = values
+                return self.payment
+
+        payment = PaymentRef()
+        tenant = {
+            "business_name": "Example ISP",
+            "status": "active",
+            "payment_methods": ["till"],
+            "business_number": "123456",
+        }
+        package = {"id": "package-1", "name": "Daily Wi-Fi", "price": 50, "service_type": "hotspot"}
+
+        def fake_ref(path):
+            if path == f"tenants/{self.tenant_id}":
+                return _MemoryRef({path: tenant}, path)
+            if path == f"tenants/{self.tenant_id}/packages/package-1":
+                return _MemoryRef({path: package}, path)
+            if path == f"tenants/{self.tenant_id}/payments":
+                return PaymentsCollection(payment)
+            raise AssertionError(path)
+
+        request = self.factory.post(f"/api/public/{self.tenant_id}/pay")
+        with patch.object(portal_views, "ref", side_effect=fake_ref), patch.object(
+            portal_views, "initiate_daraja_payment"
+        ) as daraja:
+            response = portal_views._public_pay_impl(request, self.tenant_id, data={
+                "package_id": "package-1",
+                "phone": "0700000000",
+                "payment_method": "till",
+                "service_type": "hotspot",
+            })
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["provider"], "manual_mpesa")
+        self.assertEqual(response.data["destination"], "123456")
+        self.assertEqual(payment.data["status"], "pending")
+        self.assertEqual(payment.data["collection_account"], "tenant_direct")
+        self.assertTrue(payment.data["manual_confirmation_required"])
+        self.assertEqual(payment.updates["manual_payment_reference"], "WIFI-AYMENT-1")
+        daraja.assert_not_called()
