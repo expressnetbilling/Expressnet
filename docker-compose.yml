@@ -7,6 +7,15 @@ x-app: &app
     - .env
   environment:
     DJANGO_SETTINGS_MODULE: billing_saas_django.Settings.production
+    # The RadSec PKI is generated once by the companion init service. The app
+    # only reads it to issue router-specific client certificates.
+    RADSEC_CA_CERT_FILE: /run/expressnet-radsec/ca.pem
+    RADSEC_CA_KEY_FILE: /run/expressnet-radsec/ca-key.pem
+  volumes:
+    - radsec-pki:/run/expressnet-radsec:ro
+  depends_on:
+    radsec-pki:
+      condition: service_completed_successfully
 
 services:
   # Keep the public web/API service on Railway. This definition is useful for
@@ -31,21 +40,10 @@ services:
     profiles: ["app"]
     command: celery -A billing_saas_django beat -l info
 
-  # Deploy this service on the Ubuntu VPS. It is the one public, central
-  # RADIUS endpoint used by every tenant router; do not create one per tenant.
+  # One central RADIUS service. FreeRADIUS terminates mutually authenticated
+  # RadSec on TCP 2083 and forwards to the Django AAA process over private
+  # loopback UDP inside this same container.
   radius:
-    <<: *app
-    command: >-
-      python manage.py runradius --settings=billing_saas_django.Settings.production
-      --host 0.0.0.0 --auth-port 1812 --acct-port 1813
-    ports:
-      - "1812:1812/udp"
-      - "1813:1813/udp"
-
-  # RADIUS-over-TLS gateway for a VPS with fixed public TCP 2083. Routers
-  # connect outward over RadSec and no public UDP port is required. Mount valid
-  # server, key, and CA files at the configured paths.
-  radsec:
     build:
       context: .
       dockerfile: deploy/radsec/Dockerfile
@@ -55,7 +53,31 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: billing_saas_django.Settings.production
       RADIUS_RADSEC_LISTEN_PORT: 2083
+      RADSEC_PKI_DIR: /run/expressnet-radsec
     volumes:
-      - ./secrets/radsec:/run/secrets/radsec:ro
+      - radsec-pki:/run/expressnet-radsec
     ports:
       - "2083:2083/tcp"
+    depends_on:
+      radsec-pki:
+        condition: service_completed_successfully
+
+  # Generates a persistent private CA and the RadSec server certificate from
+  # PUBLIC_APP_URL / RAILWAY_PUBLIC_DOMAIN. It runs automatically; no PEM,
+  # base64, or RADIUS host variables need to be entered for one-host Docker
+  # deployments. Set RADIUS_RADSEC_HOST only when RadSec has a different name.
+  radsec-pki:
+    build:
+      context: .
+      dockerfile: deploy/radsec/Dockerfile
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      RADSEC_PKI_DIR: /run/expressnet-radsec
+    volumes:
+      - radsec-pki:/run/expressnet-radsec
+    command: ["/usr/local/bin/expressnet-prepare-radsec-pki"]
+
+volumes:
+  radsec-pki:

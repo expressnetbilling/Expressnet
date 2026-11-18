@@ -54,6 +54,29 @@ def _tenant_router_option(tenant, name, default=None):
     return extra.get(name, default) if hasattr(extra, "get") else default
 
 
+def _radsec_public_host():
+    """Resolve the public RadSec name without a second deployment setting."""
+    explicit = str(
+        os.getenv("RADIUS_RADSEC_HOST")
+        or os.getenv("RADSEC_PUBLIC_HOST")
+        or os.getenv("RAILWAY_TCP_PROXY_DOMAIN")
+        or os.getenv("RAILWAY_PUBLIC_DOMAIN")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    return str(urlparse(str(os.getenv("PUBLIC_APP_URL") or "")).hostname or "").strip()
+
+
+def _radsec_platform_pki_ready():
+    """Accept legacy base64 secrets or Docker's shared, generated PKI files."""
+    if str(os.getenv("RADSEC_CA_CERT_PEM_B64") or "").strip() and str(os.getenv("RADSEC_CA_KEY_PEM_B64") or "").strip():
+        return True
+    certificate_file = Path(str(os.getenv("RADSEC_CA_CERT_FILE") or ""))
+    key_file = Path(str(os.getenv("RADSEC_CA_KEY_FILE") or ""))
+    return certificate_file.is_file() and certificate_file.stat().st_size > 0 and key_file.is_file() and key_file.stat().st_size > 0
+
+
 def has_mikrotik_credentials(tenant):
     return bool(
         _tenant_value(tenant, "mikrotik_host")
@@ -74,13 +97,8 @@ def radius_client_enabled(tenant):
     transport = str(
         _tenant_router_option(tenant, "radius_transport", os.getenv("RADIUS_TRANSPORT", "radsec"))
     ).strip().lower()
-    radsec_host = str(
-        _tenant_router_option(tenant, "radius_radsec_host", os.getenv("RADIUS_RADSEC_HOST", ""))
-    ).strip()
-    platform_ca_ready = bool(
-        str(os.getenv("RADSEC_CA_CERT_PEM_B64") or "").strip()
-        and str(os.getenv("RADSEC_CA_KEY_PEM_B64") or "").strip()
-    )
+    radsec_host = str(_tenant_router_option(tenant, "radius_radsec_host", _radsec_public_host())).strip()
+    platform_ca_ready = _radsec_platform_pki_ready()
     configured = transport == "radsec" and bool(radsec_host and platform_ca_ready)
     return configured and bool(_tenant_value(tenant, "radius_enabled", True))
 
@@ -535,14 +553,42 @@ def package_service_type(package):
 def captive_portal_url(tenant, base_url=None):
     """Build the URL the router should use to fetch hotspot files / redirect users to.
 
-    Local development follows the live request host. Production uses an explicit
-    captive portal URL or the stable public app URL so router clients don't
-    depend on tenant-subdomain routing.
+    Local development follows the live request host. In production each
+    tenant's router points to that tenant's public workspace subdomain, so the
+    captive browser remains in the ISP's branded workspace. A tenant-specific
+    override and then the platform URL remain safe fallbacks for older tenants
+    without a subdomain.
     """
-    tenant_id = (tenant or {}).get("id")
+    tenant = tenant or {}
+    tenant_id = tenant.get("id")
+    tenant_extra = tenant.get("extra") or {}
+    tenant_override = tenant.get("captive_portal_public_url") or (
+        tenant_extra.get("captive_portal_public_url") if isinstance(tenant_extra, dict) else ""
+    )
+
+    # Tenant subdomains are generated as DNS-safe labels at registration.
+    # Validate again before using one in a URL because this value may also
+    # originate from legacy tenant JSON.
+    subdomain = str(tenant.get("subdomain") or (tenant_extra.get("subdomain") if isinstance(tenant_extra, dict) else "") or "").strip().lower()
+    valid_subdomain = re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", subdomain)
+    tenant_subdomain_url = ""
+    if valid_subdomain:
+        base_domain = str(
+            getattr(settings, "TENANT_BASE_DOMAIN", "")
+            or os.getenv("TENANT_BASE_DOMAIN")
+            or os.getenv("PUBLIC_BASE_DOMAIN")
+            or ""
+        ).strip().rstrip("/")
+        base_domain = base_domain.removeprefix("https://").removeprefix("http://").split("/", 1)[0].strip(".")
+        if base_domain:
+            hostname = base_domain.split(":", 1)[0].lower()
+            scheme = "http" if hostname == "localhost" or hostname.endswith(".localhost") else "https"
+            tenant_subdomain_url = f"{scheme}://{subdomain}.{base_domain}"
+
     configured = (
-        os.getenv("CAPTIVE_PORTAL_PUBLIC_URL")
-        or (tenant or {}).get("captive_portal_public_url")
+        tenant_override
+        or ("" if settings.DEBUG else tenant_subdomain_url)
+        or os.getenv("CAPTIVE_PORTAL_PUBLIC_URL")
         or ("" if settings.DEBUG else getattr(settings, "PUBLIC_APP_URL", ""))
         or os.getenv("SAAS_PORTAL_HOST")
         or ""

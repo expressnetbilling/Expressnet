@@ -33,7 +33,8 @@ subdomain testing, and per-tenant backup/restore commands.
 
 ## Central RADIUS
 
-The RADIUS server is a separate Docker service on a public-IPv4 VPS. It shares
-the production database with Expressnet, allowing router NAS records and
-shared secrets to be registered automatically after provisioning. See
-[docs/radius-vps.md](docs/radius-vps.md).
+The RADIUS server is a Docker service in the same Compose deployment as
+Expressnet. It serves mutually authenticated RadSec over TCP 2083 and creates
+its persistent PKI automatically; router provisioning imports the required CA
+and client certificate without tenant input. See
+[docs/radsec-vps.md](docs/radsec-vps.md).

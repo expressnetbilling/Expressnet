@@ -1,9 +1,12 @@
 #!/bin/sh
 set -eu
 
-: "${RADIUS_RADSEC_TLS_CERT_FILE:?Set RADIUS_RADSEC_TLS_CERT_FILE to the server certificate path}"
-: "${RADIUS_RADSEC_TLS_KEY_FILE:?Set RADIUS_RADSEC_TLS_KEY_FILE to the server private-key path}"
-: "${RADIUS_RADSEC_TLS_CA_FILE:?Set RADIUS_RADSEC_TLS_CA_FILE to the CA certificate path}"
+export RADSEC_PKI_DIR="${RADSEC_PKI_DIR:-/run/expressnet-radsec}"
+/usr/local/bin/expressnet-prepare-radsec-pki
+
+export RADIUS_RADSEC_TLS_CERT_FILE="${RADIUS_RADSEC_TLS_CERT_FILE:-$RADSEC_PKI_DIR/server.pem}"
+export RADIUS_RADSEC_TLS_KEY_FILE="${RADIUS_RADSEC_TLS_KEY_FILE:-$RADSEC_PKI_DIR/server-key.pem}"
+export RADIUS_RADSEC_TLS_CA_FILE="${RADIUS_RADSEC_TLS_CA_FILE:-$RADSEC_PKI_DIR/ca.pem}"
 
 export RADIUS_HOST=127.0.0.1
 export RADIUS_AUTH_PORT=1812

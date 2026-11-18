@@ -3958,10 +3958,41 @@ def _is_non_public_ip(value):
 
 def _radsec_platform_pki_ready():
     """Whether the platform can issue a router-specific client bundle."""
-    return bool(
-        str(os.getenv("RADSEC_CA_CERT_PEM_B64") or "").strip()
-        and str(os.getenv("RADSEC_CA_KEY_PEM_B64") or "").strip()
-    )
+    try:
+        _radsec_ca_material()
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _radsec_ca_material():
+    """Load legacy secret-store material or Docker-generated PKI files."""
+    certificate_b64 = str(os.getenv("RADSEC_CA_CERT_PEM_B64") or "").strip()
+    key_b64 = str(os.getenv("RADSEC_CA_KEY_PEM_B64") or "").strip()
+    if certificate_b64 or key_b64:
+        if not certificate_b64 or not key_b64:
+            raise ValueError("both RadSec CA values are required")
+        return base64.b64decode(certificate_b64), base64.b64decode(key_b64)
+
+    certificate_file = Path(str(os.getenv("RADSEC_CA_CERT_FILE") or ""))
+    key_file = Path(str(os.getenv("RADSEC_CA_KEY_FILE") or ""))
+    if not certificate_file.is_file() or not key_file.is_file():
+        raise ValueError("RadSec platform CA is not configured")
+    return certificate_file.read_bytes(), key_file.read_bytes()
+
+
+def _radsec_public_host():
+    """Use the platform domain by default so no RADIUS-host variable is needed."""
+    explicit = str(
+        os.getenv("RADIUS_RADSEC_HOST")
+        or os.getenv("RADSEC_PUBLIC_HOST")
+        or os.getenv("RAILWAY_TCP_PROXY_DOMAIN")
+        or os.getenv("RAILWAY_PUBLIC_DOMAIN")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    return str(urlparse(str(os.getenv("PUBLIC_APP_URL") or "")).hostname or "").strip()
 
 
 def _radsec_client_common_name(provision_payload):
@@ -3976,10 +4007,11 @@ def _radsec_client_bundle(provision_payload):
     if not _radsec_platform_pki_ready():
         raise ValueError("RadSec platform CA is not configured")
     try:
-        ca_certificate = x509.load_pem_x509_certificate(base64.b64decode(os.environ["RADSEC_CA_CERT_PEM_B64"]))
+        certificate_pem, private_key_pem = _radsec_ca_material()
+        ca_certificate = x509.load_pem_x509_certificate(certificate_pem)
         key_password = str(os.getenv("RADSEC_CA_KEY_PASSWORD") or "").encode() or None
         ca_private_key = serialization.load_pem_private_key(
-            base64.b64decode(os.environ["RADSEC_CA_KEY_PEM_B64"]),
+            private_key_pem,
             password=key_password,
         )
     except Exception as exc:
@@ -4010,7 +4042,8 @@ def _radsec_ca_certificate():
     if not _radsec_platform_pki_ready():
         raise ValueError("RadSec platform CA is not configured")
     try:
-        return x509.load_pem_x509_certificate(base64.b64decode(os.environ["RADSEC_CA_CERT_PEM_B64"]))
+        certificate_pem, _ = _radsec_ca_material()
+        return x509.load_pem_x509_certificate(certificate_pem)
     except Exception as exc:
         raise ValueError("RadSec platform CA certificate is invalid") from exc
 
@@ -4078,10 +4111,8 @@ def _wireguard_server_config(tenant, base_url=""):
 def _radius_server_config(tenant, wg_config=None, base_url=""):
     wg_config = wg_config or _wireguard_server_config(tenant, base_url)
     # Use RadSec (RADIUS over mutually authenticated TLS) for router-to-cloud
-    # AAA. RouterOS requires a fixed public IP and TCP port 2083 for native
-    # RadSec, so deploy this gateway on a VPS rather than Railway's dynamically
-    # port-mapped TCP proxy. The internal Django policy process remains UDP on
-    # loopback only.
+    # AAA. The internal Django policy process remains UDP on loopback only;
+    # RouterOS reaches the public endpoint through mutually authenticated TLS.
     transport = _config_value(
         tenant,
         ("RADIUS_TRANSPORT",),
@@ -4093,7 +4124,7 @@ def _radius_server_config(tenant, wg_config=None, base_url=""):
         tenant,
         ("RADIUS_RADSEC_HOST", "RADIUS_SERVER_IP", "RADIUS_SERVER_HOST", "RADIUS_HOST_IP") if radsec else ("RADIUS_SERVER_IP", "RADIUS_SERVER_HOST", "RADIUS_HOST_IP"),
         ("radius_radsec_host", "radius_server_ip", "radius_server_host", "radius_host_ip") if radsec else ("radius_server_ip", "radius_server_host", "radius_host_ip"),
-        "",
+        _radsec_public_host() if radsec else "",
     )
     platform_pki_ready = _radsec_platform_pki_ready() if radsec else True
     source_ip = _config_value(
@@ -4103,12 +4134,11 @@ def _radius_server_config(tenant, wg_config=None, base_url=""):
     )
     configured_auth_port = _config_value(
         tenant,
-        ("RADIUS_RADSEC_PORT", "RADIUS_AUTH_PORT") if radsec else ("RADIUS_AUTH_PORT",),
+        ("RADIUS_RADSEC_PORT", "RAILWAY_TCP_PROXY_PORT", "RADIUS_AUTH_PORT") if radsec else ("RADIUS_AUTH_PORT",),
         ("radius_radsec_port", "radius_auth_port") if radsec else ("radius_auth_port",),
         "2083" if radsec else "1812",
     )
-    radsec_port_valid = not radsec or configured_auth_port == "2083"
-    auth_port = "2083" if radsec else configured_auth_port
+    auth_port = configured_auth_port
     acct_port = auth_port if radsec else _config_value(tenant, ("RADIUS_ACCT_PORT",), ("radius_acct_port",), "1813")
     private_without_tunnel = False
     if _is_non_public_ip(server_ip):
@@ -4130,14 +4160,12 @@ def _radius_server_config(tenant, wg_config=None, base_url=""):
         "auth_port": auth_port,
         "acct_port": acct_port,
         "transport": "radsec" if radsec else "udp",
-        "ready": bool(server_ip) and not private_without_tunnel and platform_pki_ready and radsec_port_valid,
+        "ready": bool(server_ip) and not private_without_tunnel and platform_pki_ready,
         "disabled_reason": (
             "private RADIUS address requires a ready WireGuard tunnel"
             if private_without_tunnel
             else "platform RadSec certificate authority is not configured"
             if radsec and not platform_pki_ready
-            else "RouterOS native RadSec requires TCP port 2083"
-            if radsec and not radsec_port_valid
             else "RADIUS_SERVER_IP is not configured"
             if not server_ip
             else ""

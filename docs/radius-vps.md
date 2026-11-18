@@ -4,9 +4,9 @@ Expressnet uses one central RADIUS service for all tenants. A tenant only runs
 the MikroTik provisioning command. They never enter a RADIUS address, secret,
 or NAS configuration.
 
-For a Railway-hosted billing application, use the newer TLS deployment in
-[RadSec gateway for MikroTik PPPoE and Hotspot](radsec-vps.md). This UDP guide
-is retained only for networks that can expose a public UDP RADIUS endpoint.
+Use the Docker RadSec deployment in [Docker RadSec service](radsec-vps.md).
+This UDP guide is retained only for networks that can expose a public UDP
+RADIUS endpoint.
 
 ## What provisioning does automatically
 

@@ -23,6 +23,11 @@ application and configure wildcard TLS coverage on the hosting platform. Set
 production environment. Production settings fall back to `PUBLIC_BASE_DOMAIN`
 if `TENANT_BASE_DOMAIN` is missing or set to a local host.
 
+MikroTik provisioning uses this same tenant subdomain for its captive-portal
+URL. A router for `citynet` therefore redirects customers to
+`https://citynet.expressnetbilling.com/api/captive/<tenant-id>`, so wildcard
+DNS and TLS must be live before provisioning that router.
+
 ## Migrate schemas
 
 ```bash
