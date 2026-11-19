@@ -8,7 +8,7 @@ It has two explicit stages:
 
 1. ``stk`` sends an STK prompt to the supplied phone.
 2. ``settle`` first verifies that STK payment, then sends B2B to the supplied
-   bank Paybill/account only when both the provider result is successful and
+   Buy Goods till only when both the provider result is successful and
    ``--confirm-live`` is present.
 
 Do not commit credentials.  For a production B2B test, provide a public HTTPS
@@ -144,16 +144,38 @@ def verify_stk(base_url: str, checkout_request_id: str) -> dict:
     return body
 
 
-def settle_b2b(base_url: str, amount: int, paybill: str, account: str, callback_base: str) -> dict:
-    logger.info("Starting B2B settlement amount=KES %s paybill=%s account=***%s callback=%s", amount, paybill, account[-4:], callback_base)
+def settle_b2b_to_till(base_url: str, amount: int, till: str, callback_base: str) -> dict:
+    logger.info("Starting B2B Buy Goods settlement amount=KES %s till=%s callback=%s", amount, till, callback_base)
+    token = access_token(base_url, "DARAJA_TEST_B2B_CONSUMER_KEY", "DARAJA_TEST_B2B_CONSUMER_SECRET")
+    originator_id = f"LOCAL{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    payload = {
+        "Initiator": env("DARAJA_TEST_B2B_INITIATOR_NAME"),
+        "SecurityCredential": env("DARAJA_TEST_B2B_SECURITY_CREDENTIAL"),
+        "CommandID": "BusinessBuyGoods",
+        "SenderIdentifierType": os.getenv("DARAJA_TEST_B2B_SENDER_IDENTIFIER_TYPE", "4"),
+        "RecieverIdentifierType": os.getenv("DARAJA_TEST_B2B_TILL_IDENTIFIER_TYPE", "2"),
+        "Amount": amount,
+        "PartyA": env("DARAJA_TEST_B2B_SHORTCODE"),
+        "PartyB": till,
+        "AccountReference": "",
+        "Remarks": "Local B2B test",
+        "QueueTimeOutURL": f"{callback_base}/api/daraja/test/b2b-timeout",
+        "ResultURL": f"{callback_base}/api/daraja/test/b2b-result",
+        "OriginatorConversationID": originator_id,
+    }
+    return post(base_url, "/mpesa/b2b/v1/paymentrequest", token, payload)
+
+
+def settle_b2b_to_paybill(base_url: str, amount: int, paybill: str, account: str, callback_base: str) -> dict:
+    logger.info("Starting B2B Paybill settlement amount=KES %s paybill=%s account=***%s callback=%s", amount, paybill, account[-4:], callback_base)
     token = access_token(base_url, "DARAJA_TEST_B2B_CONSUMER_KEY", "DARAJA_TEST_B2B_CONSUMER_SECRET")
     originator_id = f"LOCAL{datetime.now().strftime('%Y%m%d%H%M%S')}"
     payload = {
         "Initiator": env("DARAJA_TEST_B2B_INITIATOR_NAME"),
         "SecurityCredential": env("DARAJA_TEST_B2B_SECURITY_CREDENTIAL"),
         "CommandID": "BusinessPayBill",
-        "SenderIdentifierType": "4",
-        "RecieverIdentifierType": "4",
+        "SenderIdentifierType": os.getenv("DARAJA_TEST_B2B_SENDER_IDENTIFIER_TYPE", "4"),
+        "RecieverIdentifierType": os.getenv("DARAJA_TEST_B2B_RECEIVER_IDENTIFIER_TYPE", "4"),
         "Amount": amount,
         "PartyA": env("DARAJA_TEST_B2B_SHORTCODE"),
         "PartyB": paybill,
@@ -172,9 +194,10 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--amount", type=int, required=True, help="Whole Kenyan shillings; must be positive.")
     parser.add_argument("--phone", help="STK recipient phone; required for the stk stage.")
     parser.add_argument("--checkout-request-id", help="Successful STK checkout ID; required for the settle stage.")
-    parser.add_argument("--paybill", default="222111", help="Receiving bank Paybill shortcode.")
-    parser.add_argument("--account", default="057000050061", help="Receiving bank account reference.")
-    parser.add_argument("--bank-code", default="70", help="Recorded for operator verification; Daraja B2B has no BankCode request field.")
+    destination = parser.add_mutually_exclusive_group()
+    destination.add_argument("--till", help="Receiving Buy Goods till number.")
+    destination.add_argument("--paybill", help="Receiving bank Paybill shortcode.")
+    parser.add_argument("--account", help="Receiving bank account reference; required with --paybill.")
     parser.add_argument("--environment", choices=("sandbox", "production"), default="sandbox")
     parser.add_argument("--callback-base-url", default=os.getenv("DARAJA_TEST_CALLBACK_BASE_URL", ""))
     parser.add_argument("--confirm-live", action="store_true", help="Required for every network request.")
@@ -201,9 +224,18 @@ def main() -> int:
 
     if not args.checkout_request_id:
         raise ValueError("--checkout-request-id is required for the settle stage.")
+    if not args.till and not args.paybill:
+        raise ValueError("One of --till or --paybill is required for the settle stage.")
+    if args.paybill and not args.account:
+        raise ValueError("--account is required with --paybill.")
     verify_stk(base_url, args.checkout_request_id)
-    result = settle_b2b(base_url, args.amount, args.paybill, args.account, callback_base)
-    print({"status": "acknowledged", "conversation_id": result.get("ConversationID"), "originator_conversation_id": result.get("OriginatorConversationID"), "bank_code_verified_by_operator": args.bank_code})
+    if args.till:
+        result = settle_b2b_to_till(base_url, args.amount, args.till, callback_base)
+        destination = {"destination_till": args.till}
+    else:
+        result = settle_b2b_to_paybill(base_url, args.amount, args.paybill, args.account, callback_base)
+        destination = {"destination_paybill": args.paybill, "destination_account": args.account}
+    print({"status": "acknowledged", "conversation_id": result.get("ConversationID"), "originator_conversation_id": result.get("OriginatorConversationID"), **destination})
     return 0
 
 

@@ -98,6 +98,18 @@ def request_tenant_settlement(tenant_id, payment_id):
     provider = str(payment.get("tenant_settlement_provider") or "")
     destination_type = str(payment.get("tenant_settlement_destination_type") or "")
     payout = payment.get("tenant_payout") or {}
+    if destination_type == "bank":
+        # Do not send a BusinessPayBill request for a collection that resides
+        # in the Utility Account. Business Hub owns the supported bank
+        # withdrawal/auto-settlement flow for that account.
+        status = "business_hub_bank_settlement_required"
+        ref(f"tenants/{tenant_id}/payments/{payment_id}").update({
+            "tenant_settlement_status": status,
+            "tenant_settlement_error": "Configure Withdraw to Bank or Auto Settlement in M-PESA Business Hub; B2B bank transfers debit the Working Account.",
+            "tenant_settlement_failed_at": iso_now(),
+        })
+        ref(f"tenants/{tenant_id}").update({"settlement_status": status})
+        return {"status": status}
     recipient = (
         payout.get("payout_phone") if provider == "daraja_b2c"
         else payout.get("daraja_settlement_till_number") if destination_type == "till"

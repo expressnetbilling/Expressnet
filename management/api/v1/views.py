@@ -4382,11 +4382,12 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
     tenant_net_amount = max(0, round(settlement_amount - platform_fee, 2)) if platform_collected else 0
     settlement_status = daraja_b2b_settlement_status(tenant_data)
     destination_type = payout.get("settlement_destination_type")
-    if destination_type == "bank" and not payout.get("bank_daraja_shortcode"):
-        tenant_settlement_status = "missing_b2b_destination"
-    else:
-        tenant_settlement_status = settlement_status
-    settlement_provider = "daraja_b2c" if destination_type == "phone" else "daraja_b2b"
+    tenant_settlement_status = settlement_status
+    settlement_provider = (
+        "daraja_b2c" if destination_type == "phone"
+        else "business_hub_bank" if destination_type == "bank"
+        else "daraja_b2b"
+    )
     settlement_recipient = (
         payout.get("payout_phone") if destination_type == "phone"
         else payout.get("daraja_settlement_till_number") if destination_type == "till"
