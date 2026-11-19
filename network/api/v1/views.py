@@ -4444,7 +4444,11 @@ def router_provision_command(request):
     # which is enough to exhaust RouterOS's SSL session pool on low-resource
     # hardware (RB9xx-class devices) and surfaces as "SSL: internal error (6)".
     command = (
-        _router_dns_bootstrap(script_host)
+        # A factory-fresh router has no DNS servers, so the fetch itself cannot
+        # resolve our host. The only thing that can fix that is a command run
+        # on the router before the fetch, so keep it to one short statement;
+        # the full DNS bootstrap lives inside the downloaded .rsc.
+        ('/ip dns set servers=1.1.1.1,8.8.8.8 allow-remote-requests=yes; ' if fresh_router else '')
         + f'/tool fetch check-certificate=no url="{script_url}" dst-path=billing-saas.rsc; '
         ':delay 2s; '
         '/import billing-saas.rsc;'
