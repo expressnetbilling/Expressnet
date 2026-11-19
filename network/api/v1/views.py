@@ -2990,7 +2990,21 @@ def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
         and str(assignment.get("service_type") or "").lower() in {"hotspot", "both"}
         and str(assignment.get("status") or "").lower() == "applied"
     ]
-    if not interfaces:
+    snapshot = ((tenant or {}).get("extra") or {}).get("mikrotik_router_snapshot") or {}
+    snapshot_hotspots = snapshot.get("hotspot_servers") if isinstance(snapshot, dict) else []
+    snapshot_bridge = next(
+        (
+            str(server.get("interface") or "").strip()
+            for server in snapshot_hotspots
+            if isinstance(server, dict) and str(server.get("interface") or "").strip()
+        ),
+        "",
+    )
+    # Router resets or an interrupted provisioning run can leave the Hotspot
+    # active while the dashboard has no applied port record. Its agent must
+    # still receive the portal-host repair; otherwise it keeps redirecting to
+    # the retired hostname forever.
+    if not interfaces and not snapshot_bridge:
         return False
     repaired_at = str((tenant or {}).get("mikrotik_captive_portal_repair_queued_at") or "")
     try:
@@ -3007,7 +3021,7 @@ def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
             for assignment in assignments.values()
             if isinstance(assignment, dict) and assignment.get("bridge")
         ),
-        mikrotik_managed_bridge_name(tenant),
+        snapshot_bridge or mikrotik_managed_bridge_name(tenant),
     )
     portal_url = captive_portal_url({"id": tenant_id, **tenant}, base_url)
     script = _build_agent_port_assignment_script(
