@@ -1,9 +1,9 @@
-Django==6.0.5
+Django==6.0.8
 channels[daphne]==4.3.2
 channels-redis==4.3.0
 django-tenants==3.14.0
-djangorestframework==3.17.1
-PyJWT==2.13.0
+djangorestframework==3.18.2
+PyJWT==2.15.0
 bcrypt==5.0.0
 python-dotenv==1.2.2
 requests==2.34.2
@@ -20,4 +20,5 @@ gevent==24.11.1
 whitenoise==6.8.2
 gunicorn==23.0.0
 pyrad>=2.4
-cryptography>=42,<47
+cryptography>=48.0.1
+autobahn>=26.10.1

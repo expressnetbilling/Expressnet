@@ -3030,6 +3030,7 @@ def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
         service_type="hotspot",
         tenant=tenant,
         portal_url=portal_url,
+        repair=True,
     )
     if not script:
         return False
@@ -3050,7 +3051,7 @@ def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
     return True
 
 
-def _build_agent_port_assignment_script(interface_names, bridge_name, service_type="", tenant=None, portal_url=""):
+def _build_agent_port_assignment_script(interface_names, bridge_name, service_type="", tenant=None, portal_url="", repair=False):
     """Return an idempotent agent script for a customer port assignment.
 
     This is imported by RouterOS as a .rsc file. It must therefore remain
@@ -3059,13 +3060,17 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
     Hotspot assignment repairs the Hotspot service on that bridge.  Moving a
     WLAN into the bridge alone gives clients DHCP but leaves them with "No
     internet" instead of a captive redirect.
+
+    ``repair=True`` is the periodic health re-apply. It must never disconnect
+    customers: it does not clear the wireless registration table and only adds
+    a bridge port when it is missing, instead of removing and re-adding it.
     """
     bridge = _rsc_escape(bridge_name or "Expressnet-bridge")
     lines = [
         f':do {{ /interface bridge add name="{bridge}" comment="Created by Expressnet" }} on-error={{}};',
         # Upgrade existing agents too; otherwise routers provisioned before
         # the 10-second interval would retain their old 30-second scheduler.
-        ':do { /system scheduler set [find name="billing-saas-agent"] interval=10s } on-error={};',
+        f':do {{ /system scheduler set [find name="billing-saas-agent"] interval={_agent_poll_interval()} }} on-error={{}};',
     ]
     hotspot_requested = str(service_type or "").lower() in {"hotspot", "both"}
     tenant = tenant or {}
@@ -3109,15 +3114,24 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
                 # RB951Ui-2Hn routers use the legacy wireless menu. Emitting
                 # /interface wifi for wlan1 on RouterOS 7.12 aborts the entire
                 # import before bridge membership can be changed.
-                f':do {{ /interface wireless registration-table remove [find interface="{port}"] }} on-error={{}};',
-                f':log info "Billing SaaS: cleared WLAN security and reconnected clients on {port}";',
             ))
-        lines.extend((
-            f':do {{ /interface bridge port remove [find interface="{port}"] }} on-error={{}};',
-            f':do {{ /interface bridge port add bridge="{bridge}" interface="{port}" disabled=no comment="billing-saas customer port" }} on-error={{}};',
-            f':do {{ /interface bridge port set [find interface="{port}" bridge="{bridge}"] disabled=no }} on-error={{}};',
-            f':log info "Billing SaaS: assigned customer port {port} to {bridge}";',
-        ))
+            if not repair:
+                lines.extend((
+                    f':do {{ /interface wireless registration-table remove [find interface="{port}"] }} on-error={{}};',
+                    f':log info "Billing SaaS: cleared WLAN security and reconnected clients on {port}";',
+                ))
+        if repair:
+            lines.extend((
+                f':if ([:len [/interface bridge port find interface="{port}" bridge="{bridge}"]] = 0) do={{ :do {{ /interface bridge port remove [find interface="{port}"] }} on-error={{}}; :do {{ /interface bridge port add bridge="{bridge}" interface="{port}" disabled=no comment="billing-saas customer port" }} on-error={{}} }};',
+                f':do {{ /interface bridge port set [find interface="{port}" bridge="{bridge}"] disabled=no }} on-error={{}};',
+            ))
+        else:
+            lines.extend((
+                f':do {{ /interface bridge port remove [find interface="{port}"] }} on-error={{}};',
+                f':do {{ /interface bridge port add bridge="{bridge}" interface="{port}" disabled=no comment="billing-saas customer port" }} on-error={{}};',
+                f':do {{ /interface bridge port set [find interface="{port}" bridge="{bridge}"] disabled=no }} on-error={{}};',
+                f':log info "Billing SaaS: assigned customer port {port} to {bridge}";',
+            ))
     if hotspot_requested:
         # Keep this repair small enough for RouterOS's scheduler/import parser.
         # The complete provisioning routine owns files and walled-garden rules;
@@ -3146,12 +3160,12 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
             ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot internet"] } on-error={};',
             f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" hotspot=auth comment="billing-saas allow hotspot internet" }} on-error={{}};',
             ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot dns"] } on-error={};',
-            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=53 comment="billing-saas allow hotspot dns" }} on-error={{}};',
-            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=53 comment="billing-saas allow hotspot dns" }} on-error={{}};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=53 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dns" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=53 comment="billing-saas allow hotspot dns" }};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=53 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dns" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=53 comment="billing-saas allow hotspot dns" }};',
             ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot dhcp"] } on-error={};',
-            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }} on-error={{}};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=67,68 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dhcp" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }};',
             ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot web-proxy"] } on-error={};',
-            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }} on-error={{}};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=80,443,64872-64875 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot web-proxy" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }};',
             ':do { /ip firewall nat remove [find comment="billing-saas hotspot masquerade"] } on-error={};',
             f':do {{ /ip firewall nat add chain=srcnat src-address="{hotspot_network}" action=masquerade comment="billing-saas hotspot masquerade" }} on-error={{}};',
             ':log info "Billing SaaS: Hotspot service is active on the Expressnet bridge.";',
@@ -3957,6 +3971,16 @@ def _queue_router_command(request, command_data):
     return _queue_router_command_for_tenant(tenant_id, command_data, request.tenant)
 
 
+def _agent_poll_interval():
+    """RouterOS scheduler interval for the cloud agent poll (e.g. ``5s``).
+
+    The agent is how a paid customer's access reaches the router, so this is
+    the worst-case activation delay. Clamped to 2-60 seconds.
+    """
+    seconds = max(2, min(60, int(getattr(settings, "ROUTER_AGENT_POLL_SECONDS", 5) or 5)))
+    return f"{seconds}s"
+
+
 def _queue_router_command_for_tenant(tenant_id, command_data, tenant_data=None):
     # See _queue_router_ports_command: use a row lock for every command type,
     # not just port assignments, because all of them share the same JSON list.
@@ -4444,7 +4468,12 @@ def router_provision_command(request):
     # which is enough to exhaust RouterOS's SSL session pool on low-resource
     # hardware (RB9xx-class devices) and surfaces as "SSL: internal error (6)".
     command = (
-        f'/tool fetch check-certificate=no url="{script_url}" dst-path=billing-saas.rsc; '
+        # A factory-fresh router has no DNS servers, so the fetch itself cannot
+        # resolve our host. The only thing that can fix that is a command run
+        # on the router before the fetch, so keep it to one short statement;
+        # the full DNS bootstrap lives inside the downloaded .rsc.
+        ('/ip dns set servers=1.1.1.1,8.8.8.8 allow-remote-requests=yes; ' if fresh_router else '')
+        + f'/tool fetch check-certificate=no url="{script_url}" dst-path=billing-saas.rsc; '
         ':delay 2s; '
         '/import billing-saas.rsc;'
     )
@@ -4464,6 +4493,22 @@ def router_provision_command(request):
         "expires_in_minutes": 120,
         "expires_at": expires_at.isoformat(),
     })
+
+
+def _router_dns_bootstrap(host):
+    """RouterOS snippet making a factory-fresh router able to reach Expressnet.
+
+    A new router often has no DNS servers, so ``/tool fetch`` fails with
+    "resolving error". Enable the DNS resolver (allow-remote-requests, the
+    "Allow Remote Requests" box) and fall back to public resolvers only when
+    the host does not resolve with whatever the router already has.
+    """
+    host = _rsc_escape(host)
+    return (
+        ':do { /ip dns set allow-remote-requests=yes } on-error={}; '
+        f':do {{ :resolve "{host}" }} on-error={{ :do {{ /ip dns set servers=1.1.1.1,8.8.8.8 }} on-error={{}}; '
+        ':do { /ip dns cache flush } on-error={}; :delay 2s }; '
+    )
 
 
 @csrf_exempt
@@ -4969,10 +5014,15 @@ def router_provision_script(request, token):
             logger.error("MikroTik provisioning tenant=%s: RadSec certificate issue failed: %s", tenant_id, exc)
             radius_enabled_for_router = False
 
+    dns_bootstrap_script = _router_dns_bootstrap(urlparse(app_base_url).hostname or "")
     radsec_certificate_script = ""
     if radius_enabled_for_router and radius_config.get("transport") == "radsec":
         radsec_certificate_script = f"""
         :global billingRadSecCert "";
+        {dns_bootstrap_script}
+        :do {{ /system ntp client set enabled=yes servers=pool.ntp.org }} on-error={{}};
+        :local billingClockTries 0;
+        :while ($billingClockTries < 15 && [/system ntp client get status] != "synchronized") do={{ :set billingClockTries ($billingClockTries + 1); :delay 2s }};
         :log info "Expressnet: installing platform RadSec certificate";
         :do {{ /file remove [find name="expressnet-radsec-ca.pem"] }} on-error={{}};
         :do {{ /file remove [find name="expressnet-radsec-client.p12"] }} on-error={{}};
@@ -5014,7 +5064,9 @@ def router_provision_script(request, token):
             :set billingRadiusFlag "yes";
             :do {{ /radius incoming set accept=yes port=1700 }} on-error={{ :log warning "Expressnet: RADIUS incoming setup failed" }}
             /ppp aaa set use-radius=yes interim-update=1h;
-            :log info "Expressnet: RadSec client configured"
+            :log info "Expressnet: RadSec client configured";
+            :delay 3s;
+            :do {{ :local billingRadSecConn [:len [/ip firewall connection find where protocol=tcp dst-address~":{_rsc_escape(radius_config["auth_port"])}\\$"]]; :if ($billingRadSecConn > 0) do={{ :log info "Expressnet: RadSec TLS session to cloud established" }} else={{ :log warning "Expressnet: RadSec session not yet open; it connects on first customer login" }} }} on-error={{}}
         }};
         """
     if not radius_enabled_for_router:
@@ -5241,6 +5293,7 @@ def router_provision_script(request, token):
         """
 
     script = f""":log info "Billing SaaS Step 1: provisioning token validated by Expressnet server";
+        {dns_bootstrap_script}
         :local billingVer [/system resource get version];
         :local billingVerNum $billingVer;
         :local billingSpaceIdx [:find $billingVer " "];
@@ -5330,7 +5383,7 @@ def router_provision_script(request, token):
         {wireless_provision_script}
         {provisioning_callback_script}
         :do {{ /system scheduler remove [find name="billing-saas-agent"] }} on-error={{}}
-        /system scheduler add name="billing-saas-agent" interval=10s on-event=":do {{ /file remove [find name=\\"billing-saas-cmd.rsc\\"] }} on-error={{}}; :do {{ /tool fetch check-certificate=no url=\\"{agent_poll_url}\\" dst-path=billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command fetch failed\\" }}; :if ([:len [/file find name=\\"billing-saas-cmd.rsc\\"]] > 0) do={{ :do {{ /import billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command import failed\\" }} }};"
+        /system scheduler add name="billing-saas-agent" interval={_agent_poll_interval()} on-event=":do {{ /file remove [find name=\\"billing-saas-cmd.rsc\\"] }} on-error={{}}; :do {{ /tool fetch check-certificate=no url=\\"{agent_poll_url}\\" dst-path=billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command fetch failed\\" }}; :if ([:len [/file find name=\\"billing-saas-cmd.rsc\\"]] > 0) do={{ :do {{ /import billing-saas-cmd.rsc }} on-error={{ :log warning \\"Billing SaaS agent: command import failed\\" }} }};"
         :log info "Billing SaaS provisioning complete. No customer ports were moved; assign Hotspot or PPPoE ports from the dashboard.";
         :put "Configuration completed successfully. No customer ports were moved; assign Hotspot or PPPoE ports from the dashboard.";
         """
