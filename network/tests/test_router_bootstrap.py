@@ -9,3 +9,18 @@ class RouterDnsBootstrapTests(SimpleTestCase):
         self.assertIn("allow-remote-requests=yes", snippet)
         self.assertIn(':resolve "expressnetbilling.com"', snippet)
         self.assertIn("servers=1.1.1.1,8.8.8.8", snippet)
+
+
+class AgentPollIntervalTests(SimpleTestCase):
+    def test_interval_is_configurable_and_clamped(self):
+        from django.test import override_settings
+        from network.api.v1.views import _agent_poll_interval
+
+        with override_settings(ROUTER_AGENT_POLL_SECONDS=5):
+            self.assertEqual(_agent_poll_interval(), "5s")
+        with override_settings(ROUTER_AGENT_POLL_SECONDS=0):
+            self.assertEqual(_agent_poll_interval(), "5s")
+        with override_settings(ROUTER_AGENT_POLL_SECONDS=1):
+            self.assertEqual(_agent_poll_interval(), "2s")
+        with override_settings(ROUTER_AGENT_POLL_SECONDS=999):
+            self.assertEqual(_agent_poll_interval(), "60s")
