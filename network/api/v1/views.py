@@ -4430,7 +4430,8 @@ def router_provision_command(request):
     # which is enough to exhaust RouterOS's SSL session pool on low-resource
     # hardware (RB9xx-class devices) and surfaces as "SSL: internal error (6)".
     command = (
-        f'/tool fetch check-certificate=no url="{script_url}" dst-path=billing-saas.rsc; '
+        _router_dns_bootstrap(script_host)
+        + f'/tool fetch check-certificate=no url="{script_url}" dst-path=billing-saas.rsc; '
         ':delay 2s; '
         '/import billing-saas.rsc;'
     )
@@ -4450,6 +4451,22 @@ def router_provision_command(request):
         "expires_in_minutes": 120,
         "expires_at": expires_at.isoformat(),
     })
+
+
+def _router_dns_bootstrap(host):
+    """RouterOS snippet making a factory-fresh router able to reach Expressnet.
+
+    A new router often has no DNS servers, so ``/tool fetch`` fails with
+    "resolving error". Enable the DNS resolver (allow-remote-requests, the
+    "Allow Remote Requests" box) and fall back to public resolvers only when
+    the host does not resolve with whatever the router already has.
+    """
+    host = _rsc_escape(host)
+    return (
+        ':do { /ip dns set allow-remote-requests=yes } on-error={}; '
+        f':do {{ :resolve "{host}" }} on-error={{ :do {{ /ip dns set servers=1.1.1.1,8.8.8.8 }} on-error={{}}; '
+        ':do { /ip dns cache flush } on-error={}; :delay 2s }; '
+    )
 
 
 @csrf_exempt
@@ -4955,10 +4972,15 @@ def router_provision_script(request, token):
             logger.error("MikroTik provisioning tenant=%s: RadSec certificate issue failed: %s", tenant_id, exc)
             radius_enabled_for_router = False
 
+    dns_bootstrap_script = _router_dns_bootstrap(urlparse(app_base_url).hostname or "")
     radsec_certificate_script = ""
     if radius_enabled_for_router and radius_config.get("transport") == "radsec":
         radsec_certificate_script = f"""
         :global billingRadSecCert "";
+        {dns_bootstrap_script}
+        :do {{ /system ntp client set enabled=yes servers=pool.ntp.org }} on-error={{}};
+        :local billingClockTries 0;
+        :while ($billingClockTries < 15 && [/system ntp client get status] != "synchronized") do={{ :set billingClockTries ($billingClockTries + 1); :delay 2s }};
         :log info "Expressnet: installing platform RadSec certificate";
         :do {{ /file remove [find name="expressnet-radsec-ca.pem"] }} on-error={{}};
         :do {{ /file remove [find name="expressnet-radsec-client.p12"] }} on-error={{}};
@@ -5000,7 +5022,9 @@ def router_provision_script(request, token):
             :set billingRadiusFlag "yes";
             :do {{ /radius incoming set accept=yes port=1700 }} on-error={{ :log warning "Expressnet: RADIUS incoming setup failed" }}
             /ppp aaa set use-radius=yes interim-update=1h;
-            :log info "Expressnet: RadSec client configured"
+            :log info "Expressnet: RadSec client configured";
+            :delay 3s;
+            :do {{ :local billingRadSecConn [:len [/ip firewall connection find where protocol=tcp dst-address~":{_rsc_escape(radius_config["auth_port"])}\\$"]]; :if ($billingRadSecConn > 0) do={{ :log info "Expressnet: RadSec TLS session to cloud established" }} else={{ :log warning "Expressnet: RadSec session not yet open; it connects on first customer login" }} }} on-error={{}}
         }};
         """
     if not radius_enabled_for_router:
@@ -5227,6 +5251,7 @@ def router_provision_script(request, token):
         """
 
     script = f""":log info "Billing SaaS Step 1: provisioning token validated by Expressnet server";
+        {dns_bootstrap_script}
         :local billingVer [/system resource get version];
         :local billingVerNum $billingVer;
         :local billingSpaceIdx [:find $billingVer " "];
