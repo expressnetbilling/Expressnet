@@ -3016,6 +3016,7 @@ def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
         service_type="hotspot",
         tenant=tenant,
         portal_url=portal_url,
+        repair=True,
     )
     if not script:
         return False
@@ -3036,7 +3037,7 @@ def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
     return True
 
 
-def _build_agent_port_assignment_script(interface_names, bridge_name, service_type="", tenant=None, portal_url=""):
+def _build_agent_port_assignment_script(interface_names, bridge_name, service_type="", tenant=None, portal_url="", repair=False):
     """Return an idempotent agent script for a customer port assignment.
 
     This is imported by RouterOS as a .rsc file. It must therefore remain
@@ -3045,6 +3046,10 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
     Hotspot assignment repairs the Hotspot service on that bridge.  Moving a
     WLAN into the bridge alone gives clients DHCP but leaves them with "No
     internet" instead of a captive redirect.
+
+    ``repair=True`` is the periodic health re-apply. It must never disconnect
+    customers: it does not clear the wireless registration table and only adds
+    a bridge port when it is missing, instead of removing and re-adding it.
     """
     bridge = _rsc_escape(bridge_name or "Expressnet-bridge")
     lines = [
@@ -3095,15 +3100,24 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
                 # RB951Ui-2Hn routers use the legacy wireless menu. Emitting
                 # /interface wifi for wlan1 on RouterOS 7.12 aborts the entire
                 # import before bridge membership can be changed.
-                f':do {{ /interface wireless registration-table remove [find interface="{port}"] }} on-error={{}};',
-                f':log info "Billing SaaS: cleared WLAN security and reconnected clients on {port}";',
             ))
-        lines.extend((
-            f':do {{ /interface bridge port remove [find interface="{port}"] }} on-error={{}};',
-            f':do {{ /interface bridge port add bridge="{bridge}" interface="{port}" disabled=no comment="billing-saas customer port" }} on-error={{}};',
-            f':do {{ /interface bridge port set [find interface="{port}" bridge="{bridge}"] disabled=no }} on-error={{}};',
-            f':log info "Billing SaaS: assigned customer port {port} to {bridge}";',
-        ))
+            if not repair:
+                lines.extend((
+                    f':do {{ /interface wireless registration-table remove [find interface="{port}"] }} on-error={{}};',
+                    f':log info "Billing SaaS: cleared WLAN security and reconnected clients on {port}";',
+                ))
+        if repair:
+            lines.extend((
+                f':if ([:len [/interface bridge port find interface="{port}" bridge="{bridge}"]] = 0) do={{ :do {{ /interface bridge port remove [find interface="{port}"] }} on-error={{}}; :do {{ /interface bridge port add bridge="{bridge}" interface="{port}" disabled=no comment="billing-saas customer port" }} on-error={{}} }};',
+                f':do {{ /interface bridge port set [find interface="{port}" bridge="{bridge}"] disabled=no }} on-error={{}};',
+            ))
+        else:
+            lines.extend((
+                f':do {{ /interface bridge port remove [find interface="{port}"] }} on-error={{}};',
+                f':do {{ /interface bridge port add bridge="{bridge}" interface="{port}" disabled=no comment="billing-saas customer port" }} on-error={{}};',
+                f':do {{ /interface bridge port set [find interface="{port}" bridge="{bridge}"] disabled=no }} on-error={{}};',
+                f':log info "Billing SaaS: assigned customer port {port} to {bridge}";',
+            ))
     if hotspot_requested:
         # Keep this repair small enough for RouterOS's scheduler/import parser.
         # The complete provisioning routine owns files and walled-garden rules;
@@ -3132,12 +3146,12 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
             ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot internet"] } on-error={};',
             f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" hotspot=auth comment="billing-saas allow hotspot internet" }} on-error={{}};',
             ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot dns"] } on-error={};',
-            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=53 comment="billing-saas allow hotspot dns" }} on-error={{}};',
-            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=53 comment="billing-saas allow hotspot dns" }} on-error={{}};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=53 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dns" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=53 comment="billing-saas allow hotspot dns" }};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=53 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dns" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=53 comment="billing-saas allow hotspot dns" }};',
             ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot dhcp"] } on-error={};',
-            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }} on-error={{}};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=67,68 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dhcp" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }};',
             ':do { /ip firewall filter remove [find comment="billing-saas allow hotspot web-proxy"] } on-error={};',
-            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }} on-error={{}};',
+            f':do {{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=80,443,64872-64875 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot web-proxy" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{bridge}" protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }};',
             ':do { /ip firewall nat remove [find comment="billing-saas hotspot masquerade"] } on-error={};',
             f':do {{ /ip firewall nat add chain=srcnat src-address="{hotspot_network}" action=masquerade comment="billing-saas hotspot masquerade" }} on-error={{}};',
             ':log info "Billing SaaS: Hotspot service is active on the Expressnet bridge.";',
