@@ -1936,7 +1936,9 @@ def upsert_customer_access(tenant, customer, disabled=False):
                 queue_name = f"Expressnet-static-{customer['ip_address']}"
                 existing_queue = find_router_item(api, ("queue", "simple"), queue_name)
                 rate_limit = normalize_rate_limit(customer.get("speed") or customer.get("rate_limit") or "")
-                if existing_queue and existing_queue.get(".id"):
+                if existing_queue and existing_queue.get(".id") and not rate_limit:
+                    queue_path.remove(existing_queue[".id"])
+                elif existing_queue and existing_queue.get(".id"):
                     queue_fields = {
                         "name": queue_name,
                         "target": f"{customer['ip_address']}/32",
@@ -1970,7 +1972,7 @@ def upsert_customer_access(tenant, customer, disabled=False):
         }
         if service_type in {"pppoe", "static"}:
             fields["service"] = "pppoe"
-            if service_type == "static" and customer.get("ip_address"):
+            if service_type in {"pppoe", "static"} and customer.get("ip_address"):
                 fields["remote-address"] = customer["ip_address"]
         else:
             if customer.get("ip_address"):
@@ -1991,6 +1993,8 @@ def upsert_customer_access(tenant, customer, disabled=False):
                 _upsert_paid_hotspot_binding(api, customer, disabled)
                 if customer.get("auto_authorize_mac") and not disabled and not _router_customer_access_ready(api, customer):
                     raise RouterOSAPIError("RouterOS did not confirm the paid Hotspot MAC authorization")
+            if service_type == "pppoe":
+                _upsert_pppoe_simple_queue(api, customer, disabled)
             if service_type in {"hotspot", "pppoe"}:
                 _sync_customer_access_expiry(api, customer, service_type, disabled)
             if service_type == "hotspot" and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
@@ -2005,6 +2009,8 @@ def upsert_customer_access(tenant, customer, disabled=False):
             _upsert_paid_hotspot_binding(api, customer, disabled)
             if customer.get("auto_authorize_mac") and not disabled and not _router_customer_access_ready(api, customer):
                 raise RouterOSAPIError("RouterOS did not confirm the paid Hotspot MAC authorization")
+        if service_type == "pppoe":
+            _upsert_pppoe_simple_queue(api, customer, disabled)
         if service_type in {"hotspot", "pppoe"}:
             _sync_customer_access_expiry(api, customer, service_type, disabled)
         if service_type == "hotspot" and item_id and not disabled and (customer.get("duration_seconds") or customer.get("limit_seconds")):
@@ -2067,6 +2073,65 @@ def router_customer_access_ready(tenant, customer):
         return _router_customer_access_ready(api, customer)
     finally:
         api.close()
+
+
+def _upsert_pppoe_simple_queue(api, customer, disabled=False):
+    """Shape a fixed-IP PPPoE customer with a named simple queue.
+
+    PPP profiles retain their native rate-limit for pool addresses.  When a
+    customer has an assigned IPv4 address, this queue applies the same package
+    cap at the queue layer and survives a reconnect.
+    """
+    username = str((customer or {}).get("username") or "").strip()
+    queue_name = f"Expressnet-pppoe-{username}"[:120]
+    address_comment = f"billing-saas pppoe bandwidth:{username}"[:250]
+    queue_path = api.path("queue", "simple")
+    address_list_path = api.path("ip", "firewall", "address-list")
+
+    def remove_existing():
+        queue = find_router_item(api, ("queue", "simple"), queue_name)
+        if queue and queue.get(".id"):
+            queue_path.remove(queue[".id"])
+        address_item = find_router_item_by_fields(
+            api, ("ip", "firewall", "address-list"), {"comment": address_comment}
+        )
+        if address_item and address_item.get(".id"):
+            address_list_path.remove(address_item[".id"])
+
+    try:
+        address = ipaddress.ip_address(str((customer or {}).get("ip_address") or "").strip())
+    except ValueError:
+        remove_existing()
+        return None
+    rate_limit = normalize_rate_limit((customer or {}).get("speed") or (customer or {}).get("rate_limit") or "")
+    if not username or address.version != 4 or address.is_unspecified or address.is_multicast or not rate_limit:
+        remove_existing()
+        return None
+
+    address_text = str(address)
+    address_item = find_router_item_by_fields(
+        api, ("ip", "firewall", "address-list"), {"comment": address_comment}
+    )
+    address_fields = {
+        "list": "Expressnet-bandwidth-clients",
+        "address": f"{address_text}/32",
+        "comment": address_comment,
+    }
+    if address_item and address_item.get(".id"):
+        address_list_path.update(**{".id": address_item[".id"], **address_fields})
+    else:
+        address_list_path.add(**address_fields)
+    fields = {
+        "name": queue_name,
+        "target": f"{address_text}/32",
+        "max-limit": rate_limit,
+        "disabled": "yes" if disabled else "no",
+        "comment": "billing-saas pppoe bandwidth",
+    }
+    existing = find_router_item(api, ("queue", "simple"), queue_name)
+    if existing and existing.get(".id"):
+        return queue_path.update(**{".id": existing[".id"], **fields})
+    return queue_path.add(**fields)
 
 
 def _upsert_hotspot_simple_queue(api, customer, disabled=False):
@@ -2218,6 +2283,7 @@ def _sync_customer_access_expiry(api, customer, service_type, disabled=False):
         on_event = (
             f':do {{ /ppp secret disable [find name="{escaped_username}"] }} on-error={{}}; '
             f':do {{ /ppp active remove [find name="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /queue simple disable [find name="Expressnet-pppoe-{escaped_username}"] }} on-error={{}}; '
             f':do {{ /system scheduler remove [find name="{escaped_scheduler_name}"] }} on-error={{}};'
         )
     else:
@@ -2363,6 +2429,10 @@ def set_customer_enabled(tenant, username, service_type="hotspot", enabled=True)
             )
             if binding and binding.get(".id"):
                 binding_path.update(**{".id": binding[".id"], "disabled": "no" if enabled else "yes"})
+        if service_type == "pppoe":
+            queue = find_router_item(api, ("queue", "simple"), f"Expressnet-pppoe-{username}"[:120])
+            if queue and queue.get(".id"):
+                api.path("queue", "simple").update(**{".id": queue[".id"], "disabled": "no" if enabled else "yes"})
         if service_type in {"hotspot", "pppoe"} and not enabled:
             scheduler = find_router_item(api, ("system", "scheduler"), _access_expiry_scheduler_name(username))
             if scheduler and scheduler.get(".id"):
@@ -2448,6 +2518,10 @@ def delete_router_customer(tenant, username, service_type="pppoe"):
             )
             if binding and binding.get(".id"):
                 binding_path.remove(binding[".id"])
+        if service_type == "pppoe":
+            queue = find_router_item(api, ("queue", "simple"), f"Expressnet-pppoe-{username}"[:120])
+            if queue and queue.get(".id"):
+                api.path("queue", "simple").remove(queue[".id"])
         if service_type in {"hotspot", "pppoe"}:
             scheduler = find_router_item(api, ("system", "scheduler"), _access_expiry_scheduler_name(username))
             if scheduler and scheduler.get(".id"):

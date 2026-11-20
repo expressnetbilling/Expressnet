@@ -1582,22 +1582,27 @@ def _paid_access_html(title, payload, login_action="", auto_submit=True):
             f"<input type='hidden' name='password' value='{password}'>"
             f"<input type='hidden' name='dst' value='{dst}'>"
             "</form>"
-            f"<button form='paid-login' type='submit'>Connect now</button>"
-            + ("<script>setTimeout(function(){var f=document.getElementById('paid-login'); if(f) f.submit();}, 250);</script>" if auto_submit else "")
+            f"<button form='paid-login' type='submit'>Continue to the internet</button>"
+            # The RouterOS login response redirects to ``dst``. Submit on the
+            # same event loop so the successful portal state never remains
+            # visible as a fake loading screen after the device is connected.
+            + ("<script>(function(){var f=document.getElementById('paid-login'); if(f) f.submit();})();</script>" if auto_submit else "")
         )
+    elif auto_submit:
+        # A paid MAC binding can already have authorized the device without a
+        # Hotspot form. Go straight to the original requested browser page.
+        form = f"<script>window.location.replace({json.dumps(str(payload.get('dst') or 'http://connectivitycheck.gstatic.com/generate_204'))});</script>"
     return f"""
       <main>
         <div class="card connect-card">
-          <div class="spinner" aria-hidden="true"></div>
           <strong>{html.escape(str(title))}</strong>
-          <p class="muted">Your payment was successful. Keep these access details. We are connecting your device now.</p>
+          <p class="muted">You are connected. Opening the internet now.</p>
           <div class="access-grid">
             {f"<div class='access-row'><span>Package</span><strong>{package_name}</strong></div>" if package_name else ""}
             <div class="access-row"><span>Username</span><strong>{username or "-"}</strong></div>
             <div class="access-row"><span>Password</span><strong>{password or "-"}</strong></div>
             <div class="access-row"><span>Expires</span><strong>{expires_at or "-"}</strong></div>
           </div>
-          <p class="muted">Please wait while the router signs you in.</p>
           {form}
         </div>
       </main>
@@ -3228,6 +3233,7 @@ def _access_expiry_scheduler_script(customer, username, service_type, disabled):
         on_event = (
             f':do {{ /ppp secret disable [find name="{escaped_username}"] }} on-error={{}}; '
             f':do {{ /ppp active remove [find name="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /queue simple disable [find name="Expressnet-pppoe-{escaped_username}"] }} on-error={{}}; '
             f':do {{ /system scheduler remove [find name="{scheduler_name}"] }} on-error={{}};'
         )
     else:
@@ -3251,11 +3257,15 @@ def _access_expiry_scheduler_script(customer, username, service_type, disabled):
 def _customer_secret_script(customer):
     """Generate an .rsc snippet that upserts a single customer into /ppp secret or /ip hotspot user."""
     service_type = customer.get("service_type") or "hotspot"
-    # Native API writes maintain FastTrack exemptions through
-    # ``ensure_rate_limit_fasttrack_exemptions``.  Do not embed the former
-    # multi-kilobyte firewall script in an agent-imported customer command:
-    # RouterOS 7 rejects that nested script before it creates the user.
-    fasttrack_script = ""
+    # Simple queues are bypassed by FastTrack. Keep the agent-side variant
+    # short and idempotent so an imported customer command remains parseable
+    # on RouterOS 7 while static and fixed-IP PPPoE queues can take effect.
+    fasttrack_script = (
+        ':do { /ip firewall filter remove [find comment="billing-saas customer queue bypass fasttrack src"] } on-error={};'
+        ':do { /ip firewall filter remove [find comment="billing-saas customer queue bypass fasttrack dst"] } on-error={};'
+        ':do { /ip firewall filter add chain=forward action=accept connection-state=established,related src-address-list=Expressnet-bandwidth-clients place-before=[find action=fasttrack-connection] comment="billing-saas customer queue bypass fasttrack src" } on-error={};'
+        ':do { /ip firewall filter add chain=forward action=accept connection-state=established,related dst-address-list=Expressnet-bandwidth-clients place-before=[find action=fasttrack-connection] comment="billing-saas customer queue bypass fasttrack dst" } on-error={};'
+    )
     static_setup_script = ""
     if service_type == "static":
         ip_address = _rsc_escape(customer.get("ip_address") or "")
@@ -3273,10 +3283,11 @@ def _customer_secret_script(customer):
             f'/ip firewall address-list add list="Expressnet-bandwidth-clients" address="{ip_address}/32" comment="billing-saas static bandwidth";'
         )
         queue_script = (
-            f':if ("{rate_limit}" != "") do={{ '
             f':if ([:len [/queue simple find name="{queue_name}"]] = 0) do={{'
             f' /queue simple add name="{queue_name}" target="{ip_address}/32" max-limit="{rate_limit}" disabled={disabled} comment="billing-saas static bandwidth" }} '
-            f'else={{ /queue simple set [find name="{queue_name}"] target="{ip_address}/32" max-limit="{rate_limit}" disabled={disabled} comment="billing-saas static bandwidth" }}; }};'
+            f'else={{ /queue simple set [find name="{queue_name}"] target="{ip_address}/32" max-limit="{rate_limit}" disabled={disabled} comment="billing-saas static bandwidth" }};'
+            if rate_limit
+            else f':do {{ /queue simple remove [find name="{queue_name}"] }} on-error={{}};'
         )
         if ip_address == "172.30.0.1":
             return fasttrack_script + (
@@ -3381,11 +3392,28 @@ def _customer_secret_script(customer):
                 )
     if service_type == "pppoe":
         lines = [part for part in (fasttrack_script, *profile_lines) if part]
+        pppoe_remote_address = ""
+        pppoe_queue_lines = []
+        try:
+            pppoe_address = ipaddress.ip_address(str(customer.get("ip_address") or "").strip())
+            if pppoe_address.version == 4 and not pppoe_address.is_unspecified and not pppoe_address.is_multicast:
+                pppoe_remote_address = f' remote-address="{_rsc_escape(pppoe_address)}"'
+                pppoe_queue_name = _rsc_escape(f"Expressnet-pppoe-{raw_username}"[:120])
+                if rate_limit:
+                    pppoe_queue_lines = [
+                        f':do {{ /ip firewall address-list remove [find comment="billing-saas pppoe bandwidth:{username}"] }} on-error={{}};',
+                        f':do {{ /ip firewall address-list add list=Expressnet-bandwidth-clients address="{_rsc_escape(pppoe_address)}/32" comment="billing-saas pppoe bandwidth:{username}" }} on-error={{}};',
+                        f':do {{ /queue simple remove [find name="{pppoe_queue_name}"] }} on-error={{}};',
+                        f'/queue simple add name="{pppoe_queue_name}" target="{_rsc_escape(pppoe_address)}/32" max-limit="{rate_limit}" disabled={disabled} comment="billing-saas pppoe bandwidth";',
+                    ]
+        except ValueError:
+            pass
         # A remove of a missing item is safe. Re-add rather than nested
         # conditional upsert so the import stays parseable and deterministic.
         lines.extend([
             f'/ppp secret remove [find name="{username}"];',
-            f'/ppp secret add name="{username}" password="{password}" service=pppoe profile="{profile}" disabled={disabled} comment="billing-saas-managed";',
+            f'/ppp secret add name="{username}" password="{password}" service=pppoe profile="{profile}"{pppoe_remote_address} disabled={disabled} comment="billing-saas-managed";',
+            *pppoe_queue_lines,
         ])
         lines.extend(_access_expiry_scheduler_script(customer, raw_username, service_type, disabled))
         return "\n".join(lines)

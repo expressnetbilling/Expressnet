@@ -93,7 +93,9 @@ class CaptivePortalFlowTests(SimpleTestCase):
         self.assertIn("action='http://192.168.88.1/login'", body)
         self.assertIn("name='username' value='254700000000'", body)
         self.assertIn("name='password' value='paid-password'", body)
-        self.assertIn("f.submit();}, 250)", body)
+        self.assertIn("You are connected. Opening the internet now.", body)
+        self.assertIn("if(f) f.submit();", body)
+        self.assertNotIn('<div class="spinner"', body)
 
     def test_payment_confirmation_refresh_runs_activation_without_worker(self):
         payment_path = f"tenants/{self.tenant_id}/payments/{self.payment_id}"
@@ -222,3 +224,19 @@ class CaptivePortalFlowTests(SimpleTestCase):
         self.assertEqual(payment.data["payment_method"], "daraja_paybill")
         self.assertEqual(payment.updates["daraja_checkout_request_id"], "checkout-1")
         daraja.assert_called_once()
+
+    def test_agent_pppoe_customer_with_fixed_ip_gets_a_simple_queue(self):
+        script = portal_views._customer_secret_script({
+            "username": "pppoe-user",
+            "password": "secret",
+            "package": "10 Mbps",
+            "service_type": "pppoe",
+            "ip_address": "172.30.10.20",
+            "speed": "10M/10M",
+            "status": "active",
+        })
+
+        self.assertIn('remote-address="172.30.10.20"', script)
+        self.assertIn('name="Expressnet-pppoe-pppoe-user"', script)
+        self.assertIn('target="172.30.10.20/32"', script)
+        self.assertIn('max-limit="10M/10M"', script)
