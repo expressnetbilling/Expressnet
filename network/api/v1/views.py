@@ -5757,6 +5757,12 @@ def router_provision_complete(request, token):
         updates["mikrotik_vpn_tunnel_ip"] = wg_tunnel_ip
     if bridge:
         updates["mikrotik_bridge_name"] = bridge
+    # Tailnet identity of the router (100.x.y.z or router-<id>), reported by
+    # tailscale-bridge/mikrotik-setup.rsc; used to reach the router API through
+    # the Railway Tailscale bridge.
+    ts_host = str(request.GET.get("ts_host") or "").strip()
+    if ts_host and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", ts_host):
+        updates["mikrotik_tailscale_host"] = ts_host
     ref(f"tenants/{tenant_id}").update(updates)
     for package in list_children(f"tenants/{tenant_id}/packages"):
         if package.get("id"):
@@ -6111,7 +6117,7 @@ def settings_mikrotik(request):
         })
     data = body(request)
     updates = {}
-    for field in ["mikrotik_host", "mikrotik_user", "mikrotik_pass", "mikrotik_name"]:
+    for field in ["mikrotik_host", "mikrotik_tailscale_host", "mikrotik_user", "mikrotik_pass", "mikrotik_name"]:
         if field in data and (field != "mikrotik_pass" or str(data[field]).strip()):
             updates[field] = str(data[field]).strip() if field != "mikrotik_pass" else str(data[field])
     if "mikrotik_port" in data:
