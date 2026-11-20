@@ -44,3 +44,14 @@ class CaptiveRepairScriptTests(SimpleTestCase):
         script = self._script(False)
         self.assertIn("registration-table remove", script)
         self.assertIn('\n:do { /interface bridge port remove [find interface="ether3"] }', script)
+
+
+class CaptiveRepairQueueTests(SimpleTestCase):
+    def test_null_hotspot_snapshot_does_not_crash(self):
+        # A router snapshot with "hotspot_servers": null used to raise
+        # TypeError on every agent poll, so the captive repair never queued.
+        from network.api.v1.views import _queue_agent_captive_portal_repair
+
+        for snapshot in ({"hotspot_servers": None}, {}, None):
+            tenant = {"extra": {"mikrotik_router_snapshot": snapshot}, "router_port_assignments": {}}
+            self.assertFalse(_queue_agent_captive_portal_repair("1", tenant, "https://example.com"))
