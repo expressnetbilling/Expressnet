@@ -4171,6 +4171,38 @@ def _radsec_client_common_name(provision_payload):
     return f"expressnet-radsec-{client_id[:32]}"
 
 
+def _radsec_nas_placeholder(provision_payload):
+    """Return a stable, non-routable NAS address for one RadSec identity.
+
+    RadSec tenant selection is based on the client-certificate CN injected by
+    FreeRADIUS, not on the router's public (and often CGNAT) address.  The
+    model still requires an IP address and requires it to be unique per
+    tenant, so use a deterministic address from the RFC 2544 benchmarking
+    range.  This record exists before the router's first Access-Request.
+    """
+    common_name = _radsec_client_common_name(provision_payload)
+    if not common_name:
+        raise ValueError("Provisioning token is missing its RadSec client identity")
+    # 198.18.0.0/15 has 131,070 usable addresses. Do not use a router's WAN
+    # address here: it can change or be shared by several routers behind NAT.
+    offset = int.from_bytes(hashlib.sha256(common_name.encode("utf-8")).digest()[:4], "big") % 131070 + 1
+    return str(ipaddress.IPv4Address(int(ipaddress.IPv4Address("198.18.0.0")) + offset))
+
+
+def _ensure_radsec_nas_client(tenant_obj, provision_payload, shared_secret="radsec"):
+    """Register the client identity before its RouterOS RadSec config is sent."""
+    from billing_api.models import RadiusNasClient
+
+    common_name = _radsec_client_common_name(provision_payload)
+    placeholder_ip = _radsec_nas_placeholder(provision_payload)
+    nas_client, _ = RadiusNasClient.objects.update_or_create(
+        tenant=tenant_obj,
+        nas_ip=placeholder_ip,
+        defaults={"shared_secret": shared_secret, "identifier": common_name},
+    )
+    return nas_client
+
+
 def _radsec_client_bundle(provision_payload):
     """Issue a per-router PKCS#12 client certificate from platform CA secrets."""
     if not _radsec_platform_pki_ready():
@@ -4396,6 +4428,19 @@ def _router_lan_config(tenant):
         if address not in network or address == interface.ip or address in {network.network_address, network.broadcast_address}:
             raise ValueError("MIKROTIK_DHCP_POOL addresses must be usable hosts in the LAN network and must exclude the gateway")
     return {"lan_cidr": lan_cidr, "lan_gateway": lan_gateway, "lan_network": str(network), "dhcp_pool": dhcp_pool}
+
+
+def _router_lan_port_bootstrap_script(wan_interface):
+    """Attach every physical Ethernet LAN port to the managed customer bridge."""
+    return f'''
+        :log info "Billing SaaS: attaching LAN Ethernet ports to the customer bridge";
+        :foreach billingLanPort in=[/interface ethernet find] do={{
+            :local billingLanName [/interface ethernet get $billingLanPort name];
+            :if ($billingLanName != "{_rsc_escape(wan_interface)}") do={{
+                :do {{ /interface bridge port add bridge=$billingBridge interface=$billingLanName comment="Expressnet customer LAN" }} on-error={{ :do {{ /interface bridge port set [find interface=$billingLanName] bridge=$billingBridge comment="Expressnet customer LAN" }} on-error={{ :log warning ("Billing SaaS: could not attach " . $billingLanName . " to customer bridge") }} }};
+            }}
+        }}
+    '''
 
 @csrf_exempt
 @api_view(["GET"])
@@ -4928,6 +4973,7 @@ def router_provision_script(request, token):
     pppoe_service_name = "Expressnet-pppoe"
     wireguard_name = "Expressnet-wireguard"
     radius_comment = "Expressnet radius"
+    lan_port_bootstrap_script = _router_lan_port_bootstrap_script(wan_interface)
 
     vpn_private_key_set = (
         f':do {{ /interface wireguard set [find name="{wireguard_name}"] private-key="{_rsc_escape(wg_router_private_key)}" }} on-error={{}}\n'
@@ -5000,6 +5046,21 @@ def router_provision_script(request, token):
         radius_shared_secret = "radsec" if radius_config.get("transport") == "radsec" else existing_extra.get("radius_shared_secret_pending") or RadiusNasClient.generate_secret()
         tenant_obj.extra = {**existing_extra, "radius_shared_secret_pending": radius_shared_secret}
         tenant_obj.save(update_fields=["extra"])
+        if radius_config.get("transport") == "radsec":
+            # Register before sending the RouterOS configuration. Waiting for
+            # the final HTTP callback leaves a race where the first Hotspot
+            # login reaches the RADIUS service before its NAS exists.
+            try:
+                nas_client = _ensure_radsec_nas_client(tenant_obj, payload, radius_shared_secret)
+                logger.info(
+                    "MikroTik provisioning tenant=%s: registered RadSec NAS client=%s identity=%s",
+                    tenant_id,
+                    nas_client.nas_ip,
+                    nas_client.identifier,
+                )
+            except Exception:
+                logger.exception("MikroTik provisioning tenant=%s: could not register RadSec NAS client", tenant_id)
+                radius_enabled_for_router = False
 
     radsec_common_name = _radsec_client_common_name(payload)
     radsec_ca_common_name = ""
@@ -5311,6 +5372,7 @@ def router_provision_script(request, token):
         :do {{ /interface list member remove [find interface=$billingBridge] }} on-error={{}}
         :do {{ /interface list add name=EXPRESSNET-CUSTOMER comment="Expressnet customer-only interfaces" }} on-error={{}}
         :do {{ /interface list member add list=EXPRESSNET-CUSTOMER interface=$billingBridge comment="billing-saas customer bridge" }} on-error={{ /interface list member set [find interface=$billingBridge] list=EXPRESSNET-CUSTOMER comment="billing-saas customer bridge" }}
+        {lan_port_bootstrap_script}
         # A factory-reset router already owns this gateway on its default
         # bridge.  On duplicate, move that item; setting its address field to
         # the same CIDR raises "already have such address" and stops /import.
@@ -5806,29 +5868,34 @@ def router_provision_complete(request, token):
             nas_ip = str(ipaddress.ip_address(str(nas_ip or "").strip()))
         except ValueError:
             nas_ip = ""
-        if tenant_obj and nas_ip and current_radius.get("ready") and updates.get("radius_enabled"):
+        if tenant_obj and current_radius.get("ready") and updates.get("radius_enabled"):
             pending_secret = (tenant_obj.extra or {}).get("radius_shared_secret_pending")
             if pending_secret:
                 from billing_api.models import RadiusNasClient
-                RadiusNasClient.objects.update_or_create(
-                    tenant=tenant_obj,
-                    nas_ip=nas_ip,
-                    defaults={
-                        "shared_secret": pending_secret,
-                        "identifier": (
-                            _radsec_client_common_name(payload)
-                            if current_radius.get("transport") == "radsec"
-                            else str(request.GET.get("identity") or "").strip()
-                        ),
-                    },
-                )
+                if current_radius.get("transport") == "radsec":
+                    # FreeRADIUS forwards the certificate CN as NAS-Identifier,
+                    # so do not rely on an unstable callback/WAN IP for RadSec.
+                    nas_client = _ensure_radsec_nas_client(tenant_obj, payload, pending_secret)
+                    nas_ip = nas_client.nas_ip
+                elif nas_ip:
+                    RadiusNasClient.objects.update_or_create(
+                        tenant=tenant_obj,
+                        nas_ip=nas_ip,
+                        defaults={
+                            "shared_secret": pending_secret,
+                            "identifier": str(request.GET.get("identity") or "").strip(),
+                        },
+                    )
+                else:
+                    raise ValueError("router callback did not include a usable NAS IP address")
                 updates["radius_nas_configured"] = True
                 ref(f"tenants/{tenant_id}").update({
                     "radius_nas_configured": True,
                     "radius_nas_ip": nas_ip,
                 })
     except Exception:
-        pass
+        logger.exception("MikroTik provisioning tenant=%s: failed to finalize RADIUS NAS client", tenant_id)
+        ref(f"tenants/{tenant_id}").update({"radius_nas_configured": False})
 
     return ok({"success": True, "message": "MikroTik provisioning callback received"})
 

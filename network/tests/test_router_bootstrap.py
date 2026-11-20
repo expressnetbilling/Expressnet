@@ -11,6 +11,28 @@ class RouterDnsBootstrapTests(SimpleTestCase):
         self.assertIn("servers=1.1.1.1,8.8.8.8", snippet)
 
 
+class RadsecNasIdentityTests(SimpleTestCase):
+    def test_uses_a_stable_non_routable_address_per_client_certificate(self):
+        from network.api.v1.views import _radsec_nas_placeholder
+
+        payload = {"radsec_client_id": "router-client-1"}
+        address = _radsec_nas_placeholder(payload)
+        self.assertEqual(address, _radsec_nas_placeholder(payload))
+        self.assertTrue(address.startswith("198.18.") or address.startswith("198.19."))
+
+
+class ProvisioningScriptTests(SimpleTestCase):
+    def test_bootstrap_attaches_all_ethernet_ports_except_the_wan(self):
+        # Without bridge ports a customer gets neither DHCP nor Hotspot
+        # interception. Keep the assertion close to the generated script.
+        from network.api.v1.views import _router_lan_port_bootstrap_script
+
+        script = _router_lan_port_bootstrap_script("ether1")
+        self.assertIn(':foreach billingLanPort in=[/interface ethernet find]', script)
+        self.assertIn('interface=$billingLanName comment="Expressnet customer LAN"', script)
+        self.assertIn('$billingLanName != "ether1"', script)
+
+
 class AgentPollIntervalTests(SimpleTestCase):
     def test_interval_is_configurable_and_clamped(self):
         from django.test import override_settings
