@@ -23,6 +23,28 @@ fi
 
 export RADIUS_RADSEC_HOST="$radsec_host"
 
+# A CA supplied through RADSEC_CA_CERT_PEM_B64 / RADSEC_CA_KEY_PEM_B64 wins over
+# the volume. Railway volumes cannot be shared between services, so when the
+# web service (which issues router client certificates) and this service are
+# separate, both are given the same CA through these variables.
+if [ -n "${RADSEC_CA_CERT_PEM_B64:-}" ] && [ -n "${RADSEC_CA_KEY_PEM_B64:-}" ]; then
+    printf '%s' "$RADSEC_CA_CERT_PEM_B64" | base64 -d > "$pki_dir/ca.pem.new"
+    printf '%s' "$RADSEC_CA_KEY_PEM_B64" | base64 -d > "$pki_dir/ca-key.pem.new"
+    if ! openssl x509 -in "$pki_dir/ca.pem.new" -noout 2>/dev/null; then
+        rm -f "$pki_dir/ca.pem.new" "$pki_dir/ca-key.pem.new"
+        echo "RADSEC_CA_CERT_PEM_B64 is not a valid PEM certificate" >&2
+        exit 1
+    fi
+    if ! cmp -s "$pki_dir/ca.pem.new" "$pki_dir/ca.pem" 2>/dev/null; then
+        # New CA: the old server leaf is signed by a different CA.
+        mv -f "$pki_dir/ca.pem.new" "$pki_dir/ca.pem"
+        mv -f "$pki_dir/ca-key.pem.new" "$pki_dir/ca-key.pem"
+        rm -f "$pki_dir/server.pem" "$pki_dir/server-key.pem" "$pki_dir/ca.srl"
+    else
+        rm -f "$pki_dir/ca.pem.new" "$pki_dir/ca-key.pem.new"
+    fi
+fi
+
 if [ ! -s "$pki_dir/ca.pem" ] || [ ! -s "$pki_dir/ca-key.pem" ]; then
     openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 3650 \
         -subj "/CN=Expressnet RadSec CA" \
@@ -32,7 +54,7 @@ fi
 # Regenerate only the public server leaf when its name changes. Router client
 # certificates remain valid because the persistent CA is not replaced.
 current_host="$(openssl x509 -in "$pki_dir/server.pem" -noout -ext subjectAltName 2>/dev/null || true)"
-if [ ! -s "$pki_dir/server.pem" ] || [ ! -s "$pki_dir/server-key.pem" ] || ! printf '%s' "$current_host" | grep -Fq "$radsec_host"; then
+if [ ! -s "$pki_dir/server.pem" ] || [ ! -s "$pki_dir/server-key.pem" ] || ! openssl verify -CAfile "$pki_dir/ca.pem" "$pki_dir/server.pem" >/dev/null 2>&1 || ! printf '%s' "$current_host" | grep -Fq "$radsec_host"; then
     san_type="DNS"
     case "$radsec_host" in
         *:*) san_type="IP" ;;
