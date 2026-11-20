@@ -2991,7 +2991,7 @@ def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
         and str(assignment.get("status") or "").lower() == "applied"
     ]
     snapshot = ((tenant or {}).get("extra") or {}).get("mikrotik_router_snapshot") or {}
-    snapshot_hotspots = snapshot.get("hotspot_servers") if isinstance(snapshot, dict) else []
+    snapshot_hotspots = (snapshot.get("hotspot_servers") if isinstance(snapshot, dict) else None) or []
     snapshot_bridge = next(
         (
             str(server.get("interface") or "").strip()
