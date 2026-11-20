@@ -3402,7 +3402,7 @@ def settings_mikrotik(request):
         })
     data = body(request)
     updates = {}
-    for field in ["mikrotik_host", "mikrotik_user", "mikrotik_pass"]:
+    for field in ["mikrotik_host", "mikrotik_tailscale_host", "mikrotik_user", "mikrotik_pass"]:
         if field in data and (field != "mikrotik_pass" or str(data[field]).strip()):
             updates[field] = str(data[field]).strip() if field != "mikrotik_pass" else str(data[field])
     if "mikrotik_port" in data:

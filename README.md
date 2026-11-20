@@ -41,33 +41,36 @@ and client certificate without tenant input. See
 
 ## Tailscale bridge for MikroTik routers
 
-Lets Railway reach a router's RouterOS API without a public IP on the router
-and without inbound UDP on Railway. The router runs Tailscale as a subnet
-router; a Railway service (`tailscale-bridge/`) joins the same tailnet in
-userspace mode and forwards TCP ports over Railway private networking.
+Lets Railway reach a router's RouterOS API with no public IP on the router and
+no inbound UDP on Railway. Each router joins the tailnet as an endpoint with
+its own `100.x.y.z` address; no subnet routes are advertised, so routers can
+all share `192.168.88.0/24` locally. A Railway service (`tailscale-bridge/`)
+joins the same tailnet in userspace mode and exposes a SOCKS5 proxy, and the
+web app dials each router through it.
 
 1. **Auth key.** Tailscale Admin Console, Settings, Keys, Generate auth key.
    Tick Reusable (and Tags or Ephemeral if you want). Use one key for the
-   bridge and one per router, or a shared tagged key.
+   bridge and one for routers, or a shared tagged key. In Access Controls,
+   allow the bridge's tag or user to reach the routers on tcp 22, 443, 8728
+   and 8729.
 2. **Deploy the bridge.** Create a Railway service from this repo with root
-   directory `tailscale-bridge`. Set `TS_AUTHKEY`, `TS_HOSTNAME` (default
-   `railway-bridge`) and `PORT_FORWARDS` (`local_port:remote_ip:remote_port`,
-   comma separated, e.g. `18728:172.17.0.1:8728`). Optionally mount a volume at
-   `/var/lib/tailscale` to keep the node identity across deploys. No public
-   domain is needed.
-3. **Provision the router.** Edit the three values at the top of
-   `tailscale-bridge/mikrotik-setup.rsc` (auth key, hostname, LAN subnet) and
-   import it on a RouterOS v7 arm/arm64/x86 router with the `container`
-   package (enable container mode first; the script header explains how).
-   mipsbe/mmips routers need the LAN sidecar described at the end of the file.
-4. **Approve routes.** Admin Console, Machines, the router, Edit route
-   settings: tick `192.168.88.0/24` and `172.17.0.1/32`. Advertised routes do
-   nothing until approved.
-5. **Point the app at it.** For a tenant's router set `mikrotik_host` to
-   `<bridge-service>.railway.internal` and `mikrotik_port` to the forwarded
-   local port.
+   directory `tailscale-bridge`. Set `TS_AUTHKEY` and `TS_HOSTNAME` (default
+   `railway-bridge`). Optionally mount a volume at `/var/lib/tailscale`. No
+   public domain is needed. It listens on 1055 (SOCKS5) and 1056 (HTTP proxy).
+3. **Point the app at it.** On the web and worker services set
+   `TAILSCALE_SOCKS5_PROXY=<bridge-service>.railway.internal:1055`.
+4. **Provision each router.** Edit the values at the top of
+   `tailscale-bridge/mikrotik-setup.rsc` (auth key, hostname `router-<id>`,
+   optional callback URL) and import it on a RouterOS v7 arm/arm64/x86 router
+   with the `container` package (the script header explains enabling it).
+   Inside the container, `tailscale serve` forwards ports 22, 443, 8728 and
+   8729 to the router at `172.17.0.1`. mipsbe/mmips routers need the LAN
+   sidecar described at the end of the file.
+5. **Record the router's name.** The tenant field `mikrotik_tailscale_host`
+   (set by the script's callback, or in the router settings API) holds the
+   router's tailnet IP or name. When it is set and `TAILSCALE_SOCKS5_PROXY` is
+   configured, RouterOS API calls go through the bridge to that host;
+   otherwise the previous `mikrotik_host` behaviour is unchanged.
 
-Limit: every router advertising the same `192.168.88.0/24` and `172.17.0.1/32`
-overlaps in the tailnet, so only one router's routes can be active at a time.
-For several routers use distinct LAN subnets per router, or forward to each
-router's own tailnet IP (`100.x`) instead of its subnet.
+Only the RouterOS API uses the proxy today; REST and SSH are forwarded on the
+router but the app does not call them yet.

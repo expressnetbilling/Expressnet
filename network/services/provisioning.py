@@ -26,6 +26,7 @@ from routeros_api.exceptions import (
     RouterOsApiFatalCommunicationError,
 )
 
+from network.services import tailnet
 from billing_api.models import AdminAuditLog, AdminUser, Customer, InternetPackage, Payment, SiteSettings, Tenant, Ticket, Voucher
 
 
@@ -77,9 +78,15 @@ def _radsec_platform_pki_ready():
     return certificate_file.is_file() and certificate_file.stat().st_size > 0 and key_file.is_file() and key_file.stat().st_size > 0
 
 
+def _tailnet_router_host(tenant):
+    """Tailscale IP / MagicDNS name of the router, if the bridge is configured."""
+    host = str(_tenant_value(tenant, "mikrotik_tailscale_host") or "").strip()
+    return host if host and tailnet.proxy_address() else ""
+
+
 def has_mikrotik_credentials(tenant):
     return bool(
-        _tenant_value(tenant, "mikrotik_host")
+        (_tenant_value(tenant, "mikrotik_host") or _tailnet_router_host(tenant))
         and _tenant_value(tenant, "mikrotik_user")
         and _tenant_value(tenant, "mikrotik_pass")
     )
@@ -183,6 +190,7 @@ class RouterCredentials:
     ssl_verify: bool
     plaintext_login: bool
     timeout: float
+    proxy: tuple = None
 
 
 @dataclass
@@ -217,7 +225,10 @@ class RouterConnectionManager:
     def credentials_for(self, tenant):
         if not has_mikrotik_credentials(tenant):
             raise RouterOSAPIError("Router API credentials are not configured")
-        host = str(_tenant_value(tenant, "mikrotik_host")).strip()
+        tailnet_host = _tailnet_router_host(tenant)
+        host = tailnet_host or str(_tenant_value(tenant, "mikrotik_host")).strip()
+        # Routers addressed by tailnet identity are reached through the bridge.
+        proxy = tailnet.proxy_address() if (tailnet_host or tailnet.is_tailnet_host(host)) else None
         username = str(_tenant_value(tenant, "mikrotik_user")).strip()
         password = str(_tenant_value(tenant, "mikrotik_pass"))
         raw_port = _tenant_value(tenant, "mikrotik_port", None)
@@ -236,6 +247,7 @@ class RouterConnectionManager:
             ssl_verify=self._bool(_tenant_router_option(tenant, "mikrotik_ssl_verify"), default=True),
             plaintext_login=self._bool(_tenant_router_option(tenant, "mikrotik_plaintext_login"), default=True),
             timeout=max(1.0, timeout),
+            proxy=proxy,
         ), password
 
     @staticmethod
@@ -249,6 +261,7 @@ class RouterConnectionManager:
             credentials.use_ssl,
             credentials.ssl_verify,
             credentials.plaintext_login,
+            credentials.proxy,
         )
 
     def acquire(self, tenant):
@@ -257,7 +270,10 @@ class RouterConnectionManager:
         with self._lock:
             entry = self._connections.get(key)
             if entry is None:
-                pool = RouterOsApiPool(
+                pool_class = RouterOsApiPool
+                if credentials.proxy:
+                    pool_class = tailnet.ProxiedRouterOsApiPool
+                pool = pool_class(
                     credentials.host,
                     username=credentials.username,
                     password=password,
@@ -270,6 +286,8 @@ class RouterConnectionManager:
                 # routeros-api has one socket timeout for connect/read. Use
                 # the tenant's configured timeout for both operations.
                 pool.socket_timeout = credentials.timeout
+                if credentials.proxy:
+                    pool.proxy = credentials.proxy
                 entry = _RouterConnection(pool=pool, lock=threading.RLock())
                 self._connections[key] = entry
         entry.lock.acquire()

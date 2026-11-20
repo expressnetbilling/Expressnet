@@ -3,12 +3,16 @@
 #
 #   TS_AUTHKEY      required  reusable (ideally tagged/ephemeral) auth key
 #   TS_HOSTNAME     optional  node name, default railway-bridge
-#   PORT_FORWARDS   optional  comma-separated local_port:remote_host:remote_port
-#                             e.g. 18728:172.17.0.1:8728,18729:100.64.0.7:8729
+#   PORT_FORWARDS   optional  static TCP forwards, comma-separated
+#                             local_port:remote_host:remote_port
+#                             e.g. 18728:100.64.0.7:8728. Not needed by the web
+#                             app, which reaches routers dynamically through the
+#                             SOCKS5 proxy on :1055 (TAILSCALE_SOCKS5_PROXY).
 #   TS_STATE_DIR    optional  default /var/lib/tailscale (mount a volume to keep
 #                             the node identity across redeploys)
 #
-# Each forward is a plain TCP listener on 0.0.0.0:<local_port> that dials
+# Routes are never accepted or advertised: every router is an endpoint with
+# its own 100.x.y.z address. Each optional forward is a plain TCP listener on 0.0.0.0:<local_port> that dials
 # <remote_host>:<remote_port> through tailscaled (`tailscale nc`), so ordinary
 # TCP clients (RouterOS API, SSH, HTTPS) can use
 # <this-service>.railway.internal:<local_port> with no proxy support.
@@ -46,7 +50,6 @@ done
 tailscale --socket="$SOCKET" up \
   --authkey="$TS_AUTHKEY" \
   --hostname="$TS_HOSTNAME" \
-  --accept-routes \
   ${TS_EXTRA_ARGS:-}
 
 echo "tailscale up as $TS_HOSTNAME: $(tailscale --socket="$SOCKET" ip -4 2>/dev/null | head -n1)"
