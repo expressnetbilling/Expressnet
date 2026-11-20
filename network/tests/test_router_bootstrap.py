@@ -21,18 +21,6 @@ class RadsecNasIdentityTests(SimpleTestCase):
         self.assertTrue(address.startswith("198.18.") or address.startswith("198.19."))
 
 
-class ProvisioningScriptTests(SimpleTestCase):
-    def test_bootstrap_attaches_all_ethernet_ports_except_the_wan(self):
-        # Without bridge ports a customer gets neither DHCP nor Hotspot
-        # interception. Keep the assertion close to the generated script.
-        from network.api.v1.views import _router_lan_port_bootstrap_script
-
-        script = _router_lan_port_bootstrap_script("ether1")
-        self.assertIn(':foreach billingLanPort in=[/interface ethernet find]', script)
-        self.assertIn('interface=$billingLanName comment="Expressnet customer LAN"', script)
-        self.assertIn('$billingLanName != "ether1"', script)
-
-
 class AgentPollIntervalTests(SimpleTestCase):
     def test_interval_is_configurable_and_clamped(self):
         from django.test import override_settings

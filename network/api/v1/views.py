@@ -4430,18 +4430,6 @@ def _router_lan_config(tenant):
     return {"lan_cidr": lan_cidr, "lan_gateway": lan_gateway, "lan_network": str(network), "dhcp_pool": dhcp_pool}
 
 
-def _router_lan_port_bootstrap_script(wan_interface):
-    """Attach every physical Ethernet LAN port to the managed customer bridge."""
-    return f'''
-        :log info "Billing SaaS: attaching LAN Ethernet ports to the customer bridge";
-        :foreach billingLanPort in=[/interface ethernet find] do={{
-            :local billingLanName [/interface ethernet get $billingLanPort name];
-            :if ($billingLanName != "{_rsc_escape(wan_interface)}") do={{
-                :do {{ /interface bridge port add bridge=$billingBridge interface=$billingLanName comment="Expressnet customer LAN" }} on-error={{ :do {{ /interface bridge port set [find interface=$billingLanName] bridge=$billingBridge comment="Expressnet customer LAN" }} on-error={{ :log warning ("Billing SaaS: could not attach " . $billingLanName . " to customer bridge") }} }};
-            }}
-        }}
-    '''
-
 @csrf_exempt
 @api_view(["GET"])
 @tenant_required
@@ -4973,7 +4961,6 @@ def router_provision_script(request, token):
     pppoe_service_name = "Expressnet-pppoe"
     wireguard_name = "Expressnet-wireguard"
     radius_comment = "Expressnet radius"
-    lan_port_bootstrap_script = _router_lan_port_bootstrap_script(wan_interface)
 
     vpn_private_key_set = (
         f':do {{ /interface wireguard set [find name="{wireguard_name}"] private-key="{_rsc_escape(wg_router_private_key)}" }} on-error={{}}\n'
@@ -5372,7 +5359,7 @@ def router_provision_script(request, token):
         :do {{ /interface list member remove [find interface=$billingBridge] }} on-error={{}}
         :do {{ /interface list add name=EXPRESSNET-CUSTOMER comment="Expressnet customer-only interfaces" }} on-error={{}}
         :do {{ /interface list member add list=EXPRESSNET-CUSTOMER interface=$billingBridge comment="billing-saas customer bridge" }} on-error={{ /interface list member set [find interface=$billingBridge] list=EXPRESSNET-CUSTOMER comment="billing-saas customer bridge" }}
-        {lan_port_bootstrap_script}
+        :log info "Billing SaaS: customer ports are left unchanged during provisioning";
         # A factory-reset router already owns this gateway on its default
         # bridge.  On duplicate, move that item; setting its address field to
         # the same CIDR raises "already have such address" and stops /import.
