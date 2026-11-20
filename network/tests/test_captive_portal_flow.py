@@ -138,7 +138,7 @@ class CaptivePortalFlowTests(SimpleTestCase):
         self.assertIn("link_login=http%3A%2F%2F192.168.88.1%2Flogin", body)
         self.assertIn("window.location.replace", body)
 
-    def test_captive_payment_page_shows_direct_till_without_starting_daraja(self):
+    def test_captive_payment_page_does_not_render_legacy_manual_payment_details(self):
         request = self.factory.post(f"/api/captive/{self.tenant_id}/pay")
         provider_response = Response(
             {
@@ -160,13 +160,12 @@ class CaptivePortalFlowTests(SimpleTestCase):
             response = portal_views.captive_portal_pay(request, self.tenant_id)
 
         body = response.content.decode()
-        self.assertEqual(response.status_code, 201)
-        self.assertIn("M-Pesa Buy Goods till", body)
-        self.assertIn("123456", body)
-        self.assertIn("WIFI-PAYMENT1", body)
-        self.assertNotIn("Prompt sent. Check your phone", body)
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("M-Pesa Buy Goods till", body)
+        self.assertNotIn("123456", body)
+        self.assertNotIn("WIFI-PAYMENT1", body)
 
-    def test_direct_till_creates_pending_tenant_payment_without_daraja(self):
+    def test_legacy_direct_method_initiates_an_stk_push(self):
         class PaymentRef:
             key = "payment-1"
 
@@ -205,8 +204,10 @@ class CaptivePortalFlowTests(SimpleTestCase):
 
         request = self.factory.post(f"/api/public/{self.tenant_id}/pay")
         with patch.object(portal_views, "ref", side_effect=fake_ref), patch.object(
-            portal_views, "initiate_daraja_payment"
-        ) as daraja:
+            portal_views, "tenant_payment_collection_config", return_value={"id": self.tenant_id}
+        ), patch.object(
+            portal_views, "initiate_daraja_payment", return_value={"checkout_request_id": "checkout-1"}
+        ) as daraja, patch.object(portal_views, "list_children", return_value=[]):
             response = portal_views._public_pay_impl(request, self.tenant_id, data={
                 "package_id": "package-1",
                 "phone": "0700000000",
@@ -215,10 +216,9 @@ class CaptivePortalFlowTests(SimpleTestCase):
             })
 
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data["provider"], "manual_mpesa")
-        self.assertEqual(response.data["destination"], "123456")
+        self.assertEqual(response.data["provider"], "mpesa")
         self.assertEqual(payment.data["status"], "pending")
-        self.assertEqual(payment.data["collection_account"], "tenant_direct")
-        self.assertTrue(payment.data["manual_confirmation_required"])
-        self.assertEqual(payment.updates["manual_payment_reference"], "WIFI-AYMENT-1")
-        daraja.assert_not_called()
+        self.assertEqual(payment.data["collection_account"], "platform_daraja")
+        self.assertEqual(payment.data["payment_method"], "daraja_paybill")
+        self.assertEqual(payment.updates["daraja_checkout_request_id"], "checkout-1")
+        daraja.assert_called_once()
