@@ -240,3 +240,55 @@ class CaptivePortalFlowTests(SimpleTestCase):
         self.assertIn('name="Expressnet-pppoe-pppoe-user"', script)
         self.assertIn('target="172.30.10.20/32"', script)
         self.assertIn('max-limit="10M/10M"', script)
+        self.assertIn('in-interface-list=all-ppp', script)
+        self.assertIn('src-address=172.30.0.0/16', script)
+        self.assertIn('src-address=172.30.0.0/16 action=masquerade', script)
+
+    def test_agent_pppoe_customer_without_an_assigned_ip_gets_a_stable_queue_target(self):
+        customer = {
+            "username": "dynamic-pppoe-user",
+            "password": "secret",
+            "package": "10 Mbps",
+            "service_type": "pppoe",
+            "speed": "10M/10M",
+            "status": "active",
+        }
+        queue_address = portal_views.pppoe_simple_queue_address(customer)
+        script = portal_views._customer_secret_script(customer)
+
+        self.assertTrue(queue_address.startswith("172.31."))
+        self.assertEqual(queue_address, portal_views.pppoe_simple_queue_address(customer))
+        self.assertIn(f'remote-address="{queue_address}"', script)
+        self.assertIn(f'target="{queue_address}/32"', script)
+        self.assertIn('name="Expressnet-pppoe-dynamic-pppoe-user"', script)
+
+    def test_agent_static_customer_gets_a_package_simple_queue(self):
+        script = portal_views._customer_secret_script({
+            "username": "static-user",
+            "service_type": "static",
+            "ip_address": "172.30.10.10",
+            "speed": "5M/5M",
+            "status": "active",
+        })
+
+        self.assertIn('name="Expressnet-static-172.30.10.10"', script)
+        self.assertIn('target="172.30.10.10/32"', script)
+        self.assertIn('max-limit="5M/5M"', script)
+
+    def test_agent_port_script_restores_customer_service_forwarding(self):
+        script = portal_views._build_agent_port_assignment_script(
+            ["ether2"],
+            "Expressnet-bridge",
+            service_type="pppoe",
+        )
+
+        self.assertIn('in-interface-list=all-ppp', script)
+        self.assertIn('src-address=172.30.0.0/16', script)
+        self.assertIn('src-address=172.30.0.0/16 action=masquerade', script)
+
+    def test_portal_background_is_a_single_cover_layer_on_mobile(self):
+        page = portal_views._html_page("Portal", "<main>test</main>").content.decode()
+
+        self.assertIn("min-height:100dvh", page)
+        self.assertIn("background-size:cover", page)
+        self.assertIn("background-repeat:no-repeat", page)

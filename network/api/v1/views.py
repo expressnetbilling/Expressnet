@@ -86,6 +86,7 @@ from billing_api.services import (
     routeros_duration,
     package_service_type,
     PaymentProviderError,
+    pppoe_simple_queue_address,
     ref,
     _rsc_escape,
     _get_jwt_secret,
@@ -668,7 +669,8 @@ def _html_page(title, body, status=200):
   <title>{html.escape(title)}</title>
   <style>
     *{{box-sizing:border-box}}
-    body{{margin:0;font-family:"Inter","Segoe UI",Roboto,Arial,sans-serif;background:radial-gradient(circle at 50% -10%,#152233 0,#06101a 46%,#02080e 100%);color:#fff;line-height:1.25;overflow-x:hidden;font-weight:400;letter-spacing:0}}
+    html,body{{min-height:100%;background:#02080e}}
+    body{{min-height:100dvh;margin:0;font-family:"Inter","Segoe UI",Roboto,Arial,sans-serif;background:radial-gradient(circle at 50% -10%,#152233 0,#06101a 46%,#02080e 100%);background-size:cover;background-position:center;background-repeat:no-repeat;background-attachment:scroll;color:#fff;line-height:1.25;overflow-x:hidden;font-weight:400;letter-spacing:0}}
     header{{position:relative;overflow:hidden;width:min(100% - 24px,760px);margin:8px auto 0;background:linear-gradient(135deg,#ff7800 0%,#ff8a00 48%,#ff7000 100%);color:white;padding:16px 18px 18px;border-radius:8px;text-align:center;box-shadow:0 16px 34px rgba(255,120,0,.20)}}
     header:before{{content:"";position:absolute;left:-6%;right:-6%;bottom:-44px;height:104px;background:radial-gradient(ellipse at 20% 10%,rgba(255,224,120,.20),transparent 55%);transform:rotate(8deg);pointer-events:none}}
     header:after{{content:"";position:absolute;right:-20px;top:16px;width:154px;height:154px;border-radius:50%;background:repeating-radial-gradient(circle at 50% 50%,transparent 0 20px,rgba(255,184,62,.24) 22px 34px,transparent 36px 52px);opacity:.65;pointer-events:none}}
@@ -1132,7 +1134,7 @@ def captive_portal_page(request, tenant_id):
                 <strong>Waiting for {provider_label} confirmation.</strong>
                 <p class="muted">If you have paid, keep this page open. We will show your username, password, and expiry time once confirmation arrives.</p>
               </div>
-              <script>setTimeout(function(){{window.location.replace('{retry_url}');}}, 2500);</script>
+              <script>setTimeout(function(){{window.location.replace('{retry_url}');}}, 1500);</script>
             """
 
     packages = sorted(_captive_packages(tenant_id), key=lambda item: float(item.get("price") or 0))
@@ -1560,7 +1562,7 @@ def captive_portal_pay(request, tenant_id):
                 <strong>Prompt sent. Check your phone and enter your M-Pesa PIN.</strong>
                 <p class="muted">Waiting for {provider_label} to confirm your payment. This page will connect your device automatically when payment is confirmed.</p>
               </div>
-              <script>setTimeout(function(){{window.location.replace('{refresh_url}');}}, 2500);</script>
+              <script>setTimeout(function(){{window.location.replace('{refresh_url}');}}, 1500);</script>
             </main>
             """,
             201,
@@ -2885,15 +2887,21 @@ def _agent_hotspot_redirect_setup(portal_url, bridge_name=""):
 
 
 def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
-    """Queue a periodic self-heal for already-assigned agent Hotspot ports."""
+    """Queue a safe periodic repair for agent-managed customer ports."""
     assignments = (tenant or {}).get("router_port_assignments") or {}
     interfaces = [
         str(name)
         for name, assignment in assignments.items()
         if isinstance(assignment, dict)
-        and str(assignment.get("service_type") or "").lower() in {"hotspot", "both"}
+        and str(assignment.get("service_type") or "").lower() in {"pppoe", "hotspot", "both"}
         and str(assignment.get("status") or "").lower() == "applied"
     ]
+    hotspot_assigned = any(
+        isinstance(assignment, dict)
+        and str(assignment.get("service_type") or "").lower() in {"hotspot", "both"}
+        and str(assignment.get("status") or "").lower() == "applied"
+        for assignment in assignments.values()
+    )
     snapshot = ((tenant or {}).get("extra") or {}).get("mikrotik_router_snapshot") or {}
     snapshot_hotspots = (snapshot.get("hotspot_servers") if isinstance(snapshot, dict) else None) or []
     snapshot_bridge = next(
@@ -2931,9 +2939,9 @@ def _queue_agent_captive_portal_repair(tenant_id, tenant, base_url):
     script = _build_agent_port_assignment_script(
         interfaces,
         bridge,
-        service_type="hotspot",
+        service_type="hotspot" if hotspot_assigned or snapshot_bridge else "pppoe",
         tenant=tenant,
-        portal_url=portal_url,
+        portal_url=portal_url if hotspot_assigned or snapshot_bridge else "",
         repair=True,
     )
     if not script:
@@ -2975,6 +2983,17 @@ def _build_agent_port_assignment_script(interface_names, bridge_name, service_ty
         # Upgrade existing agents too; otherwise routers provisioned before
         # the 10-second interval would retain their old 30-second scheduler.
         f':do {{ /system scheduler set [find name="billing-saas-agent"] interval={_agent_poll_interval()} }} on-error={{}};',
+        # The customer bridge stays outside the operator LAN list.  Explicit
+        # forwarding for PPP sessions and fixed-IP subscribers is therefore
+        # required on routers using the stock defconf firewall.
+        ':do { /ip firewall filter remove [find comment="billing-saas allow pppoe internet"] } on-error={};',
+        ':do { /ip firewall filter add chain=forward action=accept in-interface-list=all-ppp comment="billing-saas allow pppoe internet" } on-error={};',
+        ':do { /ip firewall filter remove [find comment="billing-saas allow static internet"] } on-error={};',
+        ':do { /ip firewall filter add chain=forward action=accept src-address=172.30.0.0/16 comment="billing-saas allow static internet" } on-error={};',
+        ':do { /ip firewall nat remove [find comment="billing-saas static masquerade"] } on-error={};',
+        ':do { /ip firewall nat add chain=srcnat src-address=172.30.0.0/16 action=masquerade comment="billing-saas static masquerade" } on-error={};',
+        ':do { /ip firewall nat remove [find comment="billing-saas pppoe masquerade"] } on-error={};',
+        ':do { /ip firewall nat add chain=srcnat src-address=172.31.0.0/16 action=masquerade comment="billing-saas pppoe masquerade" } on-error={};',
     ]
     hotspot_requested = str(service_type or "").lower() in {"hotspot", "both"}
     tenant = tenant or {}
@@ -3265,6 +3284,14 @@ def _customer_secret_script(customer):
         ':do { /ip firewall filter remove [find comment="billing-saas customer queue bypass fasttrack dst"] } on-error={};'
         ':do { /ip firewall filter add chain=forward action=accept connection-state=established,related src-address-list=Expressnet-bandwidth-clients place-before=[find action=fasttrack-connection] comment="billing-saas customer queue bypass fasttrack src" } on-error={};'
         ':do { /ip firewall filter add chain=forward action=accept connection-state=established,related dst-address-list=Expressnet-bandwidth-clients place-before=[find action=fasttrack-connection] comment="billing-saas customer queue bypass fasttrack dst" } on-error={};'
+        ':do { /ip firewall filter remove [find comment="billing-saas allow pppoe internet"] } on-error={};'
+        ':do { /ip firewall filter add chain=forward action=accept in-interface-list=all-ppp comment="billing-saas allow pppoe internet" } on-error={};'
+        ':do { /ip firewall filter remove [find comment="billing-saas allow static internet"] } on-error={};'
+        ':do { /ip firewall filter add chain=forward action=accept src-address=172.30.0.0/16 comment="billing-saas allow static internet" } on-error={};'
+        ':do { /ip firewall nat remove [find comment="billing-saas static masquerade"] } on-error={};'
+        ':do { /ip firewall nat add chain=srcnat src-address=172.30.0.0/16 action=masquerade comment="billing-saas static masquerade" } on-error={};'
+        ':do { /ip firewall nat remove [find comment="billing-saas pppoe masquerade"] } on-error={};'
+        ':do { /ip firewall nat add chain=srcnat src-address=172.31.0.0/16 action=masquerade comment="billing-saas pppoe masquerade" } on-error={};'
     )
     static_setup_script = ""
     if service_type == "static":
@@ -3395,7 +3422,7 @@ def _customer_secret_script(customer):
         pppoe_remote_address = ""
         pppoe_queue_lines = []
         try:
-            pppoe_address = ipaddress.ip_address(str(customer.get("ip_address") or "").strip())
+            pppoe_address = ipaddress.ip_address(pppoe_simple_queue_address(customer))
             if pppoe_address.version == 4 and not pppoe_address.is_unspecified and not pppoe_address.is_multicast:
                 pppoe_remote_address = f' remote-address="{_rsc_escape(pppoe_address)}"'
                 pppoe_queue_name = _rsc_escape(f"Expressnet-pppoe-{raw_username}"[:120])
@@ -5021,14 +5048,22 @@ def router_provision_script(request, token):
         else ""
     )
     radius_add_script = (
-        f':if ([:len $billingRadSecCert] > 0) do={{ :do {{ /radius add service=ppp,hotspot address="{_rsc_escape(radius_config["server_ip"])}" secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s{radius_client_fields} comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: RadSec setup failed; continuing with local customer access" }} }}'
+        # Keep a last known-good client in place while refreshing its
+        # certificate. The old remove-then-add flow left /radius empty after
+        # any transient certificate download/import failure.
+        f''':if ([:len $billingRadSecCert] > 0) do={{
+            :do {{ /radius add service=ppp,hotspot address="{_rsc_escape(radius_config["server_ip"])}" secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s{radius_client_fields} comment="{radius_comment}" }} on-error={{}};
+            :do {{ /radius set [find comment="{radius_comment}"] service=ppp,hotspot address="{_rsc_escape(radius_config["server_ip"])}" secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s{radius_client_fields} comment="{radius_comment}" }} on-error={{}};
+            :if ([:len [/radius find comment="{radius_comment}"]] = 0) do={{ :log error "Expressnet: RadSec client could not be created or updated" }};
+        }} else={{ :log error "Expressnet: RadSec client certificate is missing; /radius was left unchanged" }}'''
         if radius_config.get("transport") == "radsec"
-        else f':do {{ /radius add service=ppp,hotspot address="{_rsc_escape(radius_config["server_ip"])}" secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s comment="{radius_comment}" }} on-error={{ :log warning "Expressnet: RADIUS setup failed; continuing with local customer access" }}'
+        else f''':do {{ /radius add service=ppp,hotspot address="{_rsc_escape(radius_config["server_ip"])}" secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s comment="{radius_comment}" }} on-error={{}};
+        :do {{ /radius set [find comment="{radius_comment}"] service=ppp,hotspot address="{_rsc_escape(radius_config["server_ip"])}" secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s comment="{radius_comment}" }} on-error={{}};
+        :if ([:len [/radius find comment="{radius_comment}"]] = 0) do={{ :log error "Expressnet: RADIUS client could not be created or updated" }};'''
     )
     radius_script = f"""
         :log info "Expressnet: configuring RADIUS client for Hotspot and PPPoE";
         {radsec_certificate_script}
-        :do {{ /radius remove [find comment="{radius_comment}"] }} on-error={{}}
         {radius_add_script}
         :if ([:len [/radius find comment="{radius_comment}"]] = 0) do={{
             :set billingRadiusFlag "no";
@@ -5045,13 +5080,14 @@ def router_provision_script(request, token):
         }};
         """
     if not radius_enabled_for_router:
-        radius_script = """
-        :log info "Billing SaaS: RADIUS server IP unavailable; using local Hotspot users synced by cloud agent";
-        :do { /radius remove [find comment="Expressnet radius"] } on-error={}
-        /ppp aaa set use-radius=no accounting=no;
-        :do { /ip hotspot profile set [find name="Expressnet-profile"] use-radius=no } on-error={}
-        :do { /ip firewall filter remove [find comment="billing-saas allow radius"] } on-error={}
-        """
+        radius_script = (
+            f':log error "Billing SaaS: RadSec client was not configured: {_rsc_escape(radius_config.get("disabled_reason") or "missing RadSec settings")}";\n'
+            ':log info "Billing SaaS: using local Hotspot users synced by cloud agent";\n'
+            ':do { /radius remove [find comment="Expressnet radius"] } on-error={}\n'
+            '/ppp aaa set use-radius=no accounting=no;\n'
+            ':do { /ip hotspot profile set [find name="Expressnet-profile"] use-radius=no } on-error={}\n'
+            ':do { /ip firewall filter remove [find comment="billing-saas allow radius"] } on-error={}\n'
+        )
     hotspot_radius_flags = "yes" if radius_enabled_for_router else "no"
     api_vpn_firewall_script = (
         f':do {{ /ip firewall filter remove [find comment="Expressnet allow api over vpn only"] }} on-error={{}}\n'

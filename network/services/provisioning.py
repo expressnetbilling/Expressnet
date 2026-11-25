@@ -136,6 +136,29 @@ def normalize_rate_limit(speed):
     return f"{side}/{side}" if side else None
 
 
+def pppoe_simple_queue_address(customer):
+    """Return the fixed tunnel address used to shape a PPPoE account.
+
+    A simple queue needs an address target. PPPoE customers that previously
+    used a dynamic address from the shared Hotspot pool had no reliable
+    per-customer queue, so accounts without an explicit IPv4 address receive
+    a stable address in the dedicated 172.31.0.0/16 PPPoE range.
+    """
+    raw_address = str((customer or {}).get("ip_address") or "").strip()
+    try:
+        address = ipaddress.ip_address(raw_address)
+        if address.version == 4 and not address.is_unspecified and not address.is_multicast:
+            return str(address)
+    except ValueError:
+        pass
+
+    username = str((customer or {}).get("username") or "").strip().casefold()
+    if not username:
+        return ""
+    host = int.from_bytes(hashlib.sha256(username.encode("utf-8")).digest()[:4], "big") % 65534 + 1
+    return str(ipaddress.IPv4Address(int(ipaddress.IPv4Address("172.31.0.0")) + host))
+
+
 def routeros_duration(value):
     """Format seconds/timedelta as a RouterOS duration such as 6h or 30d."""
     if value in {None, ""}:
@@ -522,6 +545,48 @@ def ensure_rate_limit_fasttrack_exemptions(api):
             "comment": comment,
             "place-before": fasttrack,
         })
+
+
+def ensure_customer_service_forwarding(api):
+    """Keep PPPoE and static-IP customer traffic routable outside the LAN list.
+
+    Customer ports are intentionally removed from the router's management LAN
+    list. That protects the router, but the default firewall no longer
+    guarantees forwarding for the dynamic ``all-ppp`` interface list or a
+    static subscriber subnet. The latter can also be assigned to a fixed-IP
+    PPPoE secret, so it needs its own source NAT rule. Router input remains
+    isolated.
+    """
+    firewall = api.path("ip", "firewall", "filter")
+    rules = (
+        (
+            {"chain": "forward", "comment": "billing-saas allow pppoe internet"},
+            {"chain": "forward", "action": "accept", "in-interface-list": "all-ppp", "comment": "billing-saas allow pppoe internet"},
+        ),
+        (
+            {"chain": "forward", "comment": "billing-saas allow static internet"},
+            {"chain": "forward", "action": "accept", "src-address": "172.30.0.0/16", "comment": "billing-saas allow static internet"},
+        ),
+    )
+    for match_fields, fields in rules:
+        existing = find_router_item_by_fields(api, ("ip", "firewall", "filter"), match_fields)
+        if existing and existing.get(".id"):
+            firewall.update(**{".id": existing[".id"], **fields})
+        else:
+            firewall.add(**fields)
+
+    upsert_router_item(
+        api,
+        ("ip", "firewall", "nat"),
+        {"chain": "srcnat", "src-address": "172.30.0.0/16", "comment": "billing-saas static masquerade"},
+        {"chain": "srcnat", "src-address": "172.30.0.0/16", "action": "masquerade", "comment": "billing-saas static masquerade"},
+    )
+    upsert_router_item(
+        api,
+        ("ip", "firewall", "nat"),
+        {"chain": "srcnat", "src-address": "172.31.0.0/16", "comment": "billing-saas pppoe masquerade"},
+        {"chain": "srcnat", "src-address": "172.31.0.0/16", "action": "masquerade", "comment": "billing-saas pppoe masquerade"},
+    )
 
 
 def package_service_type(package):
@@ -1647,6 +1712,13 @@ def _isolate_customer_bridge_from_router_management(api, bridge_name):
     add_customer_rule(chain="input", action="drop", **{"in-interface": bridge_name, "comment": "billing-saas block customer router access"})
 
     try:
+        ensure_customer_service_forwarding(api)
+    except Exception as exc:
+        warning = f"customer service forwarding: {exc}"
+        warnings.append(warning)
+        logger.warning("Router customer forwarding warning bridge=%s error=%s", bridge_name, exc)
+
+    try:
         api.path("tool", "mac-server").update(**{"allowed-interface-list": "LAN"})
         api.path("tool", "mac-server", "mac-winbox").update(**{"allowed-interface-list": "LAN"})
     except Exception as exc:
@@ -1826,6 +1898,7 @@ def upsert_customer_access(tenant, customer, disabled=False):
     api = router_connect(tenant)
     try:
         ensure_rate_limit_fasttrack_exemptions(api)
+        ensure_customer_service_forwarding(api)
         if service_type == "hotspot":
             # A previous RADIUS deployment can leave the active Expressnet
             # profile set to use-radius=yes.  Ensure that a payment always
@@ -1972,7 +2045,11 @@ def upsert_customer_access(tenant, customer, disabled=False):
         }
         if service_type in {"pppoe", "static"}:
             fields["service"] = "pppoe"
-            if service_type in {"pppoe", "static"} and customer.get("ip_address"):
+            if service_type == "pppoe":
+                remote_address = pppoe_simple_queue_address(customer)
+                if remote_address:
+                    fields["remote-address"] = remote_address
+            elif customer.get("ip_address"):
                 fields["remote-address"] = customer["ip_address"]
         else:
             if customer.get("ip_address"):
@@ -2076,12 +2153,7 @@ def router_customer_access_ready(tenant, customer):
 
 
 def _upsert_pppoe_simple_queue(api, customer, disabled=False):
-    """Shape a fixed-IP PPPoE customer with a named simple queue.
-
-    PPP profiles retain their native rate-limit for pool addresses.  When a
-    customer has an assigned IPv4 address, this queue applies the same package
-    cap at the queue layer and survives a reconnect.
-    """
+    """Shape every PPPoE account with a named simple queue."""
     username = str((customer or {}).get("username") or "").strip()
     queue_name = f"Expressnet-pppoe-{username}"[:120]
     address_comment = f"billing-saas pppoe bandwidth:{username}"[:250]
@@ -2099,7 +2171,7 @@ def _upsert_pppoe_simple_queue(api, customer, disabled=False):
             address_list_path.remove(address_item[".id"])
 
     try:
-        address = ipaddress.ip_address(str((customer or {}).get("ip_address") or "").strip())
+        address = ipaddress.ip_address(pppoe_simple_queue_address(customer))
     except ValueError:
         remove_existing()
         return None
