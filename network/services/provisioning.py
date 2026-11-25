@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import socket
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -101,6 +102,172 @@ def radius_client_enabled(tenant):
     platform_ca_ready = _radsec_platform_pki_ready()
     configured = transport == "radsec" and bool(radsec_host and platform_ca_ready)
     return configured and bool(_tenant_value(tenant, "radius_enabled", True))
+
+
+# This is also the tag used by the bootstrap script.  Keeping one tag across
+# direct API and agent provisioning prevents two competing /radius entries.
+RADIUS_CLIENT_COMMENT = "Expressnet radius"
+
+
+def _radius_client_settings(tenant):
+    """Collect the values needed to create the router's RADIUS client entry."""
+    host = str(_tenant_router_option(tenant, "radius_radsec_host", _radsec_public_host()) or "").strip()
+    try:
+        port = int(_tenant_router_option(tenant, "radius_radsec_port", os.getenv("RADIUS_RADSEC_PORT", 2083)) or 2083)
+    except (TypeError, ValueError):
+        port = 2083
+    services = str(_tenant_router_option(tenant, "radius_services", "hotspot,ppp") or "hotspot,ppp").strip()
+    # RouterOS' RadSec default shared secret is the literal string "radsec".
+    secret = str(_tenant_router_option(tenant, "radius_secret", os.getenv("RADIUS_RADSEC_SECRET", "radsec")) or "radsec")
+    # Full router provisioning imports a uniquely named client certificate.
+    # An optional explicit name can be supplied for installations that manage
+    # their own PKI; otherwise it is discovered by its Expressnet CN below.
+    certificate = str(
+        _tenant_router_option(tenant, "radius_client_certificate", os.getenv("RADIUS_CLIENT_CERTIFICATE", ""))
+        or ""
+    ).strip()
+    return {
+        "host": host,
+        "port": port,
+        "services": services,
+        "secret": secret,
+        "certificate": certificate,
+        "coa_port": 3799,
+    }
+
+
+def ensure_radius_client(api, tenant):
+    """Create or update the RouterOS ``/radius`` client entry (RadSec).
+
+    Setting ``use-radius=yes`` on a Hotspot profile does nothing useful
+    unless the router has a RADIUS client entry to send requests to. This is
+    idempotent: an existing entry tagged with ``RADIUS_CLIENT_COMMENT`` is
+    updated, otherwise a new one is added. Incoming CoA/Disconnect is also
+    enabled so ``radius_disconnect_customer`` can reach the router.
+    """
+    config = _radius_client_settings(tenant)
+    if not config["host"]:
+        raise RouterOSAPIError("RADIUS client not created: no public RadSec host is configured")
+    try:
+        radius_address = socket.gethostbyname(config["host"])
+    except OSError as exc:
+        raise RouterOSAPIError(
+            f"RADIUS client not created: could not resolve RadSec host {config['host']}"
+        ) from exc
+
+    fields = {
+        "service": config["services"],
+        # RouterOS rejects a DNS name here; it needs an IPv4/IPv6 literal.
+        "address": radius_address,
+        "protocol": "radsec",
+        "secret": config["secret"],
+        "authentication-port": str(config["port"]),
+        "accounting-port": str(config["port"]),
+        "timeout": "3s",
+        "comment": RADIUS_CLIENT_COMMENT,
+        "disabled": "no",
+    }
+
+    # RadSec requires the private client key.  The provisioning command gives
+    # each router a certificate whose CN starts ``expressnet-radsec-``; its
+    # RouterOS import name is deliberately not fixed, so find it by CN rather
+    # than assuming a name which does not exist.  Never create a half-configured
+    # RadSec entry without this certificate: local Hotspot authentication is a
+    # safe fallback until the bootstrap command imports it.
+    try:
+        certificates = list(api.path("certificate").select(
+            proplist=(".id", "name", "common-name", "private-key")
+        ))
+    except Exception as exc:
+        raise RouterOSAPIError("RADIUS client not created: could not inspect router certificates") from exc
+    certificate_name = ""
+    for certificate in certificates:
+        name = str(certificate.get("name") or "")
+        common_name = str(certificate.get("common-name") or "")
+        has_private_key = str(certificate.get("private-key") or "").lower() in {"true", "yes"}
+        if not has_private_key:
+            continue
+        if config["certificate"] and name == config["certificate"]:
+            certificate_name = name
+            break
+        if not config["certificate"] and common_name.startswith("expressnet-radsec-"):
+            certificate_name = name
+            break
+    if not certificate_name:
+        raise RouterOSAPIError(
+            "RADIUS client not created: the Expressnet RadSec client certificate is not imported"
+        )
+    fields["certificate"] = certificate_name
+
+    # Remove only the obsolete tag emitted by older agent versions.  Leaving
+    # both records active makes RouterOS send duplicate authentication requests.
+    try:
+        legacy_clients = api.path("radius").select(proplist=(".id", "comment"))
+        for client in legacy_clients:
+            if client.get("comment") == "billing-saas radius" and client.get(".id"):
+                api.path("radius").remove(client[".id"])
+    except Exception as exc:
+        logger.warning("Could not remove legacy RADIUS client tenant=%s: %s", _tenant_value(tenant, "id"), exc)
+
+    result = upsert_router_item(api, ("radius",), {"comment": RADIUS_CLIENT_COMMENT}, fields)
+
+    # CoA / Disconnect-Request support (used by set_customer_enabled).
+    try:
+        api.command("/radius/incoming/set", {"accept": "yes", "port": str(config["coa_port"])})
+    except Exception as exc:
+        logger.warning("Could not enable RADIUS incoming CoA tenant=%s: %s", _tenant_value(tenant, "id"), exc)
+    return result
+
+
+def _radius_client_script(tenant):
+    """RouterOS script fragment that creates the RADIUS client entry."""
+    config = _radius_client_settings(tenant)
+    if not config["host"]:
+        return ""
+    host = _rsc_escape(config["host"])
+    secret = _rsc_escape(config["secret"])
+    services = _rsc_escape(config["services"])
+    port = int(config["port"])
+    comment = _rsc_escape(RADIUS_CLIENT_COMMENT)
+    legacy_comment = "billing-saas radius"
+    base = (
+        f'service={services} address=$billingRadiusAddress protocol=radsec secret="{secret}" '
+        f'authentication-port={port} accounting-port={port} timeout=3s comment="{comment}" disabled=no'
+    )
+    script = (
+        ':local billingRadiusReady no; '
+        ':local billingRadSecCert ""; '
+        f':do {{ /radius remove [find comment="{legacy_comment}"] }} on-error={{}}; '
+    )
+    if config["certificate"]:
+        certificate = _rsc_escape(config["certificate"])
+        script += (
+            f':if ([:len [/certificate find name="{certificate}" private-key=yes]] > 0) do={{ '
+            f':set billingRadSecCert "{certificate}" '
+            '}; '
+        )
+    else:
+        script += (
+            ':foreach billingClientCert in=[/certificate find] do={ '
+            ':local billingClientCn ""; '
+            ':do { :set billingClientCn [/certificate get $billingClientCert common-name] } on-error={}; '
+            ':if (([:find $billingClientCn "expressnet-radsec-"] = 0) && [/certificate get $billingClientCert private-key]) do={ '
+            ':set billingRadSecCert [/certificate get $billingClientCert name] '
+            '} }; '
+        )
+    script += (
+        f':local billingRadiusAddress ""; '
+        f':do {{ :set billingRadiusAddress [:resolve "{host}"] }} on-error={{ :log warning "Expressnet: RadSec endpoint DNS resolution failed" }}; '
+        ':if (([:len $billingRadiusAddress] > 0) && ([:len $billingRadSecCert] > 0)) do={ '
+        f':do {{ /radius add {base} certificate=$billingRadSecCert }} on-error={{}}; '
+        f':do {{ /radius set [find comment="{comment}"] {base} certificate=$billingRadSecCert }} on-error={{ :log warning "Expressnet: failed to update RadSec client" }}; '
+        f':if ([:len [/radius find comment="{comment}"]] > 0) do={{ :set billingRadiusReady yes }} else={{ :log warning "Expressnet: RadSec client was not created" }} '
+        '} else={ :log warning "Expressnet: RadSec certificate or endpoint address is unavailable; using local Hotspot authentication" }; '
+        ':if ($billingRadiusReady = "yes") do={ '
+        f':do {{ /radius incoming set accept=yes port={int(config["coa_port"])} }} on-error={{ :log warning "Expressnet: failed to enable RADIUS incoming" }} '
+        '}; '
+    )
+    return script
 
 
 def normalize_rate_limit(speed):
@@ -1079,6 +1246,23 @@ def ensure_hotspot_captive_portal(tenant, base_url=None, radius_enabled=None):
             api.command("/ip/dns/set", {"allow-remote-requests": "yes"})
         except Exception:
             pass
+        # The Hotspot profile below only talks to RADIUS if the router has a
+        # RADIUS client entry. Create it first so use-radius=yes is backed by
+        # a real /radius server. A failure here must not break the portal.
+        radius_client_error = None
+        if use_radius:
+            try:
+                ensure_radius_client(api, tenant)
+            except Exception as exc:
+                radius_client_error = str(exc)
+                # Do not leave Hotspot attempting a remote AAA server that
+                # could not be created. Local accounts keep captive login and
+                # paid-access activation working while RadSec is repaired.
+                use_radius = False
+                logger.warning(
+                    "RADIUS client setup failed tenant=%s error=%s",
+                    _tenant_value(tenant, "id"), exc,
+                )
         upsert_router_item(
             api,
             ("ip", "firewall", "nat"),
@@ -1183,16 +1367,52 @@ def ensure_hotspot_captive_portal(tenant, base_url=None, radius_enabled=None):
             login_page = ensure_hotspot_login_redirect(api, portal_url)
         except Exception:
             login_page = None
-        # A profile alone is not enough: the active Hotspot server must use
-        # it or RouterOS will keep serving its default login/no-internet page.
+        # A profile alone is not enough: an absent or disabled Hotspot server
+        # means clients receive neither the DNS interception nor login.html,
+        # so they simply time out instead of being redirected to the portal.
+        # Recreate the server on the managed customer bridge when necessary.
         try:
             hotspot_servers = api.path("ip", "hotspot").select()
+            managed_server = next(
+                (
+                    server for server in hotspot_servers
+                    if server.get("interface") == managed_bridge
+                    or server.get("name") == "Expressnet-hotspot"
+                ),
+                None,
+            )
+            server_fields = {
+                "name": "Expressnet-hotspot",
+                "interface": managed_bridge,
+                "address-pool": "Expressnet-pool",
+                "profile": profile_name,
+                "disabled": "no",
+                "comment": f"Expressnet captive portal: {portal_url}",
+            }
+            if managed_server and managed_server.get(".id"):
+                api.path("ip", "hotspot").update(**{".id": managed_server[".id"], **server_fields})
+            else:
+                api.path("ip", "hotspot").add(**server_fields)
             for server in hotspot_servers:
-                if server.get(".id"):
-                    api.path("ip", "hotspot").update(**{".id": server[".id"], "profile": profile_name, "disabled": "no"})
+                if (
+                    server.get(".id")
+                    and managed_server
+                    and server.get(".id") != managed_server.get(".id")
+                    and server.get("name") == "Expressnet-hotspot"
+                ):
+                    api.path("ip", "hotspot").update(**{".id": server[".id"], "disabled": "yes"})
         except Exception:
-            pass
-        return {"profile": profile_name, "portal_url": portal_url, "portal_host": portal_host, "login_page": login_page}
+            logger.exception(
+                "Could not ensure Hotspot server tenant=%s bridge=%s",
+                _tenant_value(tenant, "id"), managed_bridge,
+            )
+        result = {"profile": profile_name, "portal_url": portal_url, "portal_host": portal_host, "login_page": login_page}
+        if radius_client_error:
+            result["radius_client"] = "error"
+            result["radius_client_error"] = radius_client_error
+        elif use_radius:
+            result["radius_client"] = "ok"
+        return result
     finally:
         api.close()
 
@@ -1531,6 +1751,17 @@ def configure_router_port(tenant, interface_name, service_type, profile_name="de
             {"chain": "srcnat", "src-address": "192.168.88.0/24", "comment": "billing-saas hotspot masquerade"},
             {"chain": "srcnat", "src-address": "192.168.88.0/24", "action": "masquerade", "comment": "billing-saas hotspot masquerade"},
         ))
+        # Create the router's RADIUS client entry (RadSec) when RADIUS is
+        # enabled for this tenant. Without it, use-radius=yes on the Hotspot
+        # profile has no server to talk to.
+        radsec_ready = False
+        if radius_client_enabled(tenant):
+            # ``ensure_radius_client`` validates both the resolved endpoint
+            # and the imported private client certificate.  Only enable
+            # remote AAA below after that has actually succeeded.
+            radsec_ready = supporting_step(
+                "RADIUS client setup", lambda: ensure_radius_client(api, tenant)
+            ) is not None
         isolation_warnings = supporting_step(
             "customer bridge isolation",
             lambda: _isolate_customer_bridge_from_router_management(api, managed_bridge),
@@ -1592,7 +1823,7 @@ def configure_router_port(tenant, interface_name, service_type, profile_name="de
             api.path("interface", "pppoe-server", "server").add(**fields)
             return {"created": True, "service_type": service_type, "interface": interface_name, "bound_interface": bind_interface, "note": bridge_note}
 
-        captive = ensure_hotspot_captive_portal(tenant, base_url, radius_enabled=radius_client_enabled(tenant)) or {}
+        captive = ensure_hotspot_captive_portal(tenant, base_url, radius_enabled=radsec_ready) or {}
         _clear_bridge_port_pppoe_only(api, interface_name)
         hotspot_profile = captive.get("profile") or "Expressnet-profile"
         api.path("interface").update(**{".id": interface[".id"], "comment": f"billing-saas:hotspot:portal={captive.get('portal_url') or ''}".strip()})
@@ -1745,7 +1976,15 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
     lan_network = str(lan_config.get("lan_network") or "192.168.88.0/24")
     dhcp_pool = str(lan_config.get("dhcp_pool") or "192.168.88.2-192.168.88.254")
     wan_interface = _rsc_escape(wan_interface or "ether1")
-    radius_flag = "yes" if radius_enabled else "no"
+    # Create the RADIUS client entry on the router itself. The Hotspot profile
+    # below enables remote AAA only after this entry is confirmed.  The local
+    # variable also ensures an agent command with no imported client cert
+    # still brings up a working captive portal with local accounts.
+    radius_client_block = (
+        _radius_client_script(tenant)
+        if radius_enabled
+        else ':local billingRadiusReady no; '
+    )
     portal_comment = portal_url or ""
     portal_host = urlparse(portal_url or "").netloc.split("@")[-1].split(":")[0]
     company_ssid = _rsc_escape(str((tenant or {}).get("business_name") or "Expressnet")[:32])
@@ -1805,8 +2044,8 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=67,68 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot dhcp" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=udp dst-port=67,68 comment="billing-saas allow hotspot dhcp" }}; '
             f':do {{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=80,443,64872-64875 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow hotspot web-proxy" }} on-error={{ /ip firewall filter add chain=input action=accept in-interface="{_rsc_escape(bridge_name)}" protocol=tcp dst-port=80,443,64872-64875 comment="billing-saas allow hotspot web-proxy" }}; '
             f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{_rsc_escape(bridge_name)}" hotspot=auth comment="billing-saas allow hotspot internet" }} on-error={{}}; '
-            f':do {{ /ip hotspot profile add name="Expressnet-profile" hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius={radius_flag} radius-accounting={radius_flag} html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }} '
-            f'on-error={{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius={radius_flag} radius-accounting={radius_flag} html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }}; '
+            f':do {{ /ip hotspot profile add name="Expressnet-profile" hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius=$billingRadiusReady radius-accounting=$billingRadiusReady html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }} '
+            f'on-error={{ /ip hotspot profile set [find name="Expressnet-profile"] hotspot-address={_rsc_escape(lan_gateway)} dns-name=hot.spot login-by=cookie,http-pap,trial,mac-cookie use-radius=$billingRadiusReady radius-accounting=$billingRadiusReady html-directory=Expressnet-hotspot radius-interim-update=10m comment="Expressnet captive portal: {portal_comment}" }}; '
             f':do {{ /ip firewall nat remove [find comment="billing-saas hotspot masquerade"] }} on-error={{}}; '
             f':do {{ /ip firewall nat add chain=srcnat src-address={_rsc_escape(lan_network)} action=masquerade comment="billing-saas hotspot masquerade" }} on-error={{ :log warning "Billing SaaS: failed to add hotspot masquerade" }}; '
             + "".join(
@@ -1863,6 +2102,7 @@ def _build_port_command_script(interface_name, service_type, profile_name, porta
     return (
         f':do {{ /interface enable [find name="{interface_name}"] }} on-error={{ :log warning "Billing SaaS: failed to enable interface {interface_name}" }}; '
         f'{outbound_access_script}'
+        f'{radius_client_block}'
         # A newly discovered customer port is commonly not in any bridge yet.
         # RouterOS raises "no such item" for a bare remove in that case, which
         # aborts the agent command before it can acknowledge the assignment.
@@ -1900,9 +2140,19 @@ def upsert_customer_access(tenant, customer, disabled=False):
         ensure_rate_limit_fasttrack_exemptions(api)
         ensure_customer_service_forwarding(api)
         if service_type == "hotspot":
+            radius_client = find_router_item_by_fields(
+                api, ("radius",), {"comment": RADIUS_CLIENT_COMMENT}
+            )
+            use_local_hotspot_auth = not radius_client_enabled(tenant) or not radius_client
+        else:
+            use_local_hotspot_auth = False
+        if use_local_hotspot_auth:
             # A previous RADIUS deployment can leave the active Expressnet
-            # profile set to use-radius=yes.  Ensure that a payment always
-            # authenticates against the Hotspot user we create below.
+            # profile set to use-radius=yes.  When RADIUS is NOT enabled for
+            # this router, ensure that a payment always authenticates against
+            # the Hotspot user we create below.  When RADIUS is enabled the
+            # profile must keep use-radius=yes, otherwise the RADIUS client
+            # created by ensure_radius_client would never be used.
             servers = list(api.path("ip", "hotspot").select(proplist=("profile",)))
             profile_names = {"Expressnet-profile"}
             profile_names.update(str(server.get("profile") or "") for server in servers)
@@ -2604,4 +2854,3 @@ def delete_router_customer(tenant, username, service_type="pppoe"):
         return result
     finally:
         api.close()
-

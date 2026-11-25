@@ -34,6 +34,33 @@ class AgentPollIntervalTests(SimpleTestCase):
             self.assertEqual(_agent_poll_interval(), "2s")
         with override_settings(ROUTER_AGENT_POLL_SECONDS=999):
             self.assertEqual(_agent_poll_interval(), "60s")
+
+
+class AgentRadsecScriptTests(SimpleTestCase):
+    def test_radsec_client_uses_resolved_address_and_only_enables_remote_aaa_when_ready(self):
+        from network.services.provisioning import _build_port_command_script
+
+        script = _build_port_command_script(
+            "ether3",
+            "hotspot",
+            "default",
+            "https://portal.example/api/captive/tenant-1",
+            bridge_name="Expressnet-bridge",
+            tenant={
+                "business_name": "Example ISP",
+                "radius_radsec_host": "radius.example.org",
+            },
+            radius_enabled=True,
+        )
+
+        self.assertIn(':resolve "radius.example.org"', script)
+        self.assertIn("address=$billingRadiusAddress", script)
+        self.assertIn('comment="Expressnet radius"', script)
+        self.assertIn("expressnet-radsec-", script)
+        self.assertIn("use-radius=$billingRadiusReady", script)
+        self.assertNotIn("billing-saas-radsec", script)
+
+
 class CaptiveRepairScriptTests(SimpleTestCase):
     def _script(self, repair):
         from network.api.v1.views import _build_agent_port_assignment_script

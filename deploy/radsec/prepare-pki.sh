@@ -23,6 +23,19 @@ fi
 
 export RADIUS_RADSEC_HOST="$radsec_host"
 
+# RouterOS accepts only an IPv4/IPv6 literal in `/radius address`.  The
+# router resolves the public RadSec DNS name before it creates that client,
+# so include the current IPv4 address alongside the DNS name in the server
+# certificate SAN. This preserves TLS hostname validation on RouterOS while
+# still allowing a TCP-proxy domain to be used in deployment configuration.
+radsec_ip=""
+case "$radsec_host" in
+    *.*) if printf '%s' "$radsec_host" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then radsec_ip="$radsec_host"; fi ;;
+esac
+if [ -z "$radsec_ip" ]; then
+    radsec_ip="$(python -c 'import socket, sys; print(socket.gethostbyname(sys.argv[1]))' "$radsec_host" 2>/dev/null || true)"
+fi
+
 # A CA supplied through RADSEC_CA_CERT_PEM_B64 / RADSEC_CA_KEY_PEM_B64 wins over
 # the volume. Railway volumes cannot be shared between services, so when the
 # web service (which issues router client certificates) and this service are
@@ -54,17 +67,21 @@ fi
 # Regenerate only the public server leaf when its name changes. Router client
 # certificates remain valid because the persistent CA is not replaced.
 current_host="$(openssl x509 -in "$pki_dir/server.pem" -noout -ext subjectAltName 2>/dev/null || true)"
-if [ ! -s "$pki_dir/server.pem" ] || [ ! -s "$pki_dir/server-key.pem" ] || ! openssl verify -CAfile "$pki_dir/ca.pem" "$pki_dir/server.pem" >/dev/null 2>&1 || ! printf '%s' "$current_host" | grep -Fq "$radsec_host"; then
+if [ ! -s "$pki_dir/server.pem" ] || [ ! -s "$pki_dir/server-key.pem" ] || ! openssl verify -CAfile "$pki_dir/ca.pem" "$pki_dir/server.pem" >/dev/null 2>&1 || ! printf '%s' "$current_host" | grep -Fq "$radsec_host" || { [ -n "$radsec_ip" ] && ! printf '%s' "$current_host" | grep -Fq "$radsec_ip"; }; then
     san_type="DNS"
     case "$radsec_host" in
         *:*) san_type="IP" ;;
         *.*) if printf '%s' "$radsec_host" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then san_type="IP"; fi ;;
     esac
+    server_san="$san_type:$radsec_host"
+    if [ "$san_type" = "DNS" ] && [ -n "$radsec_ip" ]; then
+        server_san="$server_san,IP:$radsec_ip"
+    fi
     openssl req -newkey rsa:2048 -nodes -sha256 \
         -subj "/CN=$radsec_host" \
         -keyout "$pki_dir/server-key.pem" -out "$pki_dir/server.csr"
     extension_file="$pki_dir/server-extensions.cnf"
-    printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=%s:%s\n' "$san_type" "$radsec_host" > "$extension_file"
+    printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=%s\n' "$server_san" > "$extension_file"
     openssl x509 -req -sha256 -days 825 \
         -in "$pki_dir/server.csr" -CA "$pki_dir/ca.pem" -CAkey "$pki_dir/ca-key.pem" -CAcreateserial \
         -out "$pki_dir/server.pem" \
