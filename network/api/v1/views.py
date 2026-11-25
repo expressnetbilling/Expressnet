@@ -3280,6 +3280,10 @@ def _customer_secret_script(customer):
     # short and idempotent so an imported customer command remains parseable
     # on RouterOS 7 while static and fixed-IP PPPoE queues can take effect.
     fasttrack_script = (
+        # A failed RadSec setup must never strand a paid customer.  Agent
+        # syncs retain local credentials and explicitly return AAA to local
+        # users only when the managed RADIUS client is absent.
+        ':if ([:len [/radius find comment="Expressnet radius"]] = 0) do={ :do { /ppp aaa set use-radius=no accounting=no } on-error={}; :do { /ip hotspot profile set [find name="Expressnet-profile"] use-radius=no radius-accounting=no } on-error={}; };'
         ':do { /ip firewall filter remove [find comment="billing-saas customer queue bypass fasttrack src"] } on-error={};'
         ':do { /ip firewall filter remove [find comment="billing-saas customer queue bypass fasttrack dst"] } on-error={};'
         ':do { /ip firewall filter add chain=forward action=accept connection-state=established,related src-address-list=Expressnet-bandwidth-clients place-before=[find action=fasttrack-connection] comment="billing-saas customer queue bypass fasttrack src" } on-error={};'
@@ -5020,7 +5024,7 @@ def router_provision_script(request, token):
     radsec_certificate_script = ""
     if radius_enabled_for_router and radius_config.get("transport") == "radsec":
         radsec_certificate_script = f"""
-        :global billingRadSecCert "";
+        :local billingRadSecCert "";
         {dns_bootstrap_script}
         :do {{ /system ntp client set enabled=yes servers=pool.ntp.org }} on-error={{}};
         :local billingClockTries 0;
@@ -5033,8 +5037,10 @@ def router_provision_script(request, token):
         :foreach billingCa in=[/certificate find where common-name="{_rsc_escape(radsec_ca_common_name)}"] do={{ :do {{ /certificate set $billingCa trusted=yes }} on-error={{}} }};
         :do {{ /tool fetch check-certificate=no url="{_rsc_escape(radsec_bundle_url)}" dst-path="expressnet-radsec-client.p12" }} on-error={{ :log warning "Expressnet: RadSec client bundle download failed" }};
         :do {{ /certificate import file-name="expressnet-radsec-client.p12" passphrase="" }} on-error={{ :log warning "Expressnet: RadSec client bundle import failed" }};
-        :foreach billingClientCert in=[/certificate find where common-name="{_rsc_escape(radsec_common_name)}"] do={{
-            :if ([/certificate get $billingClientCert private-key]) do={{
+        :foreach billingClientCert in=[/certificate find] do={{
+            :local billingClientCn "";
+            :do {{ :set billingClientCn [/certificate get $billingClientCert common-name] }} on-error={{}};
+            :if (($billingClientCn = "{_rsc_escape(radsec_common_name)}") && [/certificate get $billingClientCert private-key]) do={{
                 :set billingRadSecCert [/certificate get $billingClientCert name];
                 :do {{ /certificate set $billingClientCert trusted=yes }} on-error={{}};
             }}
@@ -5075,6 +5081,7 @@ def router_provision_script(request, token):
             :do {{ /radius incoming set accept=yes port=1700 }} on-error={{ :log warning "Expressnet: RADIUS incoming setup failed" }}
             /ppp aaa set use-radius=yes interim-update=1h;
             :log info "Expressnet: RadSec client configured";
+            :put ("Expressnet RadSec client created: " . [:len [/radius find comment="{radius_comment}"]]);
             :delay 3s;
             :do {{ :local billingRadSecConn [:len [/ip firewall connection find where protocol=tcp dst-address~":{_rsc_escape(radius_config["auth_port"])}\\$"]]; :if ($billingRadSecConn > 0) do={{ :log info "Expressnet: RadSec TLS session to cloud established" }} else={{ :log warning "Expressnet: RadSec session not yet open; it connects on first customer login" }} }} on-error={{}}
         }};

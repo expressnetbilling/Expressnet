@@ -240,6 +240,8 @@ class CaptivePortalFlowTests(SimpleTestCase):
         self.assertIn('name="Expressnet-pppoe-pppoe-user"', script)
         self.assertIn('target="172.30.10.20/32"', script)
         self.assertIn('max-limit="10M/10M"', script)
+        self.assertIn('/radius find comment="Expressnet radius"', script)
+        self.assertIn('/ppp aaa set use-radius=no accounting=no', script)
         self.assertIn('in-interface-list=all-ppp', script)
         self.assertIn('src-address=172.30.0.0/16', script)
         self.assertIn('src-address=172.30.0.0/16 action=masquerade', script)
