@@ -65,7 +65,9 @@ API_GATEWAY_RATE_WINDOW = int(os.getenv("API_GATEWAY_RATE_WINDOW", "60"))
 SESSION_IDLE_TIMEOUT_SECONDS = int(os.getenv("SESSION_IDLE_TIMEOUT_SECONDS", "600"))
 TENANT_AUTH_CACHE_SECONDS = int(os.getenv("TENANT_AUTH_CACHE_SECONDS", "5"))
 ROUTER_STATUS_CACHE_SECONDS = int(os.getenv("ROUTER_STATUS_CACHE_SECONDS", "4"))
-ROUTER_AGENT_POLL_SECONDS = int(os.getenv("ROUTER_AGENT_POLL_SECONDS", "5"))
+# The agent delivers paid Hotspot authorization commands.  Two seconds keeps
+# the post-M-Pesa wait short while still avoiding a continuous router poll.
+ROUTER_AGENT_POLL_SECONDS = int(os.getenv("ROUTER_AGENT_POLL_SECONDS", "2"))
 ROUTER_AGENT_HEARTBEAT_SECONDS = int(os.getenv("ROUTER_AGENT_HEARTBEAT_SECONDS", "60"))
 TENANT_EMAIL_VERIFICATION_REQUIRED = env_bool("TENANT_EMAIL_VERIFICATION_REQUIRED", False)
 

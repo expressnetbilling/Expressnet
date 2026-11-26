@@ -26,14 +26,25 @@ class AgentPollIntervalTests(SimpleTestCase):
         from django.test import override_settings
         from network.api.v1.views import _agent_poll_interval
 
+        with override_settings(ROUTER_AGENT_POLL_SECONDS=2):
+            self.assertEqual(_agent_poll_interval(), "2s")
         with override_settings(ROUTER_AGENT_POLL_SECONDS=5):
             self.assertEqual(_agent_poll_interval(), "5s")
         with override_settings(ROUTER_AGENT_POLL_SECONDS=0):
-            self.assertEqual(_agent_poll_interval(), "5s")
+            self.assertEqual(_agent_poll_interval(), "2s")
         with override_settings(ROUTER_AGENT_POLL_SECONDS=1):
             self.assertEqual(_agent_poll_interval(), "2s")
         with override_settings(ROUTER_AGENT_POLL_SECONDS=999):
             self.assertEqual(_agent_poll_interval(), "60s")
+
+
+class SubscriberPasswordTests(SimpleTestCase):
+    def test_pppoe_generated_password_can_be_short_and_readable(self):
+        from management.api.v1.views import _generate_customer_password
+
+        password = _generate_customer_password(6)
+        self.assertEqual(len(password), 6)
+        self.assertRegex(password, r"^[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789]+$")
 
 
 class AgentRadsecScriptTests(SimpleTestCase):

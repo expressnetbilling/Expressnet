@@ -581,7 +581,7 @@ def public_packages(request, tenant_id):
         return ok({"message": "Tenant is not accepting payments"}, 403)
     requested_service = str(request.GET.get("service_type") or "").strip().lower()
     packages = _public_packages_for_tenant(tenant_id, requested_service)
-    if requested_service in {"hotspot", "pppoe", "tv"} and not packages:
+    if requested_service in {"hotspot", "pppoe", "static", "tv"} and not packages:
         packages = _public_packages_for_tenant(tenant_id)
     return ok(sorted(packages, key=lambda item: float(item.get("price") or 0)))
 
@@ -626,8 +626,10 @@ def _public_packages_for_tenant(tenant_id, requested_service=""):
         _public_package_payload(pkg)
         for pkg in list_children(f"tenants/{tenant_id}/packages")
         if pkg.get("is_active") is not False
-        and package_service_type(pkg) != "static"
-        and (requested_service not in {"hotspot", "pppoe"} or package_service_type(pkg) == requested_service)
+        # Static packages are not advertised on the anonymous Wi-Fi portal,
+        # but are available from the verified subscriber renewal page.
+        and (requested_service == "static" or package_service_type(pkg) != "static")
+        and (requested_service not in {"hotspot", "pppoe", "static"} or package_service_type(pkg) == requested_service)
     ]
 
 
@@ -636,6 +638,23 @@ def _captive_packages(tenant_id):
     if hotspot_packages:
         return hotspot_packages
     return _public_packages_for_tenant(tenant_id)
+
+
+def _subscriber_customer(tenant_id, username, phone):
+    """Return a PPPoE/static subscriber after username and phone verification."""
+    username = str(username or "").strip()
+    phone = normalize_phone(phone)
+    if not username or not phone:
+        return None
+    for customer in list_children(f"tenants/{tenant_id}/customers"):
+        service_type = str(customer.get("service_type") or "pppoe").strip().lower()
+        if (
+            service_type in {"pppoe", "static"}
+            and str(customer.get("username") or "").strip().lower() == username.lower()
+            and normalize_phone(customer.get("phone")) == phone
+        ):
+            return customer
+    return None
 
 
 def _probe_tenant_id(request):
@@ -1570,6 +1589,87 @@ def captive_portal_pay(request, tenant_id):
     return _html_page("Payment unavailable", "<main><div class='alert'>Payment checkout was not returned. Please try again.</div></main>", 502)
 
 
+@csrf_exempt
+@api_view(["GET"])
+def subscriber_portal_page(request, tenant_id):
+    """Self-service renewal page for expired PPPoE and static subscribers."""
+    tenant = ref(f"tenants/{tenant_id}").get()
+    if not tenant or tenant.get("status") == "suspended":
+        return _html_page("Portal unavailable", "<main><div class='alert'>This provider is not accepting payments.</div></main>", 404)
+
+    username = str(request.GET.get("username") or "").strip()
+    phone = str(request.GET.get("phone") or "").strip()
+    customer = _subscriber_customer(tenant_id, username, phone)
+    if not customer:
+        return _html_page(
+            "Renew internet",
+            f"""<main><div class='card connect-card'><strong>Renew or change your package</strong>
+            <p class='muted'>Enter the PPPoE/static username and registered phone number to view eligible packages.</p>
+            <form method='get' action='/api/subscriber/{html.escape(str(tenant_id), quote=True)}'>
+              <input name='username' required placeholder='PPPoE or static username' autocomplete='username'>
+              <input name='phone' required inputmode='tel' placeholder='Registered phone number' autocomplete='tel'>
+              <button type='submit'>Continue</button>
+            </form></div></main>""",
+        )
+
+    service_type = str(customer.get("service_type") or "pppoe").lower()
+    payment_id = str(request.GET.get("payment_id") or "").strip()
+    payment_notice = ""
+    if payment_id:
+        payment = ref(f"tenants/{tenant_id}/payments/{payment_id}").get()
+        payment = _refresh_captive_daraja_payment(tenant_id, {"id": tenant_id, **tenant}, payment_id, payment)
+        access_status = str((payment or {}).get("access_status") or "").lower()
+        if payment and payment.get("status") == "success" and access_status in {"active", "radius_ready", "queued"}:
+            payment_notice = "<div class='card connect-card'><strong>Payment successful.</strong><p class='muted'>Your service is active. Your PPPoE router will reconnect automatically; reconnect it once if needed.</p></div>"
+        elif payment and payment.get("status") == "failed":
+            payment_notice = "<div class='alert'>Payment was not completed. Choose a package and try again.</div>"
+        else:
+            retry = urlencode({"username": username, "phone": phone, "payment_id": payment_id})
+            payment_notice = f"<div class='card connect-card'><div class='spinner'></div><strong>Waiting for payment confirmation.</strong><p class='muted'>Enter your M-Pesa PIN to continue.</p></div><script>setTimeout(function(){{window.location.replace('/api/subscriber/{html.escape(str(tenant_id), quote=True)}?{retry}');}},1500);</script>"
+
+    packages = _public_packages_for_tenant(tenant_id, service_type)
+    package_rows = "".join(
+        f"""<div class='card pkg'><div class='pkg-info'><div class='pkg-title'>{html.escape(str(pkg.get('name') or 'Package'))}</div>
+        <div class='pkg-meta'><span class='price'>Ksh {html.escape(str(pkg.get('amount_payable') or pkg.get('price') or 0))}</span> for {html.escape(str(pkg.get('duration_label') or ''))}</div>
+        <div class='pkg-speed'>{html.escape(str(pkg.get('speed') or ''))}</div></div>
+        <form method='post' action='/api/subscriber/{html.escape(str(tenant_id), quote=True)}/pay'><input type='hidden' name='username' value='{html.escape(username, quote=True)}'><input type='hidden' name='phone' value='{html.escape(phone, quote=True)}'><input type='hidden' name='service_type' value='{service_type}'><input type='hidden' name='package_id' value='{html.escape(str(pkg.get('id')), quote=True)}'><button type='submit'>Select</button></form></div>"""
+        for pkg in packages
+    ) or "<div class='alert'>No active packages are available for this connection type.</div>"
+    brand = html.escape(str(tenant.get("business_name") or "Internet"))
+    return _html_page(
+        "Renew internet",
+        f"<main><div class='card connect-card'><strong>{brand} {service_type.upper()} renewal</strong><p class='muted'>Current package: {html.escape(str(customer.get('package') or '-'))}. Select a package to renew, upgrade, or downgrade.</p></div>{payment_notice}<div class='section-title'>Available packages</div>{package_rows}</main>",
+    )
+
+
+@csrf_exempt
+@api_view(["POST"])
+def subscriber_portal_pay(request, tenant_id):
+    data = body(request)
+    username = str(data.get("username") or "").strip()
+    phone = str(data.get("phone") or "").strip()
+    customer = _subscriber_customer(tenant_id, username, phone)
+    if not customer:
+        return _html_page("Payment unavailable", "<main><div class='alert'>Subscriber verification failed.</div></main>", 403)
+    data["service_type"] = str(customer.get("service_type") or "pppoe").lower()
+    data["username"] = customer.get("username")
+    data["phone"] = customer.get("phone")
+    try:
+        response = _public_pay_impl(getattr(request, "_request", request), tenant_id, data=data)
+    except Exception:
+        logger.exception("Subscriber renewal payment failed tenant=%s username=%s", tenant_id, username)
+        return _html_page("Payment unavailable", "<main><div class='alert'>Payment could not be started. Please try again.</div></main>", 503)
+    payload = getattr(response, "data", {}) or {}
+    if response.status_code >= 400:
+        return _html_page("Payment unavailable", f"<main><div class='alert'>{html.escape(str(payload.get('message') or 'Could not start payment'))}</div></main>", response.status_code)
+    query = urlencode({"username": customer.get("username"), "phone": customer.get("phone"), "payment_id": payload.get("paymentId")})
+    return _html_page(
+        "Confirm payment",
+        f"<main><div class='card connect-card'><div class='spinner'></div><strong>Prompt sent. Enter your M-Pesa PIN.</strong><p class='muted'>Your connection will be restored automatically once payment is confirmed.</p></div><script>setTimeout(function(){{window.location.replace('/api/subscriber/{html.escape(str(tenant_id), quote=True)}?{query}');}},1500);</script></main>",
+        201,
+    )
+
+
 def _paid_access_html(title, payload, login_action="", auto_submit=True):
     username = html.escape(str(payload.get("username") or ""), quote=True)
     password = html.escape(str(payload.get("password") or ""), quote=True)
@@ -1634,10 +1734,10 @@ def _public_pay_impl(request, tenant_id, data=None):
     link_login = sanitize_router_login_url(data.get("link_login") or data.get("link-login"))
     dst = str(data.get("dst") or data.get("link-orig") or "").strip()
     service_type = str(data.get("service_type") or "hotspot").strip().lower()
-    if service_type not in {"hotspot", "pppoe", "tv"}:
+    if service_type not in {"hotspot", "pppoe", "static", "tv"}:
         return ok({"message": "Invalid service type"}, 400)
     package_type = package_service_type(pkg)
-    if service_type in {"hotspot", "pppoe"} and service_type != package_type:
+    if service_type in {"hotspot", "pppoe", "static"} and service_type != package_type:
         return ok({"message": f"This package is only available for {package_type.upper()} customers"}, 400)
     if service_type == "tv" and package_type != "hotspot":
         return ok({"message": "TV MAC access is only available for hotspot packages"}, 400)
@@ -1645,7 +1745,7 @@ def _public_pay_impl(request, tenant_id, data=None):
     customer = None
     username = ""
     mac_address = router_client_mac if service_type == "hotspot" else ""
-    if service_type == "pppoe":
+    if service_type in {"pppoe", "static"}:
         username = str(data.get("username") or "").strip()
         if username:
             customer = next(
@@ -1657,6 +1757,10 @@ def _public_pay_impl(request, tenant_id, data=None):
                 None,
             )
         phone = normalize_phone(data.get("phone") or (customer or {}).get("phone"))
+        if service_type == "static" and (
+            not customer or normalize_phone(customer.get("phone")) != phone
+        ):
+            return ok({"message": "Enter the existing static username and registered phone number"}, 403)
     elif service_type == "tv":
         mac_address = normalize_mac(data.get("mac_address"))
         if not mac_address:
@@ -1695,7 +1799,7 @@ def _public_pay_impl(request, tenant_id, data=None):
             continue
         if service_type == "hotspot" and router_client_mac and normalize_mac(candidate.get("router_client_mac") or candidate.get("router_mac")) != router_client_mac:
             continue
-        if service_type == "pppoe" and access_username and str(candidate.get("username") or "") != access_username:
+        if service_type in {"pppoe", "static"} and access_username and str(candidate.get("username") or "") != access_username:
             continue
         if not candidate.get("daraja_checkout_request_id"):
             continue
@@ -3935,7 +4039,7 @@ def _agent_poll_interval():
     The agent is how a paid customer's access reaches the router, so this is
     the worst-case activation delay. Clamped to 2-60 seconds.
     """
-    seconds = max(2, min(60, int(getattr(settings, "ROUTER_AGENT_POLL_SECONDS", 5) or 5)))
+    seconds = max(2, min(60, int(getattr(settings, "ROUTER_AGENT_POLL_SECONDS", 2) or 2)))
     return f"{seconds}s"
 
 
@@ -5492,10 +5596,20 @@ def router_agent_poll(request, token):
                 return HttpResponse(':log info "Billing SaaS agent: captive portal repair queued for next poll";\n', content_type="text/plain")
         except Exception:
             logger.exception("Could not queue captive portal repair tenant=%s", tenant_id)
-        return HttpResponse(':log info "Billing SaaS agent: no pending commands";\n', content_type="text/plain")
+        # Existing routers retain their previous scheduler interval until they
+        # receive a command. Refresh it on every normal poll so a deployment
+        # can reduce paid-Hotspot activation latency without re-provisioning.
+        return HttpResponse(
+            f':do {{ /system scheduler set [find name="billing-saas-agent"] interval={_agent_poll_interval()} }} on-error={{}}; '
+            ':log info "Billing SaaS agent: no pending commands";\n',
+            content_type="text/plain",
+        )
 
     logger.info("MikroTik agent poll tenant=%s delivering=%s", tenant_id, len(commands))
-    lines = [':log info "Billing SaaS agent: applying queued commands";']
+    lines = [
+        f':do {{ /system scheduler set [find name="billing-saas-agent"] interval={_agent_poll_interval()} }} on-error={{}};',
+        ':log info "Billing SaaS agent: applying queued commands";',
+    ]
     delivered_at = iso_now()
     delivered_ids = {command.get("id") for command in commands if command.get("id")}
     for command in commands:

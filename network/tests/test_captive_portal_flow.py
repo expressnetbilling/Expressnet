@@ -167,6 +167,44 @@ class CaptivePortalFlowTests(SimpleTestCase):
         self.assertNotIn("123456", body)
         self.assertNotIn("WIFI-PAYMENT1", body)
 
+    def test_expired_pppoe_subscriber_can_open_verified_package_renewal_page(self):
+        self.storage[f"tenants/{self.tenant_id}"].update({"business_name": "Example ISP"})
+        customer = {
+            "id": "customer-1",
+            "username": "pppoe-user",
+            "phone": "0700000000",
+            "service_type": "pppoe",
+            "package": "Old package",
+            "status": "expired",
+        }
+        packages = [
+            {"id": "package-1", "name": "Basic", "price": 1000, "speed": "5M/5M", "service_type": "pppoe", "duration_days": 30},
+            {"id": "package-2", "name": "Faster", "price": 2000, "speed": "10M/10M", "service_type": "pppoe", "duration_days": 30},
+        ]
+        request = self.factory.get(
+            f"/api/subscriber/{self.tenant_id}", {"username": "pppoe-user", "phone": "0700000000"}
+        )
+
+        def children(path):
+            if path == f"tenants/{self.tenant_id}/customers":
+                return [customer]
+            if path == f"tenants/{self.tenant_id}/packages":
+                return packages
+            return []
+
+        with patch.object(portal_views, "ref", side_effect=self.ref), patch.object(
+            portal_views, "list_children", side_effect=children
+        ):
+            response = portal_views.subscriber_portal_page(request, self.tenant_id)
+
+        body = response.content.decode()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("PPPOE renewal", body)
+        self.assertIn("Old package", body)
+        self.assertIn("Basic", body)
+        self.assertIn("Faster", body)
+        self.assertIn(f"/api/subscriber/{self.tenant_id}/pay", body)
+
     def test_legacy_direct_method_initiates_an_stk_push(self):
         class PaymentRef:
             key = "payment-1"

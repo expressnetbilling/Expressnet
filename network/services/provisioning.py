@@ -658,19 +658,13 @@ def create_ppp_profile(tenant, name, speed, session_timeout=None):
 
 
 def create_hotspot_profile(tenant, name, speed, session_timeout=None):
-    result = upsert_router_profile(tenant, ("ip", "hotspot", "user", "profile"), name, speed, session_timeout)
-    if has_mikrotik_credentials(tenant):
-        api = router_connect(tenant)
-        try:
-            for item in api.path("ppp", "profile").select():
-                if item.get("name") == name and item.get("comment") == "billing-saas-package" and item.get(".id"):
-                    try:
-                        api.path("ppp", "profile").remove(item[".id"])
-                    except Exception:
-                        pass
-        finally:
-            api.close()
-    return result
+    # PPP and Hotspot profiles are different RouterOS object types and may
+    # legitimately share the package name.  Removing a PPP profile during a
+    # Hotspot payment added a second API connection to every checkout and
+    # could disrupt an already-working PPPoE package.
+    return upsert_router_profile(
+        tenant, ("ip", "hotspot", "user", "profile"), name, speed, session_timeout
+    )
 
 
 def ensure_rate_limit_fasttrack_exemptions(api):

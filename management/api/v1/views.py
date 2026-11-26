@@ -207,9 +207,10 @@ def _generate_customer_username(tenant_id, name, phone):
     return username
 
 
-def _generate_customer_password():
+def _generate_customer_password(length=8):
+    """Return a readable subscriber password without ambiguous characters."""
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
-    return "".join(secrets.choice(alphabet) for _ in range(8))
+    return "".join(secrets.choice(alphabet) for _ in range(max(6, int(length or 8))))
 
 
 def static_ip_network_details(ip_address):
@@ -1603,7 +1604,11 @@ def customer_add(request):
     if service_type not in {"pppoe", "hotspot", "static"}:
         return ok({"message": "Customer service type must be PPPoE, Hotspot, or Static"}, 400)
     data["username"] = str(data.get("username") or "").strip() or _generate_customer_username(request.tenant["id"], data.get("name"), data.get("phone"))
-    data["password"] = str(data.get("password") or "").strip() or _generate_customer_password()
+    # PPPoE credentials are often typed into a router or phone manually. Keep
+    # the generated password short and readable while retaining a six-character
+    # minimum; other service types keep their existing eight-character default.
+    generated_password_length = 6 if service_type == "pppoe" else 8
+    data["password"] = str(data.get("password") or "").strip() or _generate_customer_password(generated_password_length)
     if Customer.objects.annotate(username_lower=Lower("username")).filter(tenant_id=request.tenant["id"], username_lower=data["username"].lower()).exists():
         return ok({"message": "A customer with this username already exists"}, 409)
     customer_status = str(data.get("status") or "active").strip().lower()
@@ -3698,10 +3703,13 @@ def system_payment_message(tenant, context):
 
 def system_expiry_message(tenant, context):
     brand = notification_brand(tenant)
+    renewal_url = str(context.get("renewal_url") or "").strip()
+    renewal_note = f"\nRenew, upgrade, or downgrade here: {renewal_url}\n" if renewal_url else ""
     return (
         f"{brand} Reminder: Your {context.get('package') or ''} package will expire on {context.get('expires_at') or ''}.\n\n"
         "Please renew your package before the expiry date to avoid interruption of your internet service.\n\n"
-        f"Thank you for choosing {brand}."
+        + renewal_note
+        + f"Thank you for choosing {brand}."
     )
 
 
@@ -3865,11 +3873,16 @@ def notify_payment_access(tenant, payment, access):
 def notify_package_expiry(tenant, customer):
     if (tenant or {}).get("whatsapp_enabled") is False or (tenant or {}).get("whatsapp_on_expiry") is False:
         return {"whatsapp": {"sent": False, "skipped": "disabled"}}
+    public_url = str(os.getenv("PUBLIC_APP_URL") or getattr(settings, "PUBLIC_APP_URL", "")).rstrip("/")
+    renewal_url = ""
+    if public_url and tenant.get("id") and customer.get("username"):
+        renewal_url = f"{public_url}/api/subscriber/{tenant['id']}?{urlencode({'username': customer['username']})}"
     context = {
         "name": customer.get("name") or customer.get("phone") or "customer",
         "package": customer.get("package") or "",
         "username": customer.get("username") or "",
         "expires_at": customer.get("expiry_date") or customer.get("expires_at") or "",
+        "renewal_url": renewal_url,
     }
     message = system_expiry_message(tenant, context)
     return {
