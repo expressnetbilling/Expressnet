@@ -93,6 +93,17 @@ class CaptiveRepairScriptTests(SimpleTestCase):
         self.assertIn("registration-table remove", script)
         self.assertIn('\n:do { /interface bridge port remove [find interface="ether3"] }', script)
 
+    def test_repair_writes_a_local_login_page_without_waiting_for_a_fetch(self):
+        from network.api.v1.views import _agent_hotspot_redirect_setup
+
+        script = "\n".join(_agent_hotspot_redirect_setup(
+            "https://portal.example/api/captive/tenant-1", "Expressnet-bridge"
+        ))
+
+        self.assertIn('name="Expressnet-hotspot/login.html"', script)
+        self.assertIn("Opening internet packages", script)
+        self.assertNotIn("/tool fetch", script)
+
 
 class CaptiveRepairQueueTests(SimpleTestCase):
     def test_null_hotspot_snapshot_does_not_crash(self):

@@ -69,6 +69,7 @@ from billing_api.services import (
     find_child_by_field,
     has_mikrotik_credentials,
     hash_password,
+    hotspot_portal_target,
     hotspot_alogin_redirect_html,
     expressnet_hotspot_file_html,
     hotspot_error_redirect_html,
@@ -2952,19 +2953,40 @@ def _agent_hotspot_redirect_setup(portal_url, bridge_name=""):
     In that case DHCP and a Hotspot server exist, yet RouterOS serves its
     default login page (or simply reports no internet) because the custom
     login page and walled-garden entry are absent.  ``login.html`` is the page
-    that handles unauthenticated interception, so downloading it is enough to
-    restore the redirect without embedding a huge script in the agent import.
+    that handles unauthenticated interception.  Install a compact local page
+    instead of downloading it during repair: a transient fetch timeout can
+    otherwise leave RouterOS serving an empty captive-browser page.
     """
     portal_url = str(portal_url or "").strip()
     parsed = urlparse(portal_url)
     if not portal_url or parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return []
-    login_url = f"{portal_url.rstrip('/')}/hotspot-file/login.html"
-    if parsed.hostname.lower().endswith("ngrok-free.dev"):
-        login_url += "&ngrok-skip-browser-warning=true" if "?" in login_url else "?ngrok-skip-browser-warning=true"
-    source = _rsc_escape(login_url)
     host = _rsc_escape(parsed.hostname)
     bridge = _rsc_escape(bridge_name)
+    redirect_target = hotspot_portal_target(
+        portal_url,
+        "ip=$(ip)&mac=$(mac)&router_ip=$(server-address)&link_login=$(link-login)&dst=$(link-orig)",
+    )
+    # Keep the emergency HTML and the RouterOS command deliberately small.
+    # Agent imports are one-line .rsc commands, and the prior full-page
+    # download/retry command was large enough to fail parsing on RB951 units.
+    local_login = (
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        f"<meta http-equiv=refresh content='0;url={html.escape(redirect_target, quote=True)}'>"
+        "<title>Opening internet packages</title><p>Opening internet packages...</p>"
+    )
+    escaped_login = _rsc_escape(local_login)
+    local_login_script = (
+        f':local billingHotspotLogin "{escaped_login}"; '
+        ':local billingHotspotLoginId [/file find name="Expressnet-hotspot/login.html"]; '
+        ':if ([:len $billingHotspotLoginId] > 0) do={ '
+        ':do { /file set $billingHotspotLoginId contents=$billingHotspotLogin } on-error={} '
+        '} else={ :do { /file add name="Expressnet-hotspot/login.html" contents=$billingHotspotLogin } on-error={} }; '
+        ':local billingFlashLoginId [/file find name="flash/Expressnet-hotspot/login.html"]; '
+        ':if ([:len $billingFlashLoginId] > 0) do={ '
+        ':do { /file set $billingFlashLoginId contents=$billingHotspotLogin } on-error={} '
+        '} else={ :do { /file add name="flash/Expressnet-hotspot/login.html" contents=$billingHotspotLogin } on-error={} }; '
+    )
     rules = [
         f':do {{ /ip hotspot walled-garden add action=allow dst-host="{host}" comment="billing-saas captive portal access" }} on-error={{}};',
         # Hotspot's dst-host rule handles the authentication bypass.  Add an
@@ -2983,10 +3005,7 @@ def _agent_hotspot_redirect_setup(portal_url, bridge_name=""):
             f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=80 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow captive portal 80" }} on-error={{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=80 comment="billing-saas allow captive portal 80" }};',
             f':do {{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=443 place-before=[find comment="defconf: drop all not coming from LAN"] comment="billing-saas allow captive portal 443" }} on-error={{ /ip firewall filter add chain=forward action=accept in-interface="{bridge}" dst-address-list=Expressnet-portal-ips protocol=tcp dst-port=443 comment="billing-saas allow captive portal 443" }};',
         ])
-    rules.extend([
-        f':do {{ /tool fetch check-certificate=no url="{source}" dst-path="Expressnet-hotspot/login.html" }} on-error={{ :log warning "Billing SaaS: captive login page fetch failed" }};',
-        f':do {{ /tool fetch check-certificate=no url="{source}" dst-path="hotspot/login.html" }} on-error={{}};',
-    ])
+    rules.append(local_login_script)
     return rules
 
 
