@@ -20,7 +20,8 @@ export RADIUS_RADSEC_LISTEN_PORT="${RADIUS_RADSEC_LISTEN_PORT:-2083}"
 # enabled. They would contend with Django's loopback AAA listener on 1812/1813.
 # Only the dedicated TCP/TLS RadSec virtual server belongs in this container.
 rm -f /etc/freeradius/3.0/sites-enabled/default \
-  /etc/freeradius/3.0/sites-enabled/inner-tunnel
+  /etc/freeradius/3.0/sites-enabled/inner-tunnel \
+  /etc/freeradius/3.0/mods-enabled/eap
 
 echo "Expressnet RadSec: validating FreeRADIUS configuration"
 # Validate before launching the Django child. FreeRADIUS otherwise exits so
