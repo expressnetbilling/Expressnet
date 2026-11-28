@@ -2,6 +2,7 @@
 set -eu
 
 export RADSEC_PKI_DIR="${RADSEC_PKI_DIR:-/run/expressnet-radsec}"
+echo "Expressnet RadSec: preparing PKI"
 /usr/local/bin/expressnet-prepare-radsec-pki
 
 export RADIUS_RADSEC_TLS_CERT_FILE="${RADIUS_RADSEC_TLS_CERT_FILE:-$RADSEC_PKI_DIR/server.pem}"
@@ -15,14 +16,36 @@ export RADIUS_PROXY_HOST=127.0.0.1
 export RADIUS_PROXY_SHARED_SECRET="${RADIUS_PROXY_SHARED_SECRET:-radsec}"
 export RADIUS_RADSEC_LISTEN_PORT="${RADIUS_RADSEC_LISTEN_PORT:-2083}"
 
+echo "Expressnet RadSec: validating FreeRADIUS configuration"
+# Validate before launching the Django child. FreeRADIUS otherwise exits so
+# early that Railway records only a generic restart, hiding the useful error.
+freeradius -XC -d /etc/freeradius/3.0
+
+echo "Expressnet RadSec: starting Django AAA on 127.0.0.1:1812/1813"
 python manage.py runradius --settings=billing_saas_django.Settings.production \
   --host "$RADIUS_HOST" --auth-port "$RADIUS_AUTH_PORT" --acct-port "$RADIUS_ACCT_PORT" &
 radius_pid=$!
 
+echo "Expressnet RadSec: starting FreeRADIUS TLS listener on TCP $RADIUS_RADSEC_LISTEN_PORT"
+freeradius -f -d /etc/freeradius/3.0 &
+radsec_pid=$!
+
 shutdown() {
-  kill "$radius_pid" 2>/dev/null || true
-  wait "$radius_pid" 2>/dev/null || true
+  kill "$radius_pid" "$radsec_pid" 2>/dev/null || true
+  wait "$radius_pid" "$radsec_pid" 2>/dev/null || true
 }
 trap shutdown INT TERM EXIT
 
-exec freeradius -f -d /etc/freeradius/3.0
+# A TLS gateway without its Django policy engine is broken just as surely as a
+# dead gateway. Let Railway restart this complete pair if either child exits.
+while :; do
+  if ! kill -0 "$radius_pid" 2>/dev/null; then
+    echo "Expressnet RadSec: Django AAA stopped; restarting service" >&2
+    exit 1
+  fi
+  if ! kill -0 "$radsec_pid" 2>/dev/null; then
+    echo "Expressnet RadSec: FreeRADIUS stopped; restarting service" >&2
+    exit 1
+  fi
+  sleep 2
+done
