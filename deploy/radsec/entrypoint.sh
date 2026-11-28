@@ -26,7 +26,9 @@ echo "Expressnet RadSec: validating FreeRADIUS configuration"
 # Validate before launching the Django child. FreeRADIUS otherwise exits so
 # early that Railway records only a generic restart, hiding the useful error.
 if ! freeradius -XC -d /etc/freeradius/3.0 >/tmp/radsec-config-check.log 2>&1; then
-  cat /tmp/radsec-config-check.log >&2
+  # FreeRADIUS -XC is intentionally very verbose. Keep Railway's log stream
+  # below its rate limit while retaining the parser error at the end.
+  tail -n 80 /tmp/radsec-config-check.log >&2
   exit 1
 fi
 
