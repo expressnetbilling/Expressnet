@@ -1,8 +1,8 @@
 tls {
     expressnet_radsec_tls {
-        private_key_file = ${ENV:RADIUS_RADSEC_TLS_KEY_FILE}
-        certificate_file = ${ENV:RADIUS_RADSEC_TLS_CERT_FILE}
-        ca_file = ${ENV:RADIUS_RADSEC_TLS_CA_FILE}
+        private_key_file = $ENV{RADIUS_RADSEC_TLS_KEY_FILE}
+        certificate_file = $ENV{RADIUS_RADSEC_TLS_CERT_FILE}
+        ca_file = $ENV{RADIUS_RADSEC_TLS_CA_FILE}
         require_client_cert = yes
         tls_min_version = "1.2"
     }
@@ -12,7 +12,7 @@ server radsec {
     listen {
         type = auth+acct
         ipaddr = *
-        port = ${ENV:RADIUS_RADSEC_LISTEN_PORT}
+        port = $ENV{RADIUS_RADSEC_LISTEN_PORT}
         proto = tcp
         tls = ${tls.expressnet_radsec_tls}
         clients = radsec
