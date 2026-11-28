@@ -1,5 +1,5 @@
 """
-Lightweight RADIUS server built on pyrad, running inside the Django process.
+RADIUS and RadSec server built on pyrad, running inside the Django process.
 
 Handles:
   - Access-Request  (PPPoE / Hotspot auth)
@@ -11,12 +11,16 @@ Run via:  python manage.py runradius
 import logging
 import os
 import secrets
+import socket
+import ssl
+import struct
 import threading
 import time
 from datetime import timedelta
 
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from django.db import close_old_connections
 from django.db.models import Q, Sum
 import pyrad.packet
 from pyrad.server import Server, RemoteHost
@@ -89,18 +93,6 @@ def _get_radius_acct_port():
     return int(os.getenv("RADIUS_ACCT_PORT", "1813"))
 
 
-def _radsec_proxy_host():
-    """Private source used by the local FreeRADIUS RadSec gateway."""
-    return str(os.getenv("RADIUS_PROXY_HOST", "127.0.0.1")).strip()
-
-
-def _radsec_proxy_secret():
-    # RouterOS fixes the RADIUS shared secret to ``radsec`` when RadSec is in
-    # use.  This secret protects only the loopback proxy hop; TLS protects the
-    # router-to-gateway connection.
-    return str(os.getenv("RADIUS_PROXY_SHARED_SECRET", "radsec")).strip()
-
-
 def _packet_nas_candidates(pkt):
     """Return source and NAS-IP-Address candidates for a RADIUS request."""
     candidates = []
@@ -114,7 +106,7 @@ def _packet_nas_candidates(pkt):
 
 
 def _nas_client_for_packet(pkt):
-    """Resolve the tenant NAS from a direct UDP or proxied RadSec request."""
+    """Resolve the tenant NAS from a direct UDP or native RadSec request."""
     candidates = _packet_nas_candidates(pkt)
     nas_identifier = str(_attr(pkt, ATTR_NAS_IDENTIFIER, "") or "").strip()
     lookup = Q(nas_ip__in=candidates)
@@ -138,7 +130,17 @@ def _reject(server, pkt, reason, **metadata):
     logger.info("RADIUS Access-Reject: user=%s nas=%s reason=%s metadata=%s", username, nas_ip, reason, metadata)
     reply = server.CreateReplyPacket(pkt, **{"Reply-Message": str(reason)})
     reply.code = pyrad.packet.AccessReject
-    return reply.SendTo(pkt.source)
+    return _send_reply(pkt, reply)
+
+
+def _send_reply(pkt, reply):
+    """Send a RADIUS reply over either UDP or an RFC 6613 TLS stream."""
+    wire_packet = reply.ReplyPacket()
+    stream_sender = getattr(pkt, "radsec_reply_sender", None)
+    if stream_sender:
+        stream_sender(wire_packet)
+        return
+    pkt.fd.sendto(wire_packet, pkt.source)
 
 
 def _request_id():
@@ -466,7 +468,7 @@ class BillingRadiusServer(Server):
             customer.id if customer else None,
             "MikroTik keeps DHCP IP and creates Hotspot session after Access-Accept",
         )
-        return reply.SendTo(pkt.source)
+        return _send_reply(pkt, reply)
 
     def HandleAcctPacket(self, pkt):
         """Process an Accounting-Request (Start / Interim-Update / Stop)."""
@@ -481,7 +483,7 @@ class BillingRadiusServer(Server):
             # Acknowledge but skip processing
             reply = self.CreateReplyPacket(pkt)
             reply.code = pyrad.packet.AccountingResponse
-            return reply.SendTo(pkt.source)
+            return _send_reply(pkt, reply)
 
         # Look up NAS client to find the tenant
         try:
@@ -492,7 +494,7 @@ class BillingRadiusServer(Server):
             logger.warning("RADIUS Accounting: unknown NAS source=%s attribute=%s, skipping", nas_ip, _attr(pkt, ATTR_NAS_IP_ADDRESS, ""))
             reply = self.CreateReplyPacket(pkt)
             reply.code = pyrad.packet.AccountingResponse
-            return reply.SendTo(pkt.source)
+            return _send_reply(pkt, reply)
 
         tenant = nas_client.tenant
         recorded_nas_ip = nas_client.nas_ip
@@ -503,7 +505,7 @@ class BillingRadiusServer(Server):
             logger.warning("RADIUS Accounting: user %s not found for tenant %s", username, tenant.id)
             reply = self.CreateReplyPacket(pkt)
             reply.code = pyrad.packet.AccountingResponse
-            return reply.SendTo(pkt.source)
+            return _send_reply(pkt, reply)
 
         input_octets = int(_attr(pkt, ATTR_ACCT_INPUT_OCTETS, 0) or 0) + (int(_attr(pkt, ATTR_ACCT_INPUT_GIGAWORDS, 0) or 0) * (2 ** 32))
         output_octets = int(_attr(pkt, ATTR_ACCT_OUTPUT_OCTETS, 0) or 0) + (int(_attr(pkt, ATTR_ACCT_OUTPUT_GIGAWORDS, 0) or 0) * (2 ** 32))
@@ -567,7 +569,7 @@ class BillingRadiusServer(Server):
 
         reply = self.CreateReplyPacket(pkt)
         reply.code = pyrad.packet.AccountingResponse
-        return reply.SendTo(pkt.source)
+        return _send_reply(pkt, reply)
 
 
 def _register_nas_clients(server):
@@ -583,21 +585,6 @@ def _register_nas_clients(server):
                         nas_client.nas_ip, nas_client.identifier, nas_client.tenant_id)
         except Exception as exc:
             logger.error("RADIUS: failed to register NAS client %s: %s", nas_client.nas_ip, exc)
-    # FreeRADIUS accepts the public TLS RadSec connection and proxies its
-    # RADIUS packets to this process over localhost UDP.  Register that
-    # one, fixed-secret source in addition to direct NAS clients.  Tenant
-    # selection still uses the original NAS-IP-Address attribute.
-    proxy_host = _radsec_proxy_host()
-    proxy_secret = _radsec_proxy_secret()
-    if proxy_host and proxy_secret:
-        server.hosts[proxy_host] = RemoteHost(
-            proxy_host,
-            proxy_secret.encode("utf-8"),
-            proxy_secret.encode("utf-8"),
-        )
-        logger.info("RADIUS: registered local RadSec proxy %s", proxy_host)
-
-
 def _start_nas_refresh_loop(server, interval=30):
     """Background thread that periodically re-reads NAS clients from the DB
     so that newly provisioned routers are recognized without a server restart."""
@@ -645,3 +632,168 @@ def run_radius_server(host=None, auth_port=None, acct_port=None):
         server.Run()
     except KeyboardInterrupt:
         logger.info("RADIUS server shutting down")
+
+
+def _radsec_setting(name, default=""):
+    return str(os.getenv(name, default) or default).strip()
+
+
+def _read_stream_exact(connection, length):
+    """Read exactly ``length`` bytes or return ``None`` at clean EOF."""
+    chunks = []
+    remaining = length
+    while remaining:
+        chunk = connection.recv(remaining)
+        if not chunk:
+            if not chunks:
+                return None
+            raise ConnectionError("RadSec connection closed mid-packet")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _certificate_common_name(certificate):
+    for subject_part in certificate.get("subject", ()):
+        for key, value in subject_part:
+            if key == "commonName" and value:
+                return str(value)
+    return ""
+
+
+class NativeRadSecServer:
+    """Small mutually-authenticated TLS listener for RADIUS-over-TCP (RFC 6613).
+
+    It intentionally dispatches to ``BillingRadiusServer`` so the existing
+    payment, expiry, PPPoE, Hotspot, and accounting policy remains the single
+    source of truth. A RadSec record has the normal RADIUS header; its length
+    field frames the stream, so no additional proxy protocol is used.
+    """
+
+    max_packet_size = 8192
+
+    def __init__(self, host, port, certificate_file, private_key_file, ca_file, shared_secret):
+        self.host = host
+        self.port = int(port)
+        self.certificate_file = certificate_file
+        self.private_key_file = private_key_file
+        self.ca_file = ca_file
+        self.shared_secret = shared_secret.encode("utf-8")
+        self.radius = BillingRadiusServer(addresses=[], dict=_load_or_create_dictionary())
+        _register_nas_clients(self.radius)
+        _start_nas_refresh_loop(self.radius)
+
+    def _tls_context(self):
+        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(self.certificate_file, self.private_key_file)
+        context.load_verify_locations(cafile=self.ca_file)
+        context.verify_mode = ssl.CERT_REQUIRED
+        return context
+
+    @staticmethod
+    def _inject_nas_identifier(pkt, common_name):
+        # The client certificate is authenticated by TLS. Do not trust a
+        # router-supplied NAS-Identifier to select a tenant under RadSec.
+        if "NAS-Identifier" in pkt:
+            del pkt["NAS-Identifier"]
+        pkt["NAS-Identifier"] = common_name
+
+    def _handle_packet(self, connection, peer, common_name, packet_bytes):
+        if len(packet_bytes) < 20:
+            raise pyrad.packet.PacketError("RADIUS packet is shorter than its header")
+
+        code = packet_bytes[0]
+        if code == pyrad.packet.AccessRequest:
+            pkt = self.radius.CreateAuthPacket(packet=packet_bytes)
+        elif code == pyrad.packet.AccountingRequest:
+            pkt = self.radius.CreateAcctPacket(packet=packet_bytes)
+        else:
+            logger.warning("RadSec: ignoring unsupported packet code=%s client=%s", code, common_name)
+            return
+
+        pkt.source = peer
+        pkt.fd = connection
+        pkt.secret = self.shared_secret
+        pkt.radsec_reply_sender = connection.sendall
+        self._inject_nas_identifier(pkt, common_name)
+
+        if code == pyrad.packet.AccessRequest:
+            self.radius.HandleAuthPacket(pkt)
+        else:
+            self.radius.HandleAcctPacket(pkt)
+
+    def _serve_connection(self, raw_connection, peer, context):
+        close_old_connections()
+        try:
+            with context.wrap_socket(raw_connection, server_side=True) as connection:
+                common_name = _certificate_common_name(connection.getpeercert())
+                if not common_name.startswith("expressnet-radsec-"):
+                    raise ssl.SSLError("unrecognized RadSec client certificate")
+                logger.info("RadSec: accepted mutually authenticated client=%s source=%s", common_name, peer[0])
+
+                while True:
+                    header = _read_stream_exact(connection, 4)
+                    if header is None:
+                        return
+                    _, _, packet_length = struct.unpack("!BBH", header)
+                    if packet_length < 20 or packet_length > self.max_packet_size:
+                        raise ValueError(f"invalid RADIUS packet length {packet_length}")
+                    remainder = _read_stream_exact(connection, packet_length - 4)
+                    if remainder is None:
+                        raise ConnectionError("RadSec connection closed mid-packet")
+                    self._handle_packet(connection, peer, common_name, header + remainder)
+        except (ConnectionError, OSError, ssl.SSLError, ValueError, pyrad.packet.PacketError) as exc:
+            logger.info("RadSec: closed connection source=%s reason=%s", peer[0], exc)
+        except Exception:
+            logger.exception("RadSec: unhandled client error source=%s", peer[0])
+        finally:
+            close_old_connections()
+            try:
+                raw_connection.close()
+            except OSError:
+                pass
+
+    def serve_forever(self):
+        context = self._tls_context()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind((self.host, self.port))
+            listener.listen(128)
+            logger.info("Native RadSec server listening on %s:%s", self.host, self.port)
+            while True:
+                connection, peer = listener.accept()
+                threading.Thread(
+                    target=self._serve_connection,
+                    args=(connection, peer, context),
+                    daemon=True,
+                ).start()
+
+
+def run_radsec_server(host=None, port=None):
+    """Start the application-native RadSec service on a TLS/TCP port."""
+    import django
+
+    django.setup()
+    host = host or _radsec_setting("RADIUS_RADSEC_BIND_HOST", "0.0.0.0")
+    port = port or int(_radsec_setting("RADIUS_RADSEC_LISTEN_PORT", "2083"))
+    certificate_file = _radsec_setting("RADIUS_RADSEC_TLS_CERT_FILE")
+    private_key_file = _radsec_setting("RADIUS_RADSEC_TLS_KEY_FILE")
+    ca_file = _radsec_setting("RADIUS_RADSEC_TLS_CA_FILE")
+    missing = [name for name, value in {
+        "RADIUS_RADSEC_TLS_CERT_FILE": certificate_file,
+        "RADIUS_RADSEC_TLS_KEY_FILE": private_key_file,
+        "RADIUS_RADSEC_TLS_CA_FILE": ca_file,
+    }.items() if not value or not os.path.isfile(value)]
+    if missing:
+        raise RuntimeError("RadSec TLS material is unavailable: " + ", ".join(missing))
+
+    shared_secret = _radsec_setting("RADIUS_RADSEC_SECRET", "radsec")
+    NativeRadSecServer(
+        host=host,
+        port=port,
+        certificate_file=certificate_file,
+        private_key_file=private_key_file,
+        ca_file=ca_file,
+        shared_secret=shared_secret,
+    ).serve_forever()

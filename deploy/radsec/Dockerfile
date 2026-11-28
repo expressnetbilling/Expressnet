@@ -12,10 +12,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . ./
 COPY deploy/radsec/entrypoint.sh /usr/local/bin/expressnet-radsec
+COPY deploy/radsec/prepare-pki.sh /usr/local/bin/expressnet-prepare-radsec-pki
 
-RUN sed -i 's/\r$//' /usr/local/bin/expressnet-radsec \
-    && chmod 0755 /usr/local/bin/expressnet-radsec
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && sed -i 's/\r$//' /usr/local/bin/expressnet-radsec /usr/local/bin/expressnet-prepare-radsec-pki \
+    && chmod 0755 /usr/local/bin/expressnet-radsec /usr/local/bin/expressnet-prepare-radsec-pki
 
-EXPOSE 1812/udp 1813/udp
+EXPOSE 2083/tcp
 
 CMD ["/usr/local/bin/expressnet-radsec"]
