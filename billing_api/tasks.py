@@ -257,7 +257,7 @@ def expire_customer_access(batch_size=500):
                 upsert_customer_access(tenant, customer, disabled=True)
             except Exception:
                 logger.warning("Could not disable expired static customer=%s", customer_record.pk, exc_info=True)
-        elif service_type != "pppoe":
+        else:
             try:
                 set_customer_enabled(tenant, username, service_type, False)
             except Exception:

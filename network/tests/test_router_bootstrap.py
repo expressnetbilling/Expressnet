@@ -1,4 +1,7 @@
+from datetime import timedelta
+
 from django.test import SimpleTestCase
+from django.utils import timezone
 
 from network.api.v1.views import _router_dns_bootstrap
 
@@ -70,6 +73,30 @@ class AgentRadsecScriptTests(SimpleTestCase):
         self.assertIn("expressnet-radsec-", script)
         self.assertIn("use-radius=$billingRadiusReady", script)
         self.assertNotIn("billing-saas-radsec", script)
+
+
+class StaticExpiryScriptTests(SimpleTestCase):
+    def test_static_expiry_removes_paid_bypass_and_forces_captive_payment(self):
+        from network.api.v1.views import _access_expiry_scheduler_script, _customer_secret_script
+
+        customer = {
+            "service_type": "static",
+            "username": "static-user",
+            "password": "secret",
+            "ip_address": "172.30.0.8",
+            "expiry_date": (timezone.now() + timedelta(days=1)).isoformat(),
+        }
+        script = "\n".join(_access_expiry_scheduler_script(
+            customer,
+            "static-user",
+            "static",
+            "no",
+        ))
+
+        self.assertIn("/ip hotspot ip-binding disable", script)
+        self.assertIn("/ip hotspot user disable", script)
+        self.assertIn("Expressnet-static-172.30.0.8", script)
+        self.assertIn("/ip hotspot ip-binding disable", _customer_secret_script(customer))
 
 
 class CaptiveRepairScriptTests(SimpleTestCase):

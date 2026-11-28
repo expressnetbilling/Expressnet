@@ -4262,8 +4262,12 @@ def _activate_paid_access_immediately(tenant_id, payment_id, reason="payment con
                 logger.warning("Could not verify paid router access tenant=%s payment=%s", tenant_id, payment_id, exc_info=True)
         else:
             return True
-    # Explicitly bypass any stale tenant flag from an old RADIUS deployment.
-    tenant["radius_enabled"] = False
+    # Keep the established local Hotspot behaviour: a stale RADIUS flag must
+    # never delay captive access after a confirmed payment.  PPPoE, however,
+    # can legitimately be RADIUS-only, so it must retain its configured AAA
+    # path and be activated immediately there as well.
+    if str(payment.get("service_type") or "hotspot").strip().lower() == "hotspot":
+        tenant["radius_enabled"] = False
     try:
         activate_paid_access(
             tenant,

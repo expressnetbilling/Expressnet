@@ -2273,6 +2273,11 @@ def upsert_customer_access(tenant, customer, disabled=False):
                         "disabled": "yes" if disabled else "no",
                         "comment": "billing-saas static bandwidth",
                     })
+            # A static subscriber bypasses the Hotspot while paid.  Schedule
+            # the same wall-clock expiry used by PPPoE/Hotspot so removing the
+            # bypass returns the device to the captive payment page promptly,
+            # rather than waiting for the periodic expiry worker.
+            _sync_customer_access_expiry(api, customer, "static", disabled)
             return True
         path = ("ppp", "secret") if service_type == "pppoe" else ("ip", "hotspot", "user")
         router_path = api.path(*path)
@@ -2558,7 +2563,7 @@ def _parse_access_expiry(value):
 
 
 def _sync_customer_access_expiry(api, customer, service_type, disabled=False):
-    """Enforce a Hotspot or PPPoE package expiry locally on the router.
+    """Enforce a paid package expiry locally on the router.
 
     A Hotspot ``limit-uptime`` only counts time actually spent online.  That
     is correct for a voucher, but it is not enough for a paid captive device
@@ -2600,6 +2605,18 @@ def _sync_customer_access_expiry(api, customer, service_type, disabled=False):
             f':do {{ /ppp secret disable [find name="{escaped_username}"] }} on-error={{}}; '
             f':do {{ /ppp active remove [find name="{escaped_username}"] }} on-error={{}}; '
             f':do {{ /queue simple disable [find name="Expressnet-pppoe-{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /system scheduler remove [find name="{escaped_scheduler_name}"] }} on-error={{}};'
+        )
+    elif service_type == "static":
+        static_ip = _rsc_escape(str(customer.get("ip_address") or "").strip())
+        if not static_ip:
+            return None
+        static_queue = _rsc_escape(f"Expressnet-static-{static_ip}"[:120])
+        on_event = (
+            f':do {{ /ip hotspot ip-binding disable [find address="{static_ip}"] }} on-error={{}}; '
+            f':do {{ /ip hotspot user disable [find name="{escaped_username}"] }} on-error={{}}; '
+            f':do {{ /queue simple disable [find name="{static_queue}"] }} on-error={{}}; '
+            f':do {{ /ip hotspot active remove [find address="{static_ip}"] }} on-error={{}}; '
             f':do {{ /system scheduler remove [find name="{escaped_scheduler_name}"] }} on-error={{}};'
         )
     else:

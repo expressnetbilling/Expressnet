@@ -3378,6 +3378,26 @@ def _access_expiry_scheduler_script(customer, username, service_type, disabled):
             f':do {{ /queue simple disable [find name="Expressnet-pppoe-{escaped_username}"] }} on-error={{}}; '
             f':do {{ /system scheduler remove [find name="{scheduler_name}"] }} on-error={{}};'
         )
+    elif service_type == "static":
+        static_ip = _rsc_escape(str(customer.get("ip_address") or "").strip())
+        static_queue = _rsc_escape(f"Expressnet-static-{static_ip}"[:120])
+        static_binding = (
+            f':do {{ /ip hotspot ip-binding disable [find address="{static_ip}"] }} on-error={{}}; '
+            if static_ip
+            else ""
+        )
+        static_active = (
+            f':do {{ /ip hotspot active remove [find address="{static_ip}"] }} on-error={{}}; '
+            if static_ip
+            else ""
+        )
+        on_event = (
+            static_binding
+            + f':do {{ /ip hotspot user disable [find name="{escaped_username}"] }} on-error={{}}; '
+            + f':do {{ /queue simple disable [find name="{static_queue}"] }} on-error={{}}; '
+            + static_active
+            + f':do {{ /system scheduler remove [find name="{scheduler_name}"] }} on-error={{}};'
+        )
     else:
         binding_comment = _rsc_escape(f"billing-saas paid hotspot:{username}")
         queue_name = _rsc_escape(f"Expressnet-hotspot-{username}"[:120])
@@ -3399,6 +3419,7 @@ def _access_expiry_scheduler_script(customer, username, service_type, disabled):
 def _customer_secret_script(customer):
     """Generate an .rsc snippet that upserts a single customer into /ppp secret or /ip hotspot user."""
     service_type = customer.get("service_type") or "hotspot"
+    expiry_service_type = service_type
     # Simple queues are bypassed by FastTrack. Keep the agent-side variant
     # short and idempotent so an imported customer command remains parseable
     # on RouterOS 7 while static and fixed-IP PPPoE queues can take effect.
@@ -3592,7 +3613,7 @@ def _customer_secret_script(customer):
                 f'/ip hotspot ip-binding add mac-address="{_rsc_escape(raw_client_mac)}" type=bypassed disabled=no comment="{binding_comment}";',
                 f':do {{ /ip hotspot active remove [find mac-address="{_rsc_escape(raw_client_mac)}"] }} on-error={{}};',
             ])
-    lines.extend(_access_expiry_scheduler_script(customer, raw_username, service_type, disabled))
+    lines.extend(_access_expiry_scheduler_script(customer, raw_username, expiry_service_type, disabled))
     return "\n".join(lines)
 
 
