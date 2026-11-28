@@ -492,15 +492,16 @@ def tenant_payout_details(tenant):
     }
 
 
-def daraja_b2b_utility_shortcode():
-    """Return the Daraja utility account used as PartyA for B2B settlement.
+def daraja_b2b_working_shortcode():
+    """Return the MMF Working Account used as PartyA for tenant payouts.
 
-    Collection shortcodes and MMF working accounts are not settlement sources.
-    Keep the legacy variable as a fallback so existing deployments continue to
-    work until they set the explicit utility-account variable.
+    Customer collections land in the Utility Account.  Business Hub Auto Sweep
+    moves the available balance to the MMF Working Account, which is the
+    account that submits the outbound B2B settlement to a tenant.
+    ``DARAJA_B2B_SHORTCODE`` remains a compatibility fallback.
     """
     return str(
-        os.getenv("DARAJA_B2B_UTILITY_SHORTCODE")
+        os.getenv("DARAJA_B2B_WORKING_SHORTCODE")
         or os.getenv("DARAJA_B2B_SHORTCODE")
         or ""
     ).strip()
@@ -521,13 +522,6 @@ def daraja_b2b_settlement_status(tenant):
             and platform_config.get("daraja_consumer_secret")
         )
         return "withdrawal_ready" if has_b2c_credentials else "missing_b2c_credentials"
-    if payout["settlement_destination_type"] == "bank":
-        # M-PESA Business Hub keeps C2B collections in the Utility Account,
-        # while BusinessPayBill B2B and bank reconciliation use the Working
-        # Account. Do not present a B2B bank payment as a utility-balance
-        # settlement; the operator must configure Withdraw to Bank / Auto
-        # Settlement in Business Hub for the shortcode instead.
-        return "business_hub_bank_settlement_required"
     if payout["settlement_destination_type"] == "till":
         has_destination = bool(payout["daraja_settlement_till_number"])
     else:
@@ -535,7 +529,7 @@ def daraja_b2b_settlement_status(tenant):
     if not has_destination:
         return "missing_b2b_destination"
     has_b2b_credentials = bool(
-        daraja_b2b_utility_shortcode()
+        daraja_b2b_working_shortcode()
         and os.getenv("DARAJA_B2B_INITIATOR_NAME")
         and os.getenv("DARAJA_B2B_SECURITY_CREDENTIAL")
         and _clean_daraja_config(_platform_only_daraja_config()).get("daraja_consumer_key")
@@ -1010,19 +1004,13 @@ def initiate_daraja_b2c(tenant, payment_id, amount, phone, remarks=None, origina
 
 
 def initiate_daraja_b2b_settlement(tenant, payment_id, amount, destination_type, recipient_shortcode, account_number="", remarks=None, originator_id=None):
-    """Send a B2B settlement to a Buy Goods till.
-
-    Bank withdrawals are deliberately excluded. Safaricom's Business Hub
-    debits B2B bank payments from the Working Account; utility-account C2B
-    collections must use the Hub's Withdraw to Bank / Auto Settlement flow.
-    """
+    """Send a B2B settlement from the MMF Working Account to a tenant."""
     tenant_id = (tenant or {}).get("id")
     tenant = tenant_settlement_daraja_config(tenant)
-    # PartyA is the business shortcode that owns the available B2B balance.
-    # Do not substitute a B2C/MMF transfer command for this request: bank
-    # destinations are paid with BusinessPayBill and use AccountReference as
-    # the bank account number.
-    source_shortcode = daraja_b2b_utility_shortcode()
+    # Business Hub Auto Sweep moves collected funds from Utility to the MMF
+    # Working Account.  The Working Account owns the B2B balance and must be
+    # PartyA for both bank Paybill and Buy Goods tenant payouts.
+    source_shortcode = daraja_b2b_working_shortcode()
     initiator = str(os.getenv("DARAJA_B2B_INITIATOR_NAME") or "").strip()
     security_credential = str(os.getenv("DARAJA_B2B_SECURITY_CREDENTIAL") or "").strip()
     recipient_shortcode = "".join(ch for ch in str(recipient_shortcode or "") if ch.isdigit())
@@ -1030,16 +1018,10 @@ def initiate_daraja_b2b_settlement(tenant, payment_id, amount, destination_type,
     destination_type = str(destination_type or "").strip().lower()
     if destination_type not in {"bank", "till"}:
         destination_type = "bank"
-    if destination_type == "bank":
-        raise PaymentProviderError(
-            "Bank settlement must be configured in M-PESA Business Hub.",
-            "BusinessPayBill debits the Working Account. Configure Withdraw to Bank or Auto Settlement in M-PESA Business Hub for Utility Account collections.",
-            409,
-        )
     if not all((source_shortcode, initiator, security_credential, recipient_shortcode)):
         raise PaymentProviderError(
             "B2B settlement is not fully configured.",
-            "B2B requires a sender shortcode, B2B initiator credentials, and a receiving bank Paybill shortcode or Buy Goods till",
+            "B2B requires an MMF Working Account shortcode, B2B initiator credentials, and a receiving bank Paybill shortcode or Buy Goods till",
             503,
         )
     if len(source_shortcode) < 5 or len(source_shortcode) > 10 or len(recipient_shortcode) < 5 or len(recipient_shortcode) > 10:
@@ -1052,12 +1034,18 @@ def initiate_daraja_b2b_settlement(tenant, payment_id, amount, destination_type,
     tenant["daraja_environment"] = os.getenv("DARAJA_B2B_ENVIRONMENT") or os.getenv("DARAJA_ENVIRONMENT") or tenant.get("daraja_environment") or "production"
     token = get_daraja_access_token(tenant, require_stk_credentials=False)
     originator_id = str(originator_id or f"SET{secrets.token_hex(8).upper()}")[:20]
+    is_bank = destination_type == "bank"
+    receiver_identifier_type = (
+        str(os.getenv("DARAJA_B2B_RECEIVER_IDENTIFIER_TYPE") or "4")
+        if is_bank
+        else str(os.getenv("DARAJA_B2B_TILL_IDENTIFIER_TYPE") or "2")
+    )
     payload = {
         "Initiator": initiator,
         "SecurityCredential": security_credential,
-        "CommandID": "BusinessBuyGoods",
+        "CommandID": "BusinessPayBill" if is_bank else "BusinessBuyGoods",
         "SenderIdentifierType": str(os.getenv("DARAJA_B2B_SENDER_IDENTIFIER_TYPE") or "4"),
-        "RecieverIdentifierType": str(os.getenv("DARAJA_B2B_TILL_IDENTIFIER_TYPE") or "2"),
+        "RecieverIdentifierType": receiver_identifier_type,
         "Amount": max(1, int(round(float(amount or 0)))),
         "PartyA": source_shortcode,
         "PartyB": recipient_shortcode,
@@ -1066,6 +1054,10 @@ def initiate_daraja_b2b_settlement(tenant, payment_id, amount, destination_type,
         "ResultURL": f"{base_url}/api/daraja/b2b/result",
         "OriginatorConversationID": originator_id,
     }
+    if is_bank:
+        if not account_reference:
+            raise PaymentProviderError("The bank settlement account number is required.", "Missing bank account number", 400)
+        payload["AccountReference"] = account_reference[:100]
     response = requests.post(
         f"{daraja_base_url(tenant)}/mpesa/b2b/v1/paymentrequest",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},

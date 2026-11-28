@@ -4398,7 +4398,6 @@ def complete_daraja_payment(tenant_id, payment_id, callback_metadata, amount, re
     tenant_settlement_status = settlement_status
     settlement_provider = (
         "daraja_b2c" if destination_type == "phone"
-        else "business_hub_bank" if destination_type == "bank"
         else "daraja_b2b"
     )
     settlement_recipient = (

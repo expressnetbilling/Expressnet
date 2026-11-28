@@ -2405,7 +2405,7 @@ def _upsert_pppoe_simple_queue(api, customer, disabled=False):
     address_list_path = api.path("ip", "firewall", "address-list")
 
     def remove_existing():
-        queue = find_router_item(api, ("queue", "simple"), queue_name)
+        queue = find_router_item(api, ("queue", "simple"),queue_name)
         if queue and queue.get(".id"):
             queue_path.remove(queue[".id"])
         address_item = find_router_item_by_fields(
