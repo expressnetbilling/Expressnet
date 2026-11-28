@@ -39,7 +39,7 @@ python manage.py runradius --settings=billing_saas_django.Settings.production \
 radius_pid=$!
 
 echo "Expressnet RadSec: starting FreeRADIUS TLS listener on TCP $RADIUS_RADSEC_LISTEN_PORT"
-freeradius -f -d /etc/freeradius/3.0 &
+freeradius -f -d /etc/freeradius/3.0 >/tmp/radsec-runtime.log 2>&1 &
 radsec_pid=$!
 
 shutdown() {
@@ -56,8 +56,11 @@ while :; do
     exit 1
   fi
   if ! kill -0 "$radsec_pid" 2>/dev/null; then
-    echo "Expressnet RadSec: FreeRADIUS stopped; restarting service" >&2
-    exit 1
+    radsec_status=1
+    wait "$radsec_pid" || radsec_status=$?
+    echo "Expressnet RadSec: FreeRADIUS stopped (exit $radsec_status); restarting service" >&2
+    tail -n 80 /tmp/radsec-runtime.log >&2
+    exit "$radsec_status"
   fi
   sleep 2
 done
