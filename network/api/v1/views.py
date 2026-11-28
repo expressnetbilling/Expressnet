@@ -5172,7 +5172,7 @@ def router_provision_script(request, token):
         """
 
     radius_client_fields = (
-        ' protocol=radsec certificate=$billingRadSecCert radsec-timeout=5s'
+        ' protocol=radsec certificate=$billingRadSecCert radsec-timeout=3s'
         if radius_config.get("transport") == "radsec"
         else ""
     )
@@ -5185,16 +5185,16 @@ def router_provision_script(request, token):
         f''':local billingRadiusAddress "";
         :do {{ :set billingRadiusAddress [:resolve "{_rsc_escape(radius_config["server_ip"])}"] }} on-error={{ :log error "Expressnet: RadSec endpoint DNS resolution failed" }};
         :if (([:len $billingRadiusAddress] > 0) && ([:len $billingRadSecCert] > 0)) do={{
-            :do {{ /radius add service=ppp,hotspot address=$billingRadiusAddress secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s{radius_client_fields} comment="{radius_comment}" }} on-error={{}};
-            :do {{ /radius set [find comment="{radius_comment}"] service=ppp,hotspot address=$billingRadiusAddress secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s{radius_client_fields} comment="{radius_comment}" }} on-error={{}};
+            :do {{ /radius add service=ppp,hotspot address=$billingRadiusAddress secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=3s{radius_client_fields} comment="{radius_comment}" }} on-error={{}};
+            :do {{ /radius set [find comment="{radius_comment}"] service=ppp,hotspot address=$billingRadiusAddress secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=3s{radius_client_fields} comment="{radius_comment}" }} on-error={{}};
             :if ([:len [/radius find comment="{radius_comment}"]] = 0) do={{ :log error "Expressnet: RadSec client could not be created or updated" }};
         }} else={{ :log error "Expressnet: RadSec client certificate or endpoint address is missing; /radius was left unchanged" }}'''
         if radius_config.get("transport") == "radsec"
         else f''':local billingRadiusAddress "";
         :do {{ :set billingRadiusAddress [:resolve "{_rsc_escape(radius_config["server_ip"])}"] }} on-error={{ :log error "Expressnet: RADIUS endpoint DNS resolution failed" }};
         :if ([:len $billingRadiusAddress] > 0) do={{
-            :do {{ /radius add service=ppp,hotspot address=$billingRadiusAddress secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s comment="{radius_comment}" }} on-error={{}};
-            :do {{ /radius set [find comment="{radius_comment}"] service=ppp,hotspot address=$billingRadiusAddress secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=5s comment="{radius_comment}" }} on-error={{}};
+            :do {{ /radius add service=ppp,hotspot address=$billingRadiusAddress secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=3s comment="{radius_comment}" }} on-error={{}};
+            :do {{ /radius set [find comment="{radius_comment}"] service=ppp,hotspot address=$billingRadiusAddress secret="{_rsc_escape(radius_shared_secret)}" authentication-port={_rsc_escape(radius_config["auth_port"])} accounting-port={_rsc_escape(radius_config["acct_port"])} timeout=3s comment="{radius_comment}" }} on-error={{}};
             :if ([:len [/radius find comment="{radius_comment}"]] = 0) do={{ :log error "Expressnet: RADIUS client could not be created or updated" }};
         }} else={{ :log error "Expressnet: RADIUS endpoint address is missing" }}'''
     )
