@@ -16,10 +16,19 @@ export RADIUS_PROXY_HOST=127.0.0.1
 export RADIUS_PROXY_SHARED_SECRET="${RADIUS_PROXY_SHARED_SECRET:-radsec}"
 export RADIUS_RADSEC_LISTEN_PORT="${RADIUS_RADSEC_LISTEN_PORT:-2083}"
 
+# The package image ships its UDP default and inner-tunnel virtual servers
+# enabled. They would contend with Django's loopback AAA listener on 1812/1813.
+# Only the dedicated TCP/TLS RadSec virtual server belongs in this container.
+rm -f /etc/freeradius/3.0/sites-enabled/default \
+  /etc/freeradius/3.0/sites-enabled/inner-tunnel
+
 echo "Expressnet RadSec: validating FreeRADIUS configuration"
 # Validate before launching the Django child. FreeRADIUS otherwise exits so
 # early that Railway records only a generic restart, hiding the useful error.
-freeradius -XC -d /etc/freeradius/3.0
+if ! freeradius -XC -d /etc/freeradius/3.0 >/tmp/radsec-config-check.log 2>&1; then
+  cat /tmp/radsec-config-check.log >&2
+  exit 1
+fi
 
 echo "Expressnet RadSec: starting Django AAA on 127.0.0.1:1812/1813"
 python manage.py runradius --settings=billing_saas_django.Settings.production \
