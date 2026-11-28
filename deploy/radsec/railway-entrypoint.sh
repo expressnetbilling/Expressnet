@@ -33,10 +33,29 @@ radius_pid=$!
 daphne --bind 0.0.0.0 --port "${PORT:-8000}" billing_saas_django.asgi:application &
 web_pid=$!
 
+freeradius -f -d /etc/freeradius/3.0 &
+radsec_pid=$!
+
 shutdown() {
-  kill "$radius_pid" "$web_pid" 2>/dev/null || true
-  wait "$radius_pid" "$web_pid" 2>/dev/null || true
+  kill "$radius_pid" "$web_pid" "$radsec_pid" 2>/dev/null || true
+  wait "$radius_pid" "$web_pid" "$radsec_pid" 2>/dev/null || true
 }
 trap shutdown INT TERM EXIT
 
-exec freeradius -f -d /etc/freeradius/3.0
+# Do not leave a live TCP listener proxying to a dead Django AAA process (or
+# vice versa). Exiting lets Railway restart the complete, known-good service.
+while :; do
+  if ! kill -0 "$radius_pid" 2>/dev/null; then
+    echo "Django RADIUS process stopped; restarting the Railway service." >&2
+    exit 1
+  fi
+  if ! kill -0 "$web_pid" 2>/dev/null; then
+    echo "Daphne process stopped; restarting the Railway service." >&2
+    exit 1
+  fi
+  if ! kill -0 "$radsec_pid" 2>/dev/null; then
+    echo "FreeRADIUS process stopped; restarting the Railway service." >&2
+    exit 1
+  fi
+  sleep 2
+done
